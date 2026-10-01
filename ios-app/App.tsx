@@ -63,7 +63,7 @@ const DEFAULT_IP    = '100.107.17.113';
 const DEFAULT_PORT  = '5001';
 const TIMEOUT_MS    = 10_000;
 const AUTO_SYNC_SEC = 60;
-const VIGIL_KEY     = 'vigil-api-key'; // Set via environment config
+const VIGIL_KEY     = 'set-your-api-key-here';
 const FALLBACK_URL  = `http://${DEFAULT_IP}:${DEFAULT_PORT}`;
 
 const SK_ONBOARDING = '@vigil_onboarding_v1';
@@ -240,9 +240,9 @@ function readDailyTotal(method:string,opts:object,type:string,unit:string,
 // ─────────────────────────────────────────────
 // ONBOARDING
 // ─────────────────────────────────────────────
-interface OBProps { onComplete:(profile:SavedProfile,serverIp:string,serverPort:string)=>void; }
+interface OBProps { onComplete:(profile:SavedProfile,serverIp:string,serverPort:string)=>void; onDemo?:()=>void; }
 
-function OnboardingScreen({onComplete}:OBProps) {
+function OnboardingScreen({onComplete,onDemo}:OBProps) {
   const [step,setStep]             = useState(0);
   const [residentName,setRN]       = useState('');
   const [dob,setDOB]               = useState('');
@@ -384,6 +384,20 @@ function OnboardingScreen({onComplete}:OBProps) {
               <Text style={{color:C.red,fontSize:12,lineHeight:18}}>
                 Make sure the Jetson is powered on, the VIGIL server is running (sudo systemctl status vigil), and Tailscale is connected on both devices.
               </Text>
+            </View>
+          )}
+          {serverOk===false && !!onDemo && (
+            <View style={{marginTop:14,backgroundColor:C.card,borderRadius:12,
+                          padding:14,borderWidth:1,borderColor:C.border}}>
+              <Text style={{color:C.sub,fontSize:12,lineHeight:18,marginBottom:12}}>
+                No monitoring unit available? Demo Mode shows every feature
+                using sample data, with no hardware required.
+              </Text>
+              <TouchableOpacity onPress={onDemo}
+                style={{backgroundColor:C.green,borderRadius:12,paddingVertical:12,
+                        alignItems:'center'}}>
+                <Text style={{color:'#000',fontWeight:'800',fontSize:15}}>Open Demo Mode</Text>
+              </TouchableOpacity>
             </View>
           )}
         </View>
@@ -557,17 +571,23 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
 }
 
 // ─────────────────────────────────────────────
-// ML INSIGHTS SCREEN
+// AI INSIGHTS SCREEN
 // ─────────────────────────────────────────────
 function PersonDetailScreen({
-  personId, personName, serverUrl, onClose,
-}:{personId:string; personName:string; serverUrl:string; onClose:()=>void}) {
+  personId, personName, serverUrl, onClose, demoMode,
+}:{personId:string; personName:string; serverUrl:string; onClose:()=>void;
+   demoMode?:boolean}) {
   const [trends,setTrends]         = useState<PersonTrendDay[]>([]);
   const [baseline,setBaseline]     = useState<PersonBaselineStatus|null>(null);
   const [weeklyTrend,setWeeklyTrend] = useState<any>(null);
   const [pdLoading,setPdLoading]   = useState(true);
 
   const load = useCallback(async()=>{
+    if(demoMode){
+      setTrends(DEMO_PTRENDS); setBaseline(DEMO_PBASELINE);
+      setWeeklyTrend(DEMO_WEEKLY); setPdLoading(false);
+      return;
+    }
     setPdLoading(true);
     const u = serverUrl||FALLBACK_URL;
     try{
@@ -581,7 +601,7 @@ function PersonDetailScreen({
       if(w.data)setWeeklyTrend(w.data);
     }catch(_){}
     finally{setPdLoading(false);}
-  },[serverUrl,personId]);
+  },[serverUrl,personId,demoMode]);
 
   useEffect(()=>{load();},[load]);
 
@@ -719,101 +739,484 @@ function PersonPhotoCard({personId, serverUrl}:{personId:string; serverUrl:strin
   );
 }
 
-function MLInsightsScreen({serverUrl}:{serverUrl:string}) {
-  const [scores,setScores]     = useState<MLScore[]>([]);
-  const [scoredAt,setScoredAt] = useState<string|null>(null);
-  const [loading,setLoading]   = useState(true);
-  const [error,setError]       = useState<string|null>(null);
+interface InsightItem {
+  metric: string; label: string; unit: string;
+  current: number; baseline_mean: number; baseline_std: number|null;
+  baseline_days: number; delta_pct: number; z_score: number|null;
+  direction: 'up'|'down'; adverse: boolean;
+  severity: 'normal'|'watch'|'attention'; note: string;
+}
+interface ResidentInsights {
+  person_id: string; name: string;
+  status: 'building'|'insufficient_recent'|'ready';
+  days_collected: number; days_needed: number;
+  recent_days: number; recent_samples: number;
+  insights: InsightItem[];
+}
 
-  const load = useCallback(async()=>{
-    setLoading(true);setError(null);
+function AIInsightsScreen({serverUrl,demoMode}:{serverUrl:string;demoMode?:boolean}) {
+  const [residents,setResidents] = useState<ResidentInsights[]>([]);
+  const [disclaimer,setDisclaimer] = useState<string>('');
+  const [genAt,setGenAt]     = useState<string|null>(null);
+  const [loading,setLoading] = useState(true);
+  const [refreshing,setRefreshing] = useState(false);
+  const [error,setError]     = useState<string|null>(null);
+  const [face,setFace]       = useState<any>(null);
+  const [sig,setSig]         = useState<any>(null);
+  const [rout,setRout]       = useState<any>(null);
+  const [pat,setPat]         = useState<any>(null);
+
+  const load = useCallback(async(quiet?:boolean)=>{
+    if(demoMode){
+      setResidents(DEMO_INSIGHTS.residents as any);
+      setDisclaimer(DEMO_INSIGHTS.disclaimer);
+      setGenAt(DEMO_INSIGHTS.generated_at);
+      setSig(DEMO_SIGNALS); setFace(DEMO_FACE); setRout(DEMO_ROUTINE); setPat(DEMO_PATTERNS);
+      setLoading(false); setRefreshing(false); setError(null);
+      return;
+    }
+    if(!quiet) setLoading(true);
+    setError(null);
     try{
-      const r=await AX.get(`${serverUrl||FALLBACK_URL}/ml/scores/latest`,{timeout:8000});
-      setScores(r.data?.scores??[]);setScoredAt(r.data?.scored_at??null);
-    }catch(e:any){setError(e?.message??'Request failed');}
-    finally{setLoading(false);}
-  },[serverUrl]);
+      const r = await AX.get(`${serverUrl||FALLBACK_URL}/insights/latest`,{timeout:8000});
+      setResidents(r.data?.residents ?? []);
+      setDisclaimer(r.data?.disclaimer ?? '');
+      setGenAt(r.data?.generated_at ?? null);
+      try{
+        const f = await AX.get(`${serverUrl||FALLBACK_URL}/face/latest`,{timeout:6000});
+        setFace(f.data ?? null);
+      }catch(_e){ setFace(null); }   // optional: absence must not break insights
+      try{
+        const s = await AX.get(`${serverUrl||FALLBACK_URL}/signals/latest`,{timeout:6000});
+        setSig(s.data ?? null);
+      }catch(_e){ setSig(null); }
+      try{
+        const rt = await AX.get(`${serverUrl||FALLBACK_URL}/routine/latest`,{timeout:6000});
+        setRout(rt.data ?? null);
+      }catch(_e){ setRout(null); }
+      try{
+        const pt = await AX.get(`${serverUrl||FALLBACK_URL}/patterns/latest`,{timeout:6000});
+        setPat(pt.data ?? null);
+      }catch(_e){ setPat(null); }
+    }catch(e:any){ setError(e?.message ?? 'Request failed'); }
+    finally{ setLoading(false); setRefreshing(false); }
+  },[serverUrl,demoMode]);
 
   useEffect(()=>{load();},[load]);
+  const onRefresh = useCallback(()=>{ setRefreshing(true); load(true); },[load]);
 
-  const lc=(s:number)=>s>=70?C.red:s>=50?C.orange:C.green;
-  const ll=(s:number)=>s>=70?'HIGH':s>=50?'ELEVATED':'LOW';
-  const high=scores.filter(s=>s.score_0_100>=70&&!s.insufficient_data).length;
-  const elev=scores.filter(s=>s.score_0_100>=50&&s.score_0_100<70&&!s.insufficient_data).length;
-  const low=scores.filter(s=>s.score_0_100<50&&!s.insufficient_data).length;
+  const sevColor = (s:string)=> s==='attention'?C.red : s==='watch'?C.orange : C.green;
+  const sevLabel = (s:string)=> s==='attention'?'ATTENTION' : s==='watch'?'WATCH' : 'NORMAL';
 
-  if(loading)return<View style={{flex:1,alignItems:'center',justifyContent:'center',backgroundColor:C.bg}}><ActivityIndicator color={C.green} size="large"/><Text style={{color:C.sub,marginTop:12}}>Loading ML scores...</Text></View>;
-  if(error)return(
+  if(loading) return (
+    <View style={{flex:1,alignItems:'center',justifyContent:'center',backgroundColor:C.bg}}>
+      <ActivityIndicator color={C.green} size="large"/>
+      <Text style={{color:C.sub,marginTop:12}}>Loading insights...</Text>
+    </View>
+  );
+
+  if(error) return (
     <View style={{flex:1,alignItems:'center',justifyContent:'center',backgroundColor:C.bg,padding:32}}>
       <Text style={{color:C.text,fontSize:18,fontWeight:'700',marginBottom:8}}>Cannot reach server</Text>
       <Text style={{color:C.sub,fontSize:13,textAlign:'center',marginBottom:16}}>{error}</Text>
-      <TouchableOpacity style={{backgroundColor:C.blue,paddingHorizontal:24,paddingVertical:12,borderRadius:12}} onPress={load}>
+      <TouchableOpacity style={{backgroundColor:C.blue,paddingHorizontal:24,paddingVertical:12,borderRadius:12}} onPress={()=>load()}>
         <Text style={{color:'#fff',fontWeight:'700',fontSize:14}}>Retry</Text>
       </TouchableOpacity>
     </View>
   );
 
-  return(
-    <ScrollView style={{flex:1,backgroundColor:C.bg}} showsVerticalScrollIndicator={false}>
+  return (
+    <ScrollView
+      style={{flex:1,backgroundColor:C.bg}}
+      showsVerticalScrollIndicator={false}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>}>
+
       <View style={{paddingHorizontal:20,paddingTop:20,paddingBottom:12}}>
-        <Text style={{color:C.text,fontSize:34,fontWeight:'800'}}>ML Insights</Text>
-        <Text style={{color:C.sub,fontSize:14,marginTop:2}}>Trained on clinical datasets · {scores[0]?.days_of_data??0} days of data</Text>
-      </View>
-      <View style={{marginHorizontal:16,marginBottom:8,backgroundColor:C.card,borderRadius:12,borderWidth:1,borderColor:C.fill,padding:14}}>
-        <Text style={{color:C.orange,fontSize:11,fontWeight:'700',letterSpacing:0.5,marginBottom:6,textTransform:'uppercase'}}>For Wellness Monitoring Only</Text>
-        <Text style={{color:C.sub,fontSize:12,lineHeight:18}}>
-          These scores identify patterns that may warrant clinical follow-up. They are not medical diagnoses and are not a substitute for professional medical evaluation.
+        <Text style={{color:C.text,fontSize:34,fontWeight:'800'}}>AI Insights</Text>
+        <Text style={{color:C.sub,fontSize:14,marginTop:2}}>
+          Measured against each resident's own baseline
         </Text>
       </View>
-      {scores.length>0&&(
-        <View style={{marginHorizontal:16,marginBottom:8,backgroundColor:C.card,borderRadius:16,padding:16,flexDirection:'row'}}>
-          {[['HIGH',high,C.red],['ELEVATED',elev,C.orange],['LOW',low,C.green]].map(([l,n,c])=>(
-            <View key={l as string} style={{flex:1,alignItems:'center'}}>
-              <Text style={{color:c as string,fontSize:28,fontWeight:'800'}}>{String(n)}</Text>
-              <Text style={{color:C.sub,fontSize:11,marginTop:2}}>{l as string}</Text>
-            </View>
-          ))}
-        </View>
-      )}
-      {scoredAt&&<Text style={{color:C.muted,fontSize:11,textAlign:'center',marginBottom:12}}>{'Last scored: '+timeAgo(scoredAt)}</Text>}
-      {scores.length===0&&(
+
+      {residents.length===0 && (
         <View style={{alignItems:'center',padding:32}}>
-          <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>No scores yet</Text>
-          <Text style={{color:C.sub,fontSize:13,marginTop:6}}>Run: python3 nightly_ml_classifier.py</Text>
-          <TouchableOpacity style={{backgroundColor:C.blue,paddingHorizontal:20,paddingVertical:10,borderRadius:12,marginTop:16}} onPress={load}>
-            <Text style={{color:'#fff',fontWeight:'700'}}>Refresh</Text>
-          </TouchableOpacity>
+          <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>No residents yet</Text>
+          <Text style={{color:C.sub,fontSize:13,marginTop:6,textAlign:'center'}}>
+            Identify a resident from the camera view to start building insights.
+          </Text>
         </View>
       )}
-      {scores.map(score=>{
-        if(score.insufficient_data)return(
-          <View key={score.condition_id} style={{marginHorizontal:16,marginBottom:8,backgroundColor:C.card,borderRadius:14,padding:14,borderLeftWidth:3,borderLeftColor:C.muted}}>
-            <Text style={{color:C.text,fontSize:14,fontWeight:'600'}}>{score.condition_label}</Text>
-            <Text style={{color:C.muted,fontSize:12,marginTop:4}}>Awaiting sensor data</Text>
-          </View>
-        );
-        const sc=score.score_0_100; const col=lc(sc); const lbl=ll(sc);
-        return(
-          <View key={score.condition_id} style={{marginHorizontal:16,marginBottom:8,backgroundColor:C.card,borderRadius:14,padding:14,borderLeftWidth:3,borderLeftColor:col}}>
-            <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'flex-start'}}>
-              <Text style={{color:C.text,fontSize:14,fontWeight:'600',flex:1,marginRight:8}}>{score.condition_label}</Text>
-              <View style={{alignItems:'flex-end'}}>
-                <Text style={{color:col,fontSize:24,fontWeight:'800'}}>{String(Math.round(sc))}</Text>
-                <Text style={{color:col,fontSize:10,fontWeight:'700',marginTop:1}}>{lbl}</Text>
+
+      {residents.map(res=>{
+        const attention = res.insights.filter(i=>i.severity==='attention').length;
+        const watch     = res.insights.filter(i=>i.severity==='watch').length;
+        const normal    = res.insights.filter(i=>i.severity==='normal').length;
+        const pct = Math.max(0, Math.min(100, (res.days_collected/Math.max(1,res.days_needed))*100));
+
+        return (
+          <View key={res.person_id} style={{marginBottom:18}}>
+            <Text style={{color:C.text,fontSize:18,fontWeight:'700',marginHorizontal:20,marginBottom:8}}>
+              {res.name}
+            </Text>
+
+            {res.status==='building' && (
+              <View style={{marginHorizontal:16,backgroundColor:C.card,borderRadius:16,padding:18}}>
+                <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Building baseline</Text>
+                <Text style={{color:C.sub,fontSize:13,marginTop:6,lineHeight:19}}>
+                  VIGIL learns {res.name}'s normal walking pattern before it can flag
+                  meaningful change. {res.days_collected} of {res.days_needed} days collected.
+                </Text>
+                <View style={{height:8,backgroundColor:C.fill,borderRadius:4,marginTop:14,overflow:'hidden'}}>
+                  <View style={{height:8,width:`${pct}%`,backgroundColor:C.green,borderRadius:4}}/>
+                </View>
+                <Text style={{color:C.muted,fontSize:11,marginTop:8}}>
+                  {res.recent_samples} readings in the last {res.recent_days} days
+                </Text>
               </View>
-            </View>
-            <View style={{height:3,backgroundColor:C.fill,borderRadius:2,marginTop:10}}>
-              <View style={{height:3,width:(Math.min(100,Math.max(0,sc))+'%') as any,backgroundColor:col,borderRadius:2}}/>
-            </View>
-            <View style={{flexDirection:'row',gap:12,marginTop:8}}>
-              <Text style={{color:C.muted,fontSize:10}}>{'AUC '+score.published_auc.toFixed(2)}</Text>
-              <Text style={{color:C.muted,fontSize:10}}>{String(Math.round(score.data_quality*100))+'% data'}</Text>
-              <Text style={{color:C.muted,fontSize:10}}>{String(score.days_of_data)+' days'}</Text>
-            </View>
+            )}
+
+            {res.status==='insufficient_recent' && (
+              <View style={{marginHorizontal:16,backgroundColor:C.card,borderRadius:16,padding:18}}>
+                <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Not enough recent activity</Text>
+                <Text style={{color:C.sub,fontSize:13,marginTop:6,lineHeight:19}}>
+                  A baseline exists, but only {res.recent_samples} readings were recorded in the
+                  last {res.recent_days} days. Insights resume once {res.name} is seen walking again.
+                </Text>
+              </View>
+            )}
+
+            {res.status==='ready' && (
+              <>
+                <View style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:16,padding:16,flexDirection:'row'}}>
+                  {[['ATTENTION',attention,C.red],['WATCH',watch,C.orange],['NORMAL',normal,C.green]].map(([l,n,c])=>(
+                    <View key={l as string} style={{flex:1,alignItems:'center'}}>
+                      <Text style={{color:c as string,fontSize:28,fontWeight:'800'}}>{String(n)}</Text>
+                      <Text style={{color:C.sub,fontSize:11,marginTop:2}}>{l as string}</Text>
+                    </View>
+                  ))}
+                </View>
+
+                {res.insights.map(it=>{
+                  const col = sevColor(it.severity);
+                  const arrow = it.direction==='up' ? '\u2191' : '\u2193';
+                  return (
+                    <View key={it.metric} style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,
+                                                  borderRadius:16,padding:16,borderLeftWidth:3,borderLeftColor:col}}>
+                      <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
+                        <Text style={{color:C.text,fontSize:15,fontWeight:'700',flex:1,marginRight:8}}>{it.label}</Text>
+                        <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
+                                      paddingHorizontal:8,paddingVertical:3,borderRadius:8}}>
+                          <Text style={{color:col,fontSize:10,fontWeight:'800',letterSpacing:0.5}}>
+                            {sevLabel(it.severity)}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <Text style={{color:C.text,fontSize:28,fontWeight:'800',marginTop:8,
+                                    fontVariant:['tabular-nums']}}>
+                        {it.current}<Text style={{color:C.sub,fontSize:15,fontWeight:'600'}}> {it.unit}</Text>
+                      </Text>
+
+                      <Text style={{color:C.sub,fontSize:13,marginTop:4}}>
+                        {arrow} {Math.abs(it.delta_pct)}% vs baseline {it.baseline_mean} {it.unit}
+                      </Text>
+                      {it.z_score!==null && (
+                        <Text style={{color:C.muted,fontSize:11,marginTop:3}}>
+                          {Math.abs(it.z_score)} SD {it.direction==='up'?'above':'below'} normal
+                          {it.baseline_days?` \u00b7 ${it.baseline_days}-day baseline`:''}
+                        </Text>
+                      )}
+
+                      <View style={{height:1,backgroundColor:C.border,marginVertical:12}}/>
+                      <Text style={{color:C.sub,fontSize:12,lineHeight:18}}>{it.note}</Text>
+                    </View>
+                  );
+                })}
+              </>
+            )}
           </View>
         );
       })}
-      <View style={{height:40}}/>
+
+      {!!pat && Array.isArray(pat.hourly) && pat.hourly.length===24 && (
+        <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:16,padding:16}}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Activity Pattern</Text>
+          <Text style={{color:C.sub,fontSize:12,marginTop:4,marginBottom:14}}>
+            When {pat.days_of_history?`${pat.days_of_history} days of history show`:'this resident is'} activity, hour by hour
+          </Text>
+
+          {(()=>{
+            const peak = Math.max(1, ...pat.hourly.map((h:any)=>Math.max(h.avg_minutes,h.today_minutes)));
+            return (
+              <View style={{flexDirection:'row',alignItems:'flex-end',height:84,gap:2}}>
+                {pat.hourly.map((h:any)=>{
+                  const night = h.hour>=22||h.hour<6;
+                  const ah = Math.max(2,(h.avg_minutes/peak)*72);
+                  const th = Math.max(0,(h.today_minutes/peak)*72);
+                  return (
+                    <View key={h.hour} style={{flex:1,alignItems:'center',justifyContent:'flex-end',height:84}}>
+                      <View style={{width:'100%',height:ah,backgroundColor:night?C.blue+'44':C.fill,
+                                    borderRadius:2,justifyContent:'flex-end'}}>
+                        {th>0&&(
+                          <View style={{width:'100%',height:Math.min(th,ah),
+                                        backgroundColor:night?C.orange:C.green,borderRadius:2}}/>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            );
+          })()}
+
+          <View style={{flexDirection:'row',justifyContent:'space-between',marginTop:6}}>
+            {['12a','6a','12p','6p','11p'].map(l=>(
+              <Text key={l} style={{color:C.muted,fontSize:10}}>{l}</Text>
+            ))}
+          </View>
+
+          <View style={{flexDirection:'row',gap:14,marginTop:10,alignItems:'center'}}>
+            <View style={{flexDirection:'row',alignItems:'center',gap:5}}>
+              <View style={{width:9,height:9,borderRadius:2,backgroundColor:C.fill}}/>
+              <Text style={{color:C.muted,fontSize:11}}>usual</Text>
+            </View>
+            <View style={{flexDirection:'row',alignItems:'center',gap:5}}>
+              <View style={{width:9,height:9,borderRadius:2,backgroundColor:C.green}}/>
+              <Text style={{color:C.muted,fontSize:11}}>today</Text>
+            </View>
+            <View style={{flexDirection:'row',alignItems:'center',gap:5}}>
+              <View style={{width:9,height:9,borderRadius:2,backgroundColor:C.blue+'44'}}/>
+              <Text style={{color:C.muted,fontSize:11}}>night hours</Text>
+            </View>
+          </View>
+
+          {pat.night_minutes_today>pat.night_minutes_avg*2&&pat.night_minutes_today>10&&(
+            <View style={{marginTop:14,backgroundColor:C.orange+'18',borderRadius:10,padding:12}}>
+              <Text style={{color:C.orange,fontSize:12,fontWeight:'700',marginBottom:3}}>
+                More night movement than usual
+              </Text>
+              <Text style={{color:C.sub,fontSize:12,lineHeight:18}}>
+                {Math.round(pat.night_minutes_today)} minutes active between 10pm and 6am,
+                against a usual {Math.round(pat.night_minutes_avg)}. Falls often happen
+                getting out of bed at night.
+              </Text>
+            </View>
+          )}
+
+          {Array.isArray(pat.anomalies)&&pat.anomalies.length>0&&(
+            <View style={{marginTop:14}}>
+              <Text style={{color:C.sub,fontSize:11,fontWeight:'700',letterSpacing:0.5,
+                            textTransform:'uppercase',marginBottom:8}}>Unusual days</Text>
+              {pat.anomalies.slice(0,4).map((a:any)=>(
+                <View key={a.date} style={{flexDirection:'row',justifyContent:'space-between',
+                                           paddingVertical:5}}>
+                  <Text style={{color:C.text,fontSize:13}}>{a.date}</Text>
+                  <Text style={{color:a.score>=90?C.orange:C.sub,fontSize:13,
+                                fontWeight:'600',fontVariant:['tabular-nums']}}>
+                    {a.score}
+                  </Text>
+                </View>
+              ))}
+              <Text style={{color:C.muted,fontSize:11,lineHeight:16,marginTop:8}}>
+                {pat.method}
+              </Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {!!rout && Array.isArray(rout.items) && rout.items.length>0 && (
+        <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:16,padding:16}}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700',marginBottom:6}}>Daily Routine</Text>
+          <Text style={{color:rout.flagged_count>=2?C.orange:C.sub,fontSize:13,lineHeight:19,marginBottom:14}}>
+            {rout.summary}
+          </Text>
+
+          {rout.items.map((it:any)=>{
+            if(it.status!=='ready'){
+              return (
+                <View key={it.label} style={{marginBottom:12,paddingBottom:12,
+                                             borderBottomWidth:1,borderBottomColor:C.border}}>
+                  <Text style={{color:C.muted,fontSize:14,fontWeight:'600'}}>{it.label}</Text>
+                  <Text style={{color:C.muted,fontSize:11,marginTop:4}}>
+                    Learning this pattern \u2014 {it.days_of_history} of {it.days_needed} days
+                  </Text>
+                </View>
+              );
+            }
+            const low = it.stability==='low';
+            const col = it.severity==='attention'?C.red:it.severity==='watch'?C.orange:C.sub;
+            const shown = it.current_text ?? it.current;
+            const base  = it.baseline_text ?? it.baseline;
+            return (
+              <View key={it.label} style={{marginBottom:12,paddingBottom:12,
+                                           borderBottomWidth:1,borderBottomColor:C.border}}>
+                <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
+                  <Text style={{color:low?C.muted:C.text,fontSize:14,fontWeight:'600',flex:1,marginRight:8}}>
+                    {it.label}
+                  </Text>
+                  {it.severity!=='normal'&&(
+                    <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
+                                  paddingHorizontal:8,paddingVertical:2,borderRadius:7}}>
+                      <Text style={{color:col,fontSize:9,fontWeight:'800',letterSpacing:0.5}}>
+                        {it.severity==='attention'?'ATTENTION':'WATCH'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                <Text style={{color:low?C.muted:C.text,fontSize:20,fontWeight:'700',marginTop:4,
+                              fontVariant:['tabular-nums']}}>
+                  {shown}
+                  {!it.current_text&&<Text style={{color:C.sub,fontSize:13,fontWeight:'600'}}> {it.unit}</Text>}
+                </Text>
+
+                <Text style={{color:C.sub,fontSize:12,marginTop:2}}>
+                  usually {base}{it.current_text?'':` ${it.unit}`}
+                  {it.days_of_history?` \u00b7 ${it.days_of_history} days`:''}
+                </Text>
+
+                {low && (
+                  <Text style={{color:C.muted,fontSize:11,marginTop:4}}>
+                    Varies too much day to day to flag reliably
+                  </Text>
+                )}
+                {!low && it.severity!=='normal' && (
+                  <Text style={{color:C.sub,fontSize:12,lineHeight:18,marginTop:8}}>{it.note}</Text>
+                )}
+              </View>
+            );
+          })}
+
+          {!!rout.disclaimer && (
+            <Text style={{color:C.muted,fontSize:11,lineHeight:16}}>{rout.disclaimer}</Text>
+          )}
+        </View>
+      )}
+
+      {!!sig && Array.isArray(sig.signals) && sig.signals.length>0 && (
+        <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:16,padding:16}}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700',marginBottom:6}}>Health Signals</Text>
+          <Text style={{color:sig.flagged_count>=2?C.orange:C.sub,fontSize:13,lineHeight:19,marginBottom:14}}>
+            {sig.summary}
+          </Text>
+
+          {sig.signals.map((s:any)=>{
+            const low = s.baseline_stability==='low';
+            const col = s.severity==='attention'?C.red:s.severity==='watch'?C.orange:C.sub;
+            const arrow = s.direction==='up'?'\u2191':'\u2193';
+            return (
+              <View key={s.metric} style={{marginBottom:12,paddingBottom:12,
+                                           borderBottomWidth:1,borderBottomColor:C.border}}>
+                <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
+                  <Text style={{color:low?C.muted:C.text,fontSize:14,fontWeight:'600',flex:1,marginRight:8}}>
+                    {s.label}
+                  </Text>
+                  {s.severity!=='normal'&&(
+                    <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
+                                  paddingHorizontal:8,paddingVertical:2,borderRadius:7}}>
+                      <Text style={{color:col,fontSize:9,fontWeight:'800',letterSpacing:0.5}}>
+                        {s.severity==='attention'?'ATTENTION':'WATCH'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                <Text style={{color:low?C.muted:C.text,fontSize:20,fontWeight:'700',marginTop:4,
+                              fontVariant:['tabular-nums']}}>
+                  {s.current}<Text style={{color:C.sub,fontSize:13,fontWeight:'600'}}> {s.unit}</Text>
+                </Text>
+
+                <Text style={{color:C.sub,fontSize:12,marginTop:2}}>
+                  {arrow} {Math.abs(s.delta_pct)}% vs {s.baseline_mean} {s.unit} norm
+                  {s.baseline_days?` \u00b7 ${s.baseline_days} days`:''}
+                </Text>
+
+                {low && (
+                  <Text style={{color:C.muted,fontSize:11,marginTop:4}}>
+                    Limited history — this measure varies too much day to day to flag reliably
+                  </Text>
+                )}
+                {!low && s.severity!=='normal' && (
+                  <Text style={{color:C.sub,fontSize:12,lineHeight:18,marginTop:8}}>{s.note}</Text>
+                )}
+              </View>
+            );
+          })}
+
+          {!!sig.disclaimer && (
+            <Text style={{color:C.muted,fontSize:11,lineHeight:16,marginTop:2}}>
+              {sig.disclaimer}
+            </Text>
+          )}
+        </View>
+      )}
+
+      {!!sig && sig.status!=='ready' && (
+        <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:16,padding:16}}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Health Signals</Text>
+          <Text style={{color:C.sub,fontSize:13,marginTop:6,lineHeight:19}}>
+            Collecting daily history. Physiological measures need about 10 days
+            before a personal norm can be established.
+          </Text>
+        </View>
+      )}
+
+      {!!face && (
+        <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:16,padding:16}}>
+          <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+            <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Facial Cues</Text>
+            <View style={{backgroundColor:C.blue+'22',borderColor:C.blue+'55',borderWidth:1,
+                          paddingHorizontal:8,paddingVertical:3,borderRadius:8}}>
+              <Text style={{color:C.blue,fontSize:10,fontWeight:'800',letterSpacing:0.5}}>EXPERIMENTAL</Text>
+            </View>
+          </View>
+
+          <View style={{flexDirection:'row'}}>
+            <View style={{flex:1}}>
+              <Text style={{color:C.text,fontSize:28,fontWeight:'800',fontVariant:['tabular-nums']}}>
+                {face.yawns_today ?? 0}
+              </Text>
+              <Text style={{color:C.sub,fontSize:12,marginTop:2}}>Yawns today</Text>
+            </View>
+            <View style={{flex:1}}>
+              <Text style={{color:C.text,fontSize:28,fontWeight:'800',fontVariant:['tabular-nums']}}>
+                {face.perclos_1h_avg!=null?`${Math.round(face.perclos_1h_avg*100)}%`:'--'}
+              </Text>
+              <Text style={{color:C.sub,fontSize:12,marginTop:2}}>Eyes closed, last hour</Text>
+            </View>
+          </View>
+
+          <View style={{height:1,backgroundColor:C.border,marginVertical:12}}/>
+          <Text style={{color:C.sub,fontSize:12,lineHeight:18}}>
+            Yawn frequency and eye-closure time are established fatigue indicators.
+            VIGIL is still collecting enough history to compare these against this
+            resident's own norm, so treat single readings as observations rather
+            than conclusions.
+          </Text>
+          {face.perclos_samples!=null&&(
+            <Text style={{color:C.muted,fontSize:11,marginTop:8}}>
+              {face.perclos_samples} eye-closure samples in the last hour
+            </Text>
+          )}
+        </View>
+      )}
+
+      {!!disclaimer && (
+        <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:12,
+                      borderWidth:1,borderColor:C.fill,padding:14}}>
+          <Text style={{color:C.orange,fontSize:11,fontWeight:'700',letterSpacing:0.5,
+                        marginBottom:6,textTransform:'uppercase'}}>Wellness Monitoring Only</Text>
+          <Text style={{color:C.sub,fontSize:12,lineHeight:18}}>{disclaimer}</Text>
+        </View>
+      )}
+
+      {genAt && (
+        <Text style={{color:C.muted,fontSize:11,textAlign:'center',marginBottom:24}}>
+          {'Updated '+timeAgo(genAt)}
+        </Text>
+      )}
+      <View style={{height:24}}/>
     </ScrollView>
   );
 }
@@ -821,11 +1224,225 @@ function MLInsightsScreen({serverUrl}:{serverUrl:string}) {
 // ─────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// DEMO MODE
+// Apple requires a fully-featured demo mode when an app depends on
+// hardware a reviewer does not have. Values below mirror this system's
+// real measured output so the demo is representative, not invented.
+// ─────────────────────────────────────────────
+const DEMO_RESIDENT = 'Margaret (Demo Resident)';
+
+function demoDate(back:number):string{
+  const d=new Date(); d.setDate(d.getDate()-back);
+  return d.toISOString().slice(0,10);
+}
+function demoIso(hoursAgo:number):string{
+  return new Date(Date.now()-hoursAgo*3600*1000).toISOString();
+}
+
+
+// Person detail demo data. The final days drift downward on purpose so
+// the detail screen shows the kind of change VIGIL exists to surface.
+const DEMO_PTRENDS:PersonTrendDay[] = Array.from({length:14},(_,i):PersonTrendDay=>{
+  const drift = i>=10 ? (i-9)*0.035 : 0;
+  const w=(n:number,a:number)=>+(n+((i%3)-1)*a).toFixed(2);
+  return {
+    date: demoDate(13-i),
+    avg_speed: +(w(1.14,0.04)-drift).toFixed(2),
+    avg_cadence: +(w(95.7,2.6)-drift*40).toFixed(1),
+    avg_posture: w(43.7,3.2),
+    avg_asymmetry: +(w(4.6,0.6)+drift*8).toFixed(1),
+    samples: Math.round(w(180,25)),
+  };
+});
+
+const DEMO_PBASELINE:PersonBaselineStatus = {
+  person_id:'demo_1', has_baseline:true, days_collected:14, days_needed:7,
+  baseline:{
+    avg_speed:{mean:1.131,std:0.06},
+    avg_cadence:{mean:95.66,std:3.37},
+    avg_posture:{mean:43.68,std:13.45},
+    avg_asymmetry:{mean:4.62,std:0.71},
+  },
+};
+
+const DEMO_WEEKLY = {
+  this_week:{avg_speed:1.04,avg_cadence:91.8,avg_posture:42.1,avg_asymmetry:5.8},
+  last_week:{avg_speed:1.15,avg_cadence:96.4,avg_posture:44.2,avg_asymmetry:4.5},
+  change_pct:{avg_speed:-9.6,avg_cadence:-4.8,avg_posture:-4.8,avg_asymmetry:28.9},
+};
+
+const DEMO_TODAY:DailySummary = {
+  date: demoDate(0), step_count: 3820, hrv_sdnn: 38.4, resting_hr: 74,
+  sleep_hours: 6.4, active_calories: 210, spo2_avg: 96.8,
+  walking_asymmetry_pct: 5.4, walking_speed_ms: 1.04,
+  camera_gait_speed_ms: 1.01, camera_cadence_spm: 90.2,
+  camera_asymmetry_pct: 6.1, posture_score: 41.8,
+  active_minutes: 168, still_minutes: 430, activity_level_pct: 28.1,
+  longest_stillness_min: 61, camera_data_points: 1840, anomaly_flag: 1,
+};
+
+const DEMO_HISTORY:DailySummary[] = Array.from({length:14},(_,i):DailySummary=>{
+  const w=(n:number,a:number)=>+(n+((i%3)-1)*a).toFixed(2);
+  return {
+    date: demoDate(13-i),
+    step_count: Math.round(w(4300,420)),
+    hrv_sdnn: w(41,3.1), resting_hr: Math.round(w(68,2)),
+    sleep_hours: w(7.1,0.5), active_calories: Math.round(w(240,30)),
+    spo2_avg: w(97.2,0.4), walking_asymmetry_pct: w(3.8,0.6),
+    walking_speed_ms: w(1.14,0.05), camera_gait_speed_ms: w(1.13,0.05),
+    camera_cadence_spm: w(95.7,3.2), camera_asymmetry_pct: w(4.6,0.7),
+    posture_score: w(43.7,4.0), active_minutes: Math.round(w(214,26)),
+    still_minutes: Math.round(w(372,40)), activity_level_pct: w(36.5,5),
+    longest_stillness_min: Math.round(w(42,9)),
+    camera_data_points: Math.round(w(2100,300)), anomaly_flag: 0,
+  };
+});
+
+const DEMO_ALERTS:AlertEntry[] = [
+  { id:2, alert_type:'fall', detected_at:demoIso(3), created_at:demoIso(3), seen:0,
+    payload:{hip_drop_pct:1.0,torso_angle:78.4,aspect:3.08,
+             message:'Fall detected by camera',resident_name:DEMO_RESIDENT} },
+  { id:1, alert_type:'health_signal', detected_at:demoIso(26), created_at:demoIso(26), seen:1,
+    payload:{metric:'avg_speed',
+             message:'Walking speed 11% below 14-day baseline'} },
+];
+
+const DEMO_PERSONS:Person[] = [
+  { id:'demo_1', name:DEMO_RESIDENT, room_id:'room_1', is_resident:1,
+    height_px:742.3, confidence:0.92, frames_seen:18420,
+    first_seen_at:demoIso(24*14), last_seen_at:demoIso(0.2) },
+];
+
+const DEMO_CAMERA:CameraStatus = {
+  online:true, fps:11.6, person_present:true, person_count:1,
+  last_seen_minutes_ago:0, camera_mode:'live',
+};
+
+const DEMO_ROOMS:Room[] = [
+  { id:'room_1', name:'Room 1', resident_name:DEMO_RESIDENT,
+    emergency_phone:'+1 (555) 010-0000', camera_online:true,
+    person_present:true, person_count:1, fps:11.6 },
+];
+
+const DEMO_INSIGHTS = {
+  generated_at:new Date().toISOString(),
+  residents:[{
+    person_id:'demo_1', name:DEMO_RESIDENT, status:'ready',
+    days_collected:14, days_needed:7, recent_days:3, recent_samples:1620,
+    insights:[
+      { metric:'avg_speed', label:'Walking Speed', unit:'m/s', current:1.01,
+        baseline_mean:1.131, baseline_std:0.06, baseline_days:14,
+        delta_pct:-10.7, z_score:-2.02, direction:'down', adverse:true,
+        severity:'attention',
+        note:"Walking speed is a widely used functional measure in older adults. "+
+             "A sustained decline relative to a person's own norm is associated "+
+             "with increased fall risk." },
+      { metric:'avg_cadence', label:'Cadence', unit:'steps/min', current:90.2,
+        baseline_mean:95.66, baseline_std:3.37, baseline_days:14,
+        delta_pct:-5.7, z_score:-1.62, direction:'down', adverse:true,
+        severity:'watch',
+        note:"Cadence below a person's own norm can accompany fatigue, pain, "+
+             "or reduced walking confidence." },
+      { metric:'avg_posture', label:'Posture Score', unit:'/100', current:41.8,
+        baseline_mean:43.68, baseline_std:13.45, baseline_days:14,
+        delta_pct:-4.3, z_score:-0.14, direction:'down', adverse:true,
+        severity:'normal',
+        note:"Lower scores reflect greater trunk lean or shoulder asymmetry." },
+    ],
+    convergence:{ adverse_count:3, total_metrics:3, attention:1, watch:1,
+      summary:"Multiple signals have moved away from this person's normal at "+
+              "the same time. Convergence across several measures is more "+
+              "meaningful than any one reading." },
+  }],
+  disclaimer:"VIGIL reports measured changes against each resident's own "+
+             "baseline. It does not diagnose conditions and is not a medical device.",
+};
+
+const DEMO_SIGNALS = {
+  status:'ready', generated_at:new Date().toISOString(),
+  baseline_days:21, recent_days:3, flagged_count:2,
+  summary:'2 signals have moved away from normal at the same time. '+
+          'Convergence across several measures is more meaningful than any '+
+          'single reading.',
+  signals:[
+    { metric:'resting_hr', label:'Resting Heart Rate', unit:'bpm', current:74.0,
+      baseline_mean:68.2, baseline_std:2.1, baseline_days:18, baseline_cv:0.03,
+      baseline_stability:'ok', delta_pct:8.5, z_score:2.76, direction:'up',
+      adverse:true, severity:'attention',
+      note:"A resting heart rate above a person's own norm can accompany "+
+           "infection, dehydration, pain or poor sleep. It often rises before "+
+           "other symptoms appear." },
+    { metric:'sleep_hours', label:'Sleep', unit:'hours', current:6.4,
+      baseline_mean:7.14, baseline_std:0.42, baseline_days:18, baseline_cv:0.06,
+      baseline_stability:'ok', delta_pct:-10.4, z_score:-1.76, direction:'down',
+      adverse:true, severity:'watch',
+      note:"Reduced sleep can accompany pain, anxiety, breathing difficulty "+
+           "or illness." },
+    { metric:'spo2_avg', label:'Blood Oxygen', unit:'%', current:96.8,
+      baseline_mean:97.2, baseline_std:0.38, baseline_days:18, baseline_cv:0.00,
+      baseline_stability:'ok', delta_pct:-0.4, z_score:-1.05, direction:'down',
+      adverse:true, severity:'normal',
+      note:"A sustained fall in blood oxygen saturation can indicate "+
+           "respiratory compromise." },
+  ],
+  disclaimer:"These are deviations from this resident's own recent norm, not "+
+             "diagnoses. VIGIL does not identify medical conditions and is not "+
+             "a medical device.",
+};
+
+const DEMO_PATTERNS = {
+  generated_at:new Date().toISOString(), days_of_history:21, days_scored:78,
+  busiest_hours:[9,14,19], night_minutes_avg:4.2, night_minutes_today:31.5,
+  hourly:[0,0,0,0,0,2,14,38,52,61,44,33,29,41,58,47,35,40,56,62,38,19,6,1]
+    .map((v,h)=>({hour:h, avg_minutes:v,
+                  today_minutes: h>=0&&h<6 ? (h===2?12:h===3?19:0) : Math.max(0,v-8),
+                  days_with_activity: v>0?21:0})),
+  anomalies:[{date:'2026-09-26',score:88.4},{date:'2026-09-19',score:74.1}],
+  method:"Unusual days are identified by an isolation forest trained only on "+
+         "this resident's own daily history.",
+  disclaimer:"An unusual day is an observation, not a diagnosis. It indicates "+
+             "the day differed from this resident's pattern, not why.",
+};
+
+const DEMO_ROUTINE = {
+  status:'ready', generated_at:new Date().toISOString(), flagged_count:1,
+  summary:'Night Activity is outside its usual range.',
+  items:[
+    { label:'Morning Start', status:'ready', unit:'minutes after midnight',
+      current:498, baseline:432, spread:28, stability:'ok', spread_ratio:0.06,
+      current_text:'08:18', baseline_text:'07:12', days_of_history:21,
+      z_score:2.36, severity:'watch',
+      note:'A later start than usual can reflect poor sleep, pain, low mood or illness. It is one of the earliest observable changes in daily routine.' },
+    { label:'Night Activity', status:'ready', unit:'episodes',
+      current:4, baseline:1, spread:1, stability:'ok', spread_ratio:1.0,
+      days_of_history:21, z_score:3.0, severity:'attention',
+      note:'Movement between 22:00 and 06:00. This matters for safety: many falls happen getting out of bed at night. More night waking than usual can also accompany a urinary issue, a medication side effect, or disturbed sleep.' },
+    { label:'Night Time Active', status:'ready', unit:'minutes',
+      current:38, baseline:12, spread:6, stability:'ok', spread_ratio:0.5,
+      days_of_history:21, z_score:4.3, severity:'attention',
+      note:'Total time moving overnight. Separates one long episode from several brief ones.' },
+    { label:'Longest Daytime Absence', status:'ready', unit:'minutes',
+      current:42, baseline:38, spread:14, stability:'ok', spread_ratio:0.37,
+      days_of_history:21, z_score:0.29, severity:'normal',
+      note:'Time away from the monitored room during the day.' },
+  ],
+  disclaimer:"Routine changes are observations about this resident's own pattern, not diagnoses.",
+};
+
+const DEMO_FACE = {
+  yawns_today:4, perclos_1h_avg:0.118, perclos_1h_max:0.21,
+  perclos_samples:54, recent:[],
+  disclaimer:'Facial cues are wellness signals, not a diagnosis.',
+};
+
 export default function App() {
 
   // ── Boot state ──
   const [booting,setBooting]           = useState(true);
   const [showOnboarding,setOnboarding] = useState(false);
+  const [demoMode,setDemoMode]         = useState(false);
 
   // ── Connection ──
   const [initialized,setInitialized]   = useState(false);
@@ -854,6 +1471,48 @@ export default function App() {
   const [showPersonModal,setShowPersonModal] = useState(false);
   const [pendingPersonAlert,setPendingPersonAlert] = useState<PersonAlert|null>(null);
   const [namingPersonId,setNamingPersonId]   = useState<string|null>(null);
+
+  // Demo Mode: populate every screen from canned data and stop all polling.
+  // No request is issued at all, so there is nothing to time out or fail.
+  const enterDemo = useCallback(()=>{
+    setDemoMode(true);
+    setToday(DEMO_TODAY);
+    setHistory(DEMO_HISTORY);
+    setAlerts(DEMO_ALERTS);
+    setPersons(DEMO_PERSONS);
+    setCameraStatus(DEMO_CAMERA);
+    setRooms(DEMO_ROOMS);
+    setPersonAlerts([]);
+    setCameraFrame(null);
+  },[]);
+
+  const exitDemo = useCallback(()=>{
+    setDemoMode(false);
+    setToday(null); setHistory([]); setAlerts([]);
+    setPersons([]); setCameraStatus(null); setRooms([]);
+  },[]);
+
+  // Fold a duplicate detection into someone already known. Identity
+  // fragments when a person is briefly seen, seen at an unusual distance,
+  // or partly occluded; the caregiver can resolve it in one tap.
+  const mergePerson = useCallback(async(sourceId:string,targetId:string,alertId?:number)=>{
+    const u = urlRef.current||FALLBACK_URL;
+    try{
+      await AX.post(`${u}/persons/${sourceId}/merge`,
+        {target_person_id:targetId},{timeout:8000});
+      if(alertId!=null){
+        try{ await AX.post(`${u}/persons/alerts/${alertId}/resolve`,{},{timeout:6000}); }
+        catch(_e){}
+      }
+      setShowPersonModal(false); setPendingPersonAlert(null); setNamingPersonId(null);
+      fetchPersons();
+    }catch(e:any){
+      log('ERROR',`Merge failed: ${e?.message??String(e)}`);
+    }
+    // fetchPersons and log are declared further down the component. Naming
+    // them here would read them in the temporal dead zone. Both are stable
+    // useCallback values, so the body resolves them correctly at call time.
+  },[]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [newPersonName,setNewPersonName]     = useState('');
   const [isResidentFlag,setIsResidentFlag]   = useState(false);
   const [selectedPerson,setSelectedPerson]   = useState<Person|null>(null);
@@ -1035,9 +1694,16 @@ export default function App() {
   },[fetchPersons,fetchPersonAlerts,log]);
 
   const acknowledgeAlert=useCallback(async(id:number)=>{
-    try{await AX.post(`${url()}/alerts/ack`,{id});}catch(_){}
-    setAlerts(p=>p.map(a=>a.id===id?{...a,seen:1}:a));
-  },[]);
+    // Only mark it seen if the server confirms. The previous version
+    // swallowed every error and marked it acknowledged regardless, so the
+    // button appeared to work for two months while nothing was recorded.
+    try{
+      await AX.post(`${url()}/alerts/ack`,{id, acknowledged_by:'Caregiver'});
+      setAlerts(p=>p.map(a=>a.id===id?{...a,seen:1}:a));
+    }catch(e:any){
+      log('ERROR',`Could not acknowledge alert ${id}: ${e?.message??String(e)}`);
+    }
+  },[log]);
 
   const loadConfig=useCallback(async()=>{
     try{
@@ -1082,10 +1748,10 @@ export default function App() {
   // ─────────────────────────────────────────────
   // SERVER POLLING EFFECTS
   // ─────────────────────────────────────────────
-  useEffect(()=>{if(!booting&&!showOnboarding)setTimeout(()=>pingJetson(),1500);},[booting,showOnboarding,pingJetson]);
+  useEffect(()=>{if(!booting&&!showOnboarding&&!demoMode)setTimeout(()=>pingJetson(),1500);},[booting,showOnboarding,demoMode,pingJetson]);
 
   useEffect(()=>{
-    if(!initialized||jetsonOk!==true)return;
+    if(!initialized||jetsonOk!==true||demoMode)return;
     fetchDashboard();fetchAlerts();loadConfig();fetchRooms();
     setCountdown(AUTO_SYNC_SEC);
     cntTimer.current=setInterval(()=>setCountdown(p=>p<=1?AUTO_SYNC_SEC:p-1),1000);
@@ -1094,26 +1760,26 @@ export default function App() {
     return()=>{if(autoTimer.current)clearInterval(autoTimer.current);if(cntTimer.current)clearInterval(cntTimer.current);};
   },[initialized,jetsonOk]); // eslint-disable-line
 
-  useEffect(()=>{if(!jetsonOk)return;fetchCameraStatus();const id=setInterval(fetchCameraStatus,10000);return()=>clearInterval(id);},[jetsonOk,fetchCameraStatus]);
-  useEffect(()=>{if(!jetsonOk)return;fetchCameraSnapshot();const id=setInterval(fetchCameraSnapshot,2500);return()=>clearInterval(id);},[jetsonOk,fetchCameraSnapshot]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchCameraStatus();const id=setInterval(fetchCameraStatus,10000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchCameraStatus]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchCameraSnapshot();const id=setInterval(fetchCameraSnapshot,2500);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchCameraSnapshot]);
   // Camera-derived metrics (gait speed / cadence / posture) refresh every 4s so they
   // visibly move while someone is walking in frame — the 60s HealthKit auto-sync
   // (above) is far too slow for this to feel live during a walk-test or demo.
-  useEffect(()=>{if(!jetsonOk)return;fetchDashboard();const id=setInterval(fetchDashboard,4000);return()=>clearInterval(id);},[jetsonOk,fetchDashboard]);
-  useEffect(()=>{if(!jetsonOk)return;const id=setInterval(fetchRooms,15000);return()=>clearInterval(id);},[jetsonOk,fetchRooms]);
-  useEffect(()=>{if(!jetsonOk)return;fetchPersons();const id=setInterval(fetchPersons,20000);return()=>clearInterval(id);},[jetsonOk,fetchPersons]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchDashboard();const id=setInterval(fetchDashboard,4000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchDashboard]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;const id=setInterval(fetchRooms,15000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchRooms]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchPersons();const id=setInterval(fetchPersons,20000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchPersons]);
   // Tightened from 30s -> 6s: this is the "more than one person detected" identification
   // sheet — for a live demo this needs to feel near-instant when a second person walks in.
-  useEffect(()=>{if(!jetsonOk)return;fetchPersonAlerts();const id=setInterval(fetchPersonAlerts,6000);return()=>clearInterval(id);},[jetsonOk,fetchPersonAlerts]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchPersonAlerts();const id=setInterval(fetchPersonAlerts,6000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchPersonAlerts]);
   // Tightened from 15s -> 5s: fall/stillness alerts should reach the UI almost as fast
   // as the SMS itself arrives, not lag up to 15s behind it.
-  useEffect(()=>{if(!jetsonOk)return;const id=setInterval(fetchAlerts,5000);return()=>clearInterval(id);},[jetsonOk,fetchAlerts]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;const id=setInterval(fetchAlerts,5000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchAlerts]);
 
   // ─────────────────────────────────────────────
   // HEALTHKIT SYNC
   // ─────────────────────────────────────────────
   const performSync=useCallback(async(silent=false)=>{
-    if(syncInFlight.current||!initialized||jetsonOk!==true)return;
+    if(syncInFlight.current||!initialized||jetsonOk!==true||demoMode)return;
     syncInFlight.current=true;setSyncing(true);
     const tr=todayRange();const rr=rollingRange(168);
     try{
@@ -1200,8 +1866,14 @@ export default function App() {
           </>
         ):(
           <View style={{flex:1,alignItems:'center',justifyContent:'center',gap:6}}>
-            <Text style={{color:C.muted,fontSize:14}}>Live View Unavailable</Text>
-            <Text style={{color:C.muted,fontSize:11}}>{cameraStatus?.online?'Camera starting...':'Camera offline'}</Text>
+            <Text style={{color:C.muted,fontSize:14}}>
+              {demoMode?'Live View \u2014 Demo':'Live View Unavailable'}
+            </Text>
+            <Text style={{color:C.muted,fontSize:11,textAlign:'center',paddingHorizontal:28,lineHeight:16}}>
+              {demoMode
+                ?'Live video needs the VIGIL camera unit. Everything else on this screen is sample data.'
+                :(cameraStatus?.online?'Camera starting...':'Camera offline')}
+            </Text>
           </View>
         )}
       </View>
@@ -1226,6 +1898,24 @@ export default function App() {
         {jetsonOk===true&&<View style={s.pill}><View style={[s.pillDot,{backgroundColor:syncing?C.orange:C.green}]}/><Text style={s.pillTxt}>{syncing?'Syncing':`${countdown}s`}</Text></View>}
         {cameraStatus?.online&&<View style={s.pill}><View style={[s.pillDot,{backgroundColor:C.green}]}/><Text style={s.pillTxt}>{String(cameraStatus.fps?.toFixed(0)??'?')} fps</Text></View>}
       </View>
+
+      {/* Demo entry: the only path an App Store reviewer has, since they
+          have no Jetson, no camera and no VPN. */}
+      {!demoMode&&jetsonOk===false&&(
+        <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,
+                      borderRadius:16,padding:16,borderWidth:1,borderColor:C.border}}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>No monitoring unit connected</Text>
+          <Text style={{color:C.sub,fontSize:13,lineHeight:19,marginTop:6}}>
+            VIGIL needs its camera unit on the same network. To see how the app
+            works without hardware, open Demo Mode.
+          </Text>
+          <TouchableOpacity onPress={enterDemo}
+            style={{backgroundColor:C.green,borderRadius:12,paddingVertical:12,
+                    alignItems:'center',marginTop:14}}>
+            <Text style={{color:'#000',fontWeight:'800',fontSize:15}}>Open Demo Mode</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Room switcher */}
       {rooms.length>1&&(
@@ -1748,7 +2438,7 @@ export default function App() {
 
   if(showOnboarding){
     return(
-      <OnboardingScreen onComplete={(profile,ip,port)=>{
+      <OnboardingScreen onDemo={()=>{setOnboarding(false);enterDemo();}} onComplete={(profile,ip,port)=>{
         setResidentName(profile.residentName);setResidentHeight(profile.residentHeight);
         setEmergencyPhone(profile.emergencyPhone);setEmergencyEmail(profile.emergencyEmail);
         setWatchEnabled(profile.watchEnabled);
@@ -1766,7 +2456,7 @@ export default function App() {
     ['today','Today','⊙'],
     ['trends','Trends','↗'],
     ['alerts','Alerts','⚑'],
-    ['insights','ML','◈'],
+    ['insights','AI','◈'],
     ['settings','Settings','⋯'],
   ];
 
@@ -1850,6 +2540,23 @@ export default function App() {
                         onPress={()=>identifyPerson(pid,'Visitor',false,pendingPersonAlert?.id)}>
                         <Text style={{color:C.sub,fontWeight:'600',fontSize:13}}>Mark as Visitor</Text>
                       </TouchableOpacity>
+                      {persons.filter(p=>p.name&&p.name!=='Visitor'&&p.id!==pid).length>0&&(
+                        <View style={{width:'100%',marginTop:6}}>
+                          <Text style={{color:C.muted,fontSize:11,marginBottom:8}}>
+                            Or add to someone VIGIL already knows
+                          </Text>
+                          <View style={{flexDirection:'row',gap:8,flexWrap:'wrap'}}>
+                            {persons.filter(p=>p.name&&p.name!=='Visitor'&&p.id!==pid).map(p=>(
+                              <TouchableOpacity key={p.id}
+                                onPress={()=>mergePerson(pid,p.id,pendingPersonAlert?.id)}
+                                style={{backgroundColor:C.card,paddingHorizontal:12,paddingVertical:8,
+                                        borderRadius:10,borderWidth:1,borderColor:C.border}}>
+                                <Text style={{color:C.text,fontSize:13,fontWeight:'600'}}>{p.name}</Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+                      )}
                     </View>
                   )}
                 </View>
@@ -1866,7 +2573,7 @@ export default function App() {
       {/* Person detail screen */}
       <Modal visible={!!selectedPerson} animationType="slide" presentationStyle="fullScreen">
         {selectedPerson&&(
-          <PersonDetailScreen
+          <PersonDetailScreen demoMode={demoMode}
             personId={selectedPerson.id}
             personName={selectedPerson.name??'Unidentified Person'}
             serverUrl={urlRef.current}
@@ -1877,10 +2584,24 @@ export default function App() {
 
       {/* Main app */}
       <View style={{flex:1}}>
+        {demoMode&&(
+          <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',
+                        backgroundColor:C.orange+'22',borderBottomWidth:1,
+                        borderBottomColor:C.orange+'55',paddingHorizontal:16,paddingVertical:8}}>
+            <Text style={{color:C.orange,fontSize:11,fontWeight:'700',flex:1,letterSpacing:0.3}}>
+              DEMO MODE — sample data, not a live system
+            </Text>
+            <TouchableOpacity onPress={exitDemo}
+              style={{paddingHorizontal:10,paddingVertical:4,borderRadius:8,
+                      borderWidth:1,borderColor:C.orange+'77'}}>
+              <Text style={{color:C.orange,fontSize:11,fontWeight:'700'}}>Exit</Text>
+            </TouchableOpacity>
+          </View>
+        )}
         {activeTab==='today'&&renderToday()}
         {activeTab==='trends'&&renderTrends()}
         {activeTab==='alerts'&&renderAlerts()}
-        {activeTab==='insights'&&<MLInsightsScreen serverUrl={urlRef.current}/>}
+        {activeTab==='insights'&&<AIInsightsScreen serverUrl={urlRef.current} demoMode={demoMode}/>}
         {activeTab==='settings'&&renderSettings()}
       </View>
 

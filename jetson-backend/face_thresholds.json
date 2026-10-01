@@ -1,0 +1,11 @@
+{
+  "_measured": "face_calibrate_v2, 90% detection, room distance",
+  "yawn_jaw_open": 0.307,
+  "yawn_min_consecutive": 4,
+  "yawn_cooldown_s": 30,
+  "eye_closed_blink": 0.512,
+  "perclos_window_s": 60,
+  "perclos_report_s": 60,
+  "face_image": "/dev/shm/vigil_face.jpg",
+  "server": "http://127.0.0.1:5001"
+}

@@ -18,7 +18,7 @@ VIGIL Server.py v6 - Camera-First, Complete
 # Data retention: Per BAA with facility. Default: data retained while
 # monitoring is active. Deletion on facility request.
 # ─────────────────────────────────────────────────────────────────────────────
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 import sqlite3, os, json, math, shutil, tempfile
 from datetime import datetime, timedelta
 from functools import wraps
@@ -727,6 +727,30 @@ def camera_snapshot():
             return jsonify({"frame": None, "available": False})
         return jsonify({"frame": _latest_frame_b64, "available": True})
 
+@app.route("/camera/stream")
+@require_api_key
+def camera_stream():
+    """MJPEG live stream sourced from the latest annotated frame written to
+    tmpfs by activity_monitor.py. Replaces snapshot polling with a real feed."""
+    def generate():
+        last_mtime = 0
+        while True:
+            try:
+                st = os.stat('/dev/shm/vigil_latest.jpg')
+                if st.st_mtime != last_mtime:
+                    last_mtime = st.st_mtime
+                    with open('/dev/shm/vigil_latest.jpg', 'rb') as f:
+                        frame = f.read()
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n'
+                           b'Content-Length: ' + str(len(frame)).encode() +
+                           b'\r\n\r\n' + frame + b'\r\n')
+            except FileNotFoundError:
+                pass
+            time.sleep(0.05)   # cap at ~20 fps
+    return Response(generate(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
 @app.route("/camera/snapshot/post", methods=["POST"])
 @require_api_key
 def camera_snapshot_post():
@@ -1031,7 +1055,7 @@ def person_detections_history(person_id):
 
 
 
-MAX_PHOTO_B64_BYTES = 2 * 1024 * 1024  # ~1.5MB decoded image
+MAX_PHOTO_B64_BYTES = 200 * 1024  # head-crop identification photos are small; reject anything larger
 
 @app.route("/persons/<person_id>/photo", methods=["POST"])
 @require_api_key
@@ -1043,7 +1067,18 @@ def save_person_photo(person_id):
     if len(photo) > MAX_PHOTO_B64_BYTES:
         return jsonify({"status": "error", "reason": "photo too large"}), 400
     conn = get_db()
-    conn.execute("UPDATE persons SET photo_b64=? WHERE id=?", (photo, person_id))
+    # The photo can arrive before /persons/detect has created the row (photo
+    # capture is attempted every frame, independent of the 60s metadata
+    # report cycle), so upsert rather than assume the row already exists.
+    existing = conn.execute("SELECT id FROM persons WHERE id=?", (person_id,)).fetchone()
+    if existing:
+        conn.execute("UPDATE persons SET photo_b64=? WHERE id=?", (photo, person_id))
+    else:
+        now = datetime.now().isoformat()
+        conn.execute(
+            "INSERT INTO persons (id, photo_b64, first_seen_at, last_seen_at) VALUES (?,?,?,?)",
+            (person_id, photo, now, now),
+        )
     conn.commit()
     conn.close()
     return jsonify({"status": "ok"})
@@ -1094,7 +1129,802 @@ def person_weekly_trend(person_id):
     })
 
 
+
+# ---------------------------------------------------------------------------
+# AI Insights -- computed from validated measurements against each resident's
+# own baseline. Replaces the synthetic-data condition scores at
+# /ml/scores/latest, which emitted floor probabilities for every condition.
+# ---------------------------------------------------------------------------
+
+
+# Published population cut points for gait speed. Cited, not trained.
+# Reported alongside -- never instead of -- the person's own baseline.
+GAIT_SPEED_REFERENCE = {
+    "wfg_cut_point": 0.8,
+    "community_cut_point": 1.0,
+    "source": "World Falls Guidelines cut point (<0.8 m/s); <1.0 m/s "
+              "identifies more fallers in community-dwelling and clinical "
+              "populations (individual participant data meta-analysis, "
+              "28 studies).",
+    "limitation": "Gait speed alone has low discriminative accuracy for "
+                  "falls. No single gait or balance measure predicts fall "
+                  "risk with high certainty in isolation; it should be "
+                  "read alongside other factors.",
+}
+
+
+def _gait_reference(value):
+    """Where a measured speed sits against published cut points."""
+    if value is None:
+        return None
+    if value < GAIT_SPEED_REFERENCE["wfg_cut_point"]:
+        band = "below_0.8"
+        text = "Below the 0.8 m/s cut point used in the World Falls Guidelines."
+    elif value < GAIT_SPEED_REFERENCE["community_cut_point"]:
+        band = "below_1.0"
+        text = ("Between 0.8 and 1.0 m/s. The 1.0 m/s cut point identifies "
+                "more fallers in community-dwelling populations.")
+    else:
+        band = "above_1.0"
+        text = "At or above 1.0 m/s, the range associated with independent mobility."
+    return {
+        "band": band,
+        "text": text,
+        "wfg_cut_point": GAIT_SPEED_REFERENCE["wfg_cut_point"],
+        "community_cut_point": GAIT_SPEED_REFERENCE["community_cut_point"],
+        "source": GAIT_SPEED_REFERENCE["source"],
+        "limitation": GAIT_SPEED_REFERENCE["limitation"],
+    }
+
+INSIGHT_RECENT_DAYS = 3
+INSIGHT_MIN_SAMPLES = 20
+
+INSIGHT_META = {
+    "avg_speed": ("Walking Speed", "m/s", False,
+                  "Walking speed is a widely used functional measure in older "
+                  "adults. A sustained decline relative to a person's own norm "
+                  "is associated with increased fall risk."),
+    "avg_cadence": ("Cadence", "steps/min", False,
+                    "Cadence below a person's own norm can accompany fatigue, "
+                    "pain, or reduced walking confidence."),
+    "avg_posture": ("Posture Score", "/100", False,
+                    "Lower scores reflect greater trunk lean or shoulder "
+                    "asymmetry, which are associated with balance difficulty."),
+    "avg_asymmetry": ("Gait Asymmetry", "%", True,
+                      "Greater left-right asymmetry is associated with "
+                      "musculoskeletal pain or one-sided weakness."),
+}
+
+
+def _insight_severity(z):
+    if z is None:
+        return "normal"
+    a = abs(z)
+    if a >= 2.0:
+        return "attention"
+    if a >= 1.5:
+        return "watch"
+    return "normal"
+
+
+@app.route("/insights/latest")
+@require_api_key
+def insights_latest():
+    try:
+        conn = get_db()
+        recent_cut = (datetime.now() - timedelta(days=INSIGHT_RECENT_DAYS)).strftime("%Y-%m-%d")
+        residents = conn.execute(
+            "SELECT id, name FROM persons WHERE name IS NOT NULL AND name != ''"
+        ).fetchall()
+
+        out = []
+        for p in residents:
+            pid, pname = p["id"], p["name"]
+
+            base = {}
+            for b in conn.execute(
+                    "SELECT metric, mean_val, std_val, days_used "
+                    "FROM person_baselines WHERE person_id=?", (pid,)):
+                base[b["metric"]] = (b["mean_val"], b["std_val"], b["days_used"])
+
+            cur = conn.execute("""
+                SELECT AVG(NULLIF(gait_speed_ms,0)) as avg_speed,
+                       AVG(NULLIF(cadence_spm,0))   as avg_cadence,
+                       AVG(posture_score)           as avg_posture,
+                       AVG(asymmetry_pct)           as avg_asymmetry,
+                       COUNT(*)                     as samples
+                FROM person_detections
+                WHERE person_id=? AND detected_at >= ?
+            """, (pid, recent_cut)).fetchone()
+
+            days_have = conn.execute(
+                "SELECT COUNT(DISTINCT date(detected_at)) FROM person_detections "
+                "WHERE person_id=?", (pid,)).fetchone()[0]
+
+            items = []
+            for metric, (label, unit, worse_up, note) in INSIGHT_META.items():
+                cval = cur[metric] if cur else None
+                if cval is None or metric not in base:
+                    continue
+                mean, std, days_used = base[metric]
+                if mean in (None, 0):
+                    continue
+                delta_pct = (cval - mean) / mean * 100.0
+                z = ((cval - mean) / std) if (std and std > 0) else None
+                direction = "up" if cval > mean else "down"
+                adverse = (direction == "up") if worse_up else (direction == "down")
+                items.append({
+                    "metric": metric,
+                    "label": label,
+                    "unit": unit,
+                    "current": round(float(cval), 3),
+                    "baseline_mean": round(float(mean), 3),
+                    "baseline_std": round(float(std), 3) if std else None,
+                    "baseline_days": days_used,
+                    "delta_pct": round(delta_pct, 1),
+                    "z_score": round(z, 2) if z is not None else None,
+                    "direction": direction,
+                    "adverse": bool(adverse),
+                    "severity": _insight_severity(z) if adverse else "normal",
+                    "note": note,
+                    "reference": _gait_reference(cval) if metric == "avg_speed" else None,
+                })
+
+            items.sort(key=lambda i: abs(i["z_score"]) if i["z_score"] is not None else 0,
+                       reverse=True)
+
+            samples = cur["samples"] if cur else 0
+            if not base:
+                status = "building"
+            elif samples < INSIGHT_MIN_SAMPLES:
+                status = "insufficient_recent"
+            else:
+                status = "ready"
+
+            out.append({
+                "person_id": pid,
+                "name": pname,
+                "status": status,
+                "days_collected": days_have,
+                "days_needed": 7,
+                "recent_days": INSIGHT_RECENT_DAYS,
+                "recent_samples": samples,
+                "insights": items,
+                "convergence": {
+                    "adverse_count": sum(1 for i in items if i["adverse"]),
+                    "total_metrics": len(items),
+                    "attention": sum(1 for i in items if i["severity"] == "attention"),
+                    "watch": sum(1 for i in items if i["severity"] == "watch"),
+                    "summary": (
+                        "Multiple signals have moved away from this person's "
+                        "normal at the same time. Convergence across several "
+                        "measures is more meaningful than any one reading."
+                        if sum(1 for i in items if i["adverse"]
+                               and i["severity"] != "normal") >= 2
+                        else "No convergent change across measures."),
+                },
+            })
+
+        conn.close()
+        return jsonify({
+            "generated_at": datetime.now().isoformat(),
+            "residents": out,
+            "disclaimer": "VIGIL reports measured changes against each "
+                          "resident's own baseline. It does not diagnose "
+                          "conditions and is not a medical device.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Facial cues. Thresholds were measured on this camera at room distance
+# (face_calibrate_v2): jawOpen separated yawning 0.479 from talking 0.112,
+# eyeBlink separated closed 0.795 from open 0.230.
+# ---------------------------------------------------------------------------
+
+def _ensure_face_table(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS face_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        person_id TEXT,
+        event_type TEXT NOT NULL,
+        value REAL,
+        room_id TEXT DEFAULT 'room_1',
+        detected_at TEXT DEFAULT (datetime('now','localtime'))
+    )""")
+
+
+@app.route("/face/event", methods=["POST"])
+@require_api_key
+def face_event():
+    try:
+        d = request.get_json() or {}
+        et = d.get("event_type")
+        if et not in ("yawn", "perclos"):
+            return jsonify({"error": "bad event_type"}), 400
+        conn = get_db()
+        _ensure_face_table(conn)
+        row = conn.execute(
+            "SELECT resident_person_id FROM config").fetchone()
+        pid = row["resident_person_id"] if row else None
+        conn.execute("INSERT INTO face_events (person_id, event_type, value) "
+                     "VALUES (?,?,?)", (pid, et, d.get("value")))
+        if et == "perclos":
+            conn.execute("DELETE FROM face_events WHERE event_type='perclos' "
+                         "AND detected_at < datetime('now','localtime','-3 days')")
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/face/latest")
+@require_api_key
+def face_latest():
+    try:
+        conn = get_db()
+        _ensure_face_table(conn)
+        today = datetime.now().strftime("%Y-%m-%d")
+        yawns = conn.execute(
+            "SELECT COUNT(*) FROM face_events WHERE event_type='yawn' "
+            "AND date(detected_at)=?", (today,)).fetchone()[0]
+        p = conn.execute(
+            "SELECT AVG(value), MAX(value), COUNT(*) FROM face_events "
+            "WHERE event_type='perclos' AND detected_at > "
+            "datetime('now','localtime','-1 hour')").fetchone()
+        recent = conn.execute(
+            "SELECT event_type, value, detected_at FROM face_events "
+            "ORDER BY id DESC LIMIT 20").fetchall()
+        conn.close()
+        return jsonify({
+            "yawns_today": yawns,
+            "perclos_1h_avg": round(p[0], 3) if p and p[0] is not None else None,
+            "perclos_1h_max": round(p[1], 3) if p and p[1] is not None else None,
+            "perclos_samples": p[2] if p else 0,
+            "recent": [dict(r) for r in recent],
+            "disclaimer": "Facial cues are wellness signals, not a diagnosis.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Health signals: deviation from each resident's own recent norm across
+# physiological and activity measures. Associations, never diagnoses.
+# ---------------------------------------------------------------------------
+
+SIGNAL_BASELINE_DAYS = 21
+SIGNAL_RECENT_DAYS = 3
+SIGNAL_MIN_BASELINE = 10
+SIGNAL_MAX_CV = 0.60   # std/|mean| above this = no usable norm
+
+# column: (label, unit, adverse_direction, note)
+SIGNAL_METRICS = {
+    "resting_hr": ("Resting Heart Rate", "bpm", "up",
+                   "A resting heart rate above a person's own norm can accompany "
+                   "infection, dehydration, pain or poor sleep. It often rises "
+                   "before other symptoms appear."),
+    "hrv_sdnn": ("Heart Rate Variability", "ms", "down",
+                 "Reduced heart rate variability relative to normal is a general "
+                 "marker of physiological stress or strain."),
+    "spo2_avg": ("Blood Oxygen", "%", "down",
+                 "A sustained fall in blood oxygen saturation can indicate "
+                 "respiratory compromise and warrants clinical attention."),
+    "respiratory_rate": ("Respiratory Rate", "breaths/min", "up",
+                         "An elevated respiratory rate is among the earliest "
+                         "measurable signs of respiratory illness."),
+    "wrist_temp": ("Skin Temperature", "\u00b0C", "up",
+                   "Elevated skin temperature relative to a person's norm can "
+                   "accompany fever or infection."),
+    "sleep_hours": ("Sleep", "hours", "down",
+                    "Reduced sleep can accompany pain, anxiety, breathing "
+                    "difficulty or illness."),
+    "step_count": ("Daily Steps", "steps", "down",
+                   "A drop in daily activity is among the earliest observable "
+                   "signs of illness, pain or low mood in older adults."),
+    "activity_level_pct": ("Activity Level", "%", "down",
+                           "Reduced time active during the day, measured by "
+                           "camera, can reflect fatigue, pain or unwellness."),
+    "longest_stillness_min": ("Longest Stillness", "min", "up",
+                              "Longer uninterrupted stillness can reflect "
+                              "reduced mobility or a change in wellbeing."),
+}
+
+
+def _signal_severity(z):
+    if z is None:
+        return "normal"
+    a = abs(z)
+    if a >= 2.0:
+        return "attention"
+    if a >= 1.5:
+        return "watch"
+    return "normal"
+
+
+@app.route("/signals/latest")
+@require_api_key
+def signals_latest():
+    try:
+        import statistics as _st
+        conn = get_db()
+        cols = list(SIGNAL_METRICS.keys())
+        rows = conn.execute(
+            "SELECT date, %s FROM daily_summary ORDER BY date DESC LIMIT ?"
+            % ",".join(cols), (SIGNAL_BASELINE_DAYS + SIGNAL_RECENT_DAYS,)).fetchall()
+        conn.close()
+
+        if not rows:
+            return jsonify({"status": "no_data", "signals": [],
+                            "disclaimer": "No daily summaries recorded yet."})
+
+        recent_rows = rows[:SIGNAL_RECENT_DAYS]
+        base_rows = rows[SIGNAL_RECENT_DAYS:]
+
+        signals = []
+        for col in cols:
+            label, unit, adverse_dir, note = SIGNAL_METRICS[col]
+            base_vals = [r[col] for r in base_rows if r[col] is not None]
+            recent_vals = [r[col] for r in recent_rows if r[col] is not None]
+            if len(base_vals) < SIGNAL_MIN_BASELINE or not recent_vals:
+                continue
+            mean = sum(base_vals) / len(base_vals)
+            try:
+                std = _st.stdev(base_vals)
+            except Exception:
+                std = 0.0
+            cur = sum(recent_vals) / len(recent_vals)
+            if mean == 0:
+                continue
+            delta_pct = (cur - mean) / abs(mean) * 100.0
+            z = ((cur - mean) / std) if std > 0 else None
+            direction = "up" if cur > mean else "down"
+            adverse = (direction == adverse_dir)
+            cv = (std / abs(mean)) if mean else 999.0
+            stable = cv <= SIGNAL_MAX_CV
+            signals.append({
+                "baseline_stability": "ok" if stable else "low",
+                "baseline_cv": round(cv, 2),
+                "metric": col,
+                "label": label,
+                "unit": unit,
+                "current": round(float(cur), 2),
+                "baseline_mean": round(float(mean), 2),
+                "baseline_std": round(float(std), 2),
+                "baseline_days": len(base_vals),
+                "delta_pct": round(delta_pct, 1),
+                "z_score": round(z, 2) if z is not None else None,
+                "direction": direction,
+                "adverse": bool(adverse),
+                # A metric whose own baseline swings more than 60% of its
+                # mean has no usable norm; report the number, do not alarm.
+                "severity": (_signal_severity(z) if (adverse and stable) else "normal"),
+                "note": note,
+            })
+
+        signals.sort(key=lambda s: abs(s["z_score"]) if s["z_score"] is not None else 0,
+                     reverse=True)
+        flagged = [s for s in signals if s["adverse"] and s["severity"] != "normal"]
+
+        if not signals:
+            summary = ("Not enough history yet. Signals need about %d days of "
+                       "daily summaries before a norm can be established."
+                       % SIGNAL_MIN_BASELINE)
+        elif len(flagged) >= 2:
+            summary = ("%d signals have moved away from normal at the same time. "
+                       "Convergence across several measures is more meaningful "
+                       "than any single reading." % len(flagged))
+        elif len(flagged) == 1:
+            summary = ("One signal is outside its usual range. A single measure "
+                       "on its own is weak evidence; watch whether others follow.")
+        else:
+            summary = "All measured signals are within this resident's usual range."
+
+        return jsonify({
+            "status": "ready" if signals else "building",
+            "generated_at": datetime.now().isoformat(),
+            "baseline_days": SIGNAL_BASELINE_DAYS,
+            "recent_days": SIGNAL_RECENT_DAYS,
+            "signals": signals,
+            "flagged_count": len(flagged),
+            "summary": summary,
+            "disclaimer": "These are deviations from this resident's own recent "
+                          "norm, not diagnoses. VIGIL does not identify medical "
+                          "conditions and is not a medical device.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+@app.route("/persons/<person_id>/merge", methods=["POST"])
+@require_api_key
+def merge_person(person_id):
+    """Fold a duplicate identity into an existing person.
+
+    Identity matching fragments when someone is briefly seen, seen at an
+    unusual distance, or partly occluded. A caregiver can tell from two
+    photos whether it is the same person; this lets them say so.
+    """
+    try:
+        data = request.get_json() or {}
+        target = data.get("target_person_id")
+        if not target:
+            return jsonify({"error": "target_person_id required"}), 400
+        if target == person_id:
+            return jsonify({"error": "cannot merge a person into themselves"}), 400
+
+        conn = get_db()
+        src = conn.execute("SELECT id FROM persons WHERE id=?", (person_id,)).fetchone()
+        dst = conn.execute("SELECT id, name FROM persons WHERE id=?", (target,)).fetchone()
+        if not src or not dst:
+            conn.close()
+            return jsonify({"error": "person not found"}), 404
+
+        moved = conn.execute("SELECT COUNT(*) FROM person_detections "
+                             "WHERE person_id=?", (person_id,)).fetchone()[0]
+        conn.execute("UPDATE person_detections SET person_id=? WHERE person_id=?",
+                     (target, person_id))
+        try:
+            conn.execute("UPDATE face_events SET person_id=? WHERE person_id=?",
+                         (target, person_id))
+        except Exception:
+            pass   # table may not exist yet
+        conn.execute("DELETE FROM person_baselines WHERE person_id=?", (person_id,))
+        conn.execute("DELETE FROM persons WHERE id=?", (person_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({
+            "status": "ok",
+            "merged_into": target,
+            "merged_name": dst["name"],
+            "detections_moved": moved,
+            "note": "Baselines rebuild on the next nightly run from the "
+                    "combined history.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Daily routine signals. Built from activity_events, which has been
+# collecting active/still/absent transitions since June but never surfaced.
+# ---------------------------------------------------------------------------
+
+ROUTINE_LOOKBACK_DAYS = 30
+ROUTINE_MIN_DAYS = 5
+NIGHT_START_H = 22
+NIGHT_END_H = 6
+
+
+def _med(vals):
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return None
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def _mad(vals, med):
+    """Median absolute deviation. Robust to the occasional odd night in a
+    way that a standard deviation is not."""
+    if med is None or not vals:
+        return None
+    return _med([abs(v - med) for v in vals])
+
+
+def _routine_sev(cur, med, mad, adverse_dir):
+    if cur is None or med is None or not mad:
+        return "normal", None
+    z = (cur - med) / mad
+    adverse = (z > 0) if adverse_dir == "up" else (z < 0)
+    if not adverse:
+        return "normal", round(z, 2)
+    a = abs(z)
+    return ("attention" if a >= 3.0 else "watch" if a >= 2.0 else "normal"), round(z, 2)
+
+
+@app.route("/routine/latest")
+@require_api_key
+def routine_latest():
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        conn = get_db()
+        cutoff = (datetime.now() - timedelta(days=ROUTINE_LOOKBACK_DAYS)).isoformat()
+        rows = conn.execute(
+            "SELECT activity, started_at, duration_s FROM activity_events "
+            "WHERE started_at >= ? ORDER BY started_at", (cutoff,)).fetchall()
+        conn.close()
+
+        by_day_morning = {}      # date -> minutes after midnight of first activity
+        night_counts = {}        # night date -> count of active episodes
+        night_minutes = {}       # night date -> minutes active overnight
+        day_absence = {}         # date -> longest daytime absence, minutes
+
+        for r in rows:
+            try:
+                t = _dt.fromisoformat(r["started_at"])
+            except Exception:
+                continue
+            act = r["activity"]
+            dur = float(r["duration_s"] or 0) / 60.0
+            dkey = t.strftime("%Y-%m-%d")
+
+            if act == "active":
+                if t.hour >= 5:
+                    mins = t.hour * 60 + t.minute
+                    if dkey not in by_day_morning or mins < by_day_morning[dkey]:
+                        by_day_morning[dkey] = mins
+                if t.hour >= NIGHT_START_H or t.hour < NIGHT_END_H:
+                    # attribute the small hours to the night that began the
+                    # previous evening, so one night is one row
+                    nkey = (t - _td(days=1)).strftime("%Y-%m-%d") \
+                        if t.hour < NIGHT_END_H else dkey
+                    night_counts[nkey] = night_counts.get(nkey, 0) + 1
+                    night_minutes[nkey] = night_minutes.get(nkey, 0.0) + dur
+            elif act == "absent" and NIGHT_END_H <= t.hour < NIGHT_START_H:
+                if dur > day_absence.get(dkey, 0):
+                    day_absence[dkey] = dur
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        yest = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        def build(label, unit, series, cur_key, adverse_dir, note, fmt=None):
+            hist = [v for k, v in series.items() if k != cur_key]
+            cur = series.get(cur_key)
+            if len(hist) < ROUTINE_MIN_DAYS:
+                return {"label": label, "status": "building",
+                        "days_of_history": len(hist),
+                        "days_needed": ROUTINE_MIN_DAYS,
+                        "current": round(cur, 1) if cur is not None else None,
+                        "unit": unit, "note": note}
+            med = _med(hist)
+            mad = _mad(hist, med)
+            sev, z = _routine_sev(cur, med, mad, adverse_dir)
+            # A measure whose own spread approaches its typical value has no
+            # usable norm. Living-room placement gave Morning Start a spread
+            # of 4h36m; flagging against that would be noise, not signal.
+            cv = (mad / abs(med)) if (med and mad is not None) else 999.0
+            stable = cv <= 0.50
+            if not stable:
+                sev = "normal"
+            out = {"label": label, "status": "ready", "unit": unit,
+                   "stability": "ok" if stable else "low",
+                   "spread_ratio": round(cv, 2) if cv < 900 else None,
+                   "current": round(cur, 1) if cur is not None else None,
+                   "baseline": round(med, 1) if med is not None else None,
+                   "spread": round(mad, 1) if mad is not None else None,
+                   "days_of_history": len(hist), "z_score": z,
+                   "severity": sev, "note": note}
+            if fmt == "clock":
+                out["current_text"] = ("%02d:%02d" % (int(cur // 60), int(cur % 60))) if cur is not None else None
+                out["baseline_text"] = ("%02d:%02d" % (int(med // 60), int(med % 60))) if med is not None else None
+            return out
+
+        morning = build(
+            "Morning Start", "minutes after midnight", by_day_morning, today, "up",
+            "A later start than usual can reflect poor sleep, pain, low mood "
+            "or illness. It is one of the earliest observable changes in "
+            "daily routine.", fmt="clock")
+
+        nights = build(
+            "Night Activity", "episodes", night_counts, yest, "up",
+            "Movement between 22:00 and 06:00. This matters for safety: many "
+            "falls happen getting out of bed at night. More night waking than "
+            "usual can also accompany a urinary issue, a medication side "
+            "effect, or disturbed sleep.")
+
+        nmins = build(
+            "Night Time Active", "minutes", night_minutes, yest, "up",
+            "Total time moving overnight. Separates one long episode from "
+            "several brief ones.")
+
+        absence = build(
+            "Longest Daytime Absence", "minutes", day_absence, today, "up",
+            "Time away from the monitored room during the day. A long or "
+            "unusual absence can mean the resident left the area.")
+
+        items = [morning, nights, nmins, absence]
+        ready = [i for i in items if i.get("status") == "ready"]
+        flagged = [i for i in ready if i.get("severity") in ("watch", "attention")]
+
+        if not ready:
+            summary = ("Learning this resident's routine. A few more days of "
+                       "history are needed before changes can be flagged.")
+        elif len(flagged) >= 2:
+            summary = ("%d routine measures differ from normal. Changes across "
+                       "several at once are more meaningful than one alone."
+                       % len(flagged))
+        elif flagged:
+            summary = "%s is outside its usual range." % flagged[0]["label"]
+        else:
+            summary = "Daily routine is within this resident's usual range."
+
+        return jsonify({
+            "generated_at": datetime.now().isoformat(),
+            "status": "ready" if ready else "building",
+            "items": items,
+            "flagged_count": len(flagged),
+            "summary": summary,
+            "disclaimer": "Routine changes are observations about this "
+                          "resident's own pattern, not diagnoses.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Hourly activity profile and anomaly history.
+# Built from activity_events (local timestamps) rather than person_patterns,
+# whose hour_of_day is derived from UTC and is shifted seven hours.
+# ---------------------------------------------------------------------------
+
+PATTERN_DAYS = 30
+
+
+@app.route("/patterns/latest")
+@require_api_key
+def patterns_latest():
+    try:
+        from datetime import datetime as _dt
+        conn = get_db()
+        cutoff = (datetime.now() - timedelta(days=PATTERN_DAYS)).isoformat()
+        rows = conn.execute(
+            "SELECT activity, started_at, duration_s FROM activity_events "
+            "WHERE started_at >= ? AND activity='active' ORDER BY started_at",
+            (cutoff,)).fetchall()
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        hist = {h: [] for h in range(24)}    # hour -> minutes per day seen
+        per_day = {}                          # (date, hour) -> minutes
+        today_h = {h: 0.0 for h in range(24)}
+
+        for r in rows:
+            try:
+                t = _dt.fromisoformat(r["started_at"])
+            except Exception:
+                continue
+            mins = float(r["duration_s"] or 0) / 60.0
+            d = t.strftime("%Y-%m-%d")
+            per_day[(d, t.hour)] = per_day.get((d, t.hour), 0.0) + mins
+            if d == today:
+                today_h[t.hour] += mins
+
+        for (d, h), mins in per_day.items():
+            if d != today:
+                hist[h].append(mins)
+
+        days_seen = len({d for (d, _h) in per_day})
+        hourly = []
+        for h in range(24):
+            vals = hist[h]
+            avg = (sum(vals) / len(vals)) if vals else 0.0
+            hourly.append({
+                "hour": h,
+                "avg_minutes": round(avg, 1),
+                "today_minutes": round(today_h[h], 1),
+                "days_with_activity": len(vals),
+            })
+
+        busiest = sorted(hourly, key=lambda x: x["avg_minutes"], reverse=True)[:3]
+        night = [x for x in hourly if x["hour"] >= 22 or x["hour"] < 6]
+        night_avg = sum(x["avg_minutes"] for x in night)
+        night_today = sum(x["today_minutes"] for x in night)
+
+        anomalies = conn.execute(
+            "SELECT date, anomaly_score, anomaly_detail FROM daily_summary "
+            "WHERE anomaly_flag=1 ORDER BY date DESC LIMIT 10").fetchall()
+        scored = conn.execute(
+            "SELECT COUNT(*) FROM daily_summary "
+            "WHERE anomaly_score IS NOT NULL").fetchone()[0]
+        conn.close()
+
+        return jsonify({
+            "generated_at": datetime.now().isoformat(),
+            "days_of_history": days_seen,
+            "hourly": hourly,
+            "busiest_hours": [x["hour"] for x in busiest],
+            "night_minutes_avg": round(night_avg, 1),
+            "night_minutes_today": round(night_today, 1),
+            "anomalies": [{"date": a["date"],
+                           "score": round(a["anomaly_score"], 1)
+                           if a["anomaly_score"] is not None else None}
+                          for a in anomalies],
+            "days_scored": scored,
+            "method": "Unusual days are identified by an isolation forest "
+                      "trained only on this resident's own daily history. It "
+                      "learns what is ordinary for them and flags days that "
+                      "do not fit, without needing labels or outside data.",
+            "disclaimer": "An unusual day is an observation, not a diagnosis. "
+                          "It indicates the day differed from this resident's "
+                          "pattern, not why.",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Alert acknowledgement. Detection without a recorded response is only half
+# the job -- in shift work, two caregivers each assuming the other went is a
+# known failure mode.
+# ---------------------------------------------------------------------------
+
+def _ensure_ack_columns(conn):
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(alerts)")]
+    if "acknowledged_by" not in cols:
+        conn.execute("ALTER TABLE alerts ADD COLUMN acknowledged_by TEXT")
+    if "acknowledged_at" not in cols:
+        conn.execute("ALTER TABLE alerts ADD COLUMN acknowledged_at TEXT")
+
+
+@app.route("/alerts/<int:alert_id>/ack", methods=["POST"])
+@require_api_key
+def ack_alert(alert_id):
+    try:
+        data = request.get_json() or {}
+        who = (data.get("acknowledged_by") or "Caregiver")[:80]
+        conn = get_db()
+        _ensure_ack_columns(conn)
+        row = conn.execute("SELECT id FROM alerts WHERE id=?", (alert_id,)).fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "alert not found"}), 404
+        conn.execute("UPDATE alerts SET seen=1, acknowledged_by=?, "
+                     "acknowledged_at=datetime('now','localtime') WHERE id=?",
+                     (who, alert_id))
+        conn.commit()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM alerts WHERE seen=0").fetchone()[0]
+        conn.close()
+        return jsonify({"status": "ok", "acknowledged_by": who,
+                        "unseen_remaining": remaining})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/alerts/ack-all", methods=["POST"])
+@require_api_key
+def ack_all_alerts():
+    try:
+        data = request.get_json() or {}
+        who = (data.get("acknowledged_by") or "Caregiver")[:80]
+        conn = get_db()
+        _ensure_ack_columns(conn)
+        n = conn.execute("SELECT COUNT(*) FROM alerts WHERE seen=0").fetchone()[0]
+        conn.execute("UPDATE alerts SET seen=1, acknowledged_by=?, "
+                     "acknowledged_at=datetime('now','localtime') WHERE seen=0",
+                     (who,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "acknowledged": n, "acknowledged_by": who})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/alerts/unseen")
+@require_api_key
+def alerts_unseen():
+    try:
+        conn = get_db()
+        total = conn.execute("SELECT COUNT(*) FROM alerts WHERE seen=0").fetchone()[0]
+        falls = conn.execute("SELECT COUNT(*) FROM alerts WHERE seen=0 "
+                             "AND alert_type='fall'").fetchone()[0]
+        oldest = conn.execute("SELECT MIN(detected_at) FROM alerts "
+                              "WHERE seen=0").fetchone()[0]
+        conn.close()
+        return jsonify({"unseen": total, "unseen_falls": falls,
+                        "oldest_unseen_at": oldest})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     init_db()
     print("VIGIL server v6 starting on port 5001...")
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)

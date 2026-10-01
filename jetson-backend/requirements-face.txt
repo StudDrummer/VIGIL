@@ -1,0 +1,5 @@
+# installed in a SEPARATE venv (~/vigil-face) so mediapipe
+# cannot replace numpy/opencv under the main pipeline
+mediapipe>=1.0.0
+opencv-python-headless
+requests

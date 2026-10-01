@@ -1,0 +1,10 @@
+# ByteTrack for VIGIL at ~12 fps (threaded capture).
+# match_thresh is a MAXIMUM COST (~1 - IoU*conf). Lower = stricter.
+# 0.5 previously required ~56% frame-to-frame overlap and broke tracks.
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.5      # main person 0.82-0.92; phantoms 0.1-0.3 excluded
+track_buffer: 60           # ~5 s of gap tolerance at 12 fps
+match_thresh: 0.8          # ultralytics default; permissive first association
+fuse_score: True
