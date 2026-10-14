@@ -100,6 +100,7 @@ class ServerClient:
         self.resident_height_cm = 170.0
         self.step_length_ratio = 0.41   # calibrated per resident
         self.resident_name = ""
+        self.resident_pid = None   # HOME_RESIDENT_V1
         self._last_config = 0
         self.room_id = 'room_1'
 
@@ -168,6 +169,7 @@ class ServerClient:
                 self.resident_height_cm = float(cfg.get("resident_height_cm") or 170)
                 self.step_length_ratio = float(cfg.get("step_length_ratio") or 0.41)
                 self.resident_name = cfg.get("resident_name") or ""
+                self.resident_pid = cfg.get("resident_person_id") or None
         except Exception as e:
             print(f"[SERVER] config fetch failed: {e}")
 
@@ -433,28 +435,238 @@ class GaitTracker:
                         if len(self._hip_peaks) > 20:
                             self._hip_peaks = self._hip_peaks[-10:]
 
-class FallDetector:
-    """FALL_DETECTOR_V31 -- geometry + change-based descent + furniture zones."""
+class BedExitDetector:
+    """BED_EXIT_V1 -- getting up from a bed or sofa zone at night."""
 
-    ASPECT_FALL = 1.80         # sitting measured 1.11-2.20; falls 2.66-6.01
-    COLLAPSE_RATIO = 0.55      # height <= 55% of the standing reference
-    RAPID_WINDOW_S = 1.5
-    MIN_ASPECT_JUMP = 0.80
-    MIN_HEIGHT_DROP = 0.35
-    HIST_S = 12.0
-    STAND_WINDOW_S = 300.0     # long, so setup postures cannot become the reference
-    MIN_STAND_SAMPLES = 25     # do not trust collapse before this many
+    NIGHT_START = 22
+    NIGHT_END = 6
+    REST_MIN_S = 60.0       # lying in a zone at least this long first
+    LYING_ASPECT = 0.90     # skeleton box wider than tall
+    UPRIGHT_ASPECT = 0.65   # clearly standing
+    UPRIGHT_HOLD_S = 3.0    # standing must persist, not flicker
+    COOLDOWN_S = 600.0
+    TEST_FLAG = "/dev/shm/vigil_bedexit_test"
+
+    def __init__(self, fall):
+        self.fall = fall
+        self.rest_since = None
+        self.rested_s = 0.0
+        self.upright_since = None
+        self.last_alert = 0.0
+
+    def _active_window(self):
+        if os.path.exists(self.TEST_FLAG):
+            return True
+        h = time.localtime().tm_hour
+        return h >= self.NIGHT_START or h < self.NIGHT_END
+
+    def _reset(self):
+        self.rest_since = None
+        self.rested_s = 0.0
+        self.upright_since = None
+        self._situp_since = None
+        self._situp_sent = False
+
+    def update(self, kp, frame_shape, client):
+        if not getattr(self.fall, "_zones", None) or not self._active_window():
+            self._reset()
+            return
+        try:
+            pts = kp[kp[:, 2] >= CONF_THRESHOLD]
+        except Exception:
+            return
+        if len(pts) < 5:
+            return                      # brief loss of pose keeps the state
+        w = float(pts[:, 0].max() - pts[:, 0].min())
+        h = float(pts[:, 1].max() - pts[:, 1].min())
+        if h < 10.0:
+            return
+        aspect = w / h
+        now = time.time()
+        if now - getattr(self, "_dbg_t", 0.0) > 2.0:
+            self._dbg_t = now
+            _dbg_print("[BED_DBG] a=%.2f zone=%s rest=%.0f upright_for=%s h=%.0f pts=%d" % (
+                aspect, self.fall._in_zone(pts, frame_shape), self.rested_s,
+                ("%.1f" % (now - self.upright_since)) if self.upright_since else "-",
+                h, len(pts)))
+
+        # BED_SITUP_V1: after a real rest, sitting upright on the bed for 3 s
+        # is the moment before standing. Warn once per rest.
+        _ang = self.fall._torso_deg(kp)
+        if (_ang is not None and _ang < 35.0 and self.rest_since is not None
+                and self.rested_s >= self.REST_MIN_S
+                and self.fall._in_zone(pts, frame_shape)):
+            if getattr(self, '_situp_since', None) is None:
+                self._situp_since = now
+            elif now - self._situp_since >= 3.0 and not getattr(self, '_situp_sent', False):
+                self._situp_sent = True
+                try:
+                    client._post('/alert/bed_sitting', {'rested_s': round(self.rested_s, 1)})
+                except Exception:
+                    pass
+                print('[BED_SITUP] sitting up after resting %.0f s' % self.rested_s, flush=True)
+            return
+        self._situp_since = None
+        if aspect >= self.LYING_ASPECT and self.fall._in_zone(pts, frame_shape):
+            if self.rest_since is None:
+                self.rest_since = now
+            self.rested_s = now - self.rest_since
+            self.upright_since = None
+            return
+
+        if aspect <= self.UPRIGHT_ASPECT:
+            if self.rest_since is None or self.rested_s < self.REST_MIN_S:
+                self._reset()           # upright without a real rest first
+                return
+            if self.upright_since is None:
+                self.upright_since = now
+            if now - self.upright_since < self.UPRIGHT_HOLD_S:
+                return
+            if now - self.last_alert > self.COOLDOWN_S:
+                self.last_alert = now
+                try:
+                    client._post("/alert/bed_exit", {"rested_s": round(self.rested_s, 1)})
+                except Exception:
+                    pass
+                print("[BED_EXIT] up after resting %.0f s" % self.rested_s, flush=True)
+            self._reset()
+        # sitting on the edge (between the two thresholds) keeps the state
+
+
+_SK_EDGES = [(5, 6), (5, 7), (7, 9), (6, 8), (8, 10), (5, 11), (6, 12), (11, 12),
+             (11, 13), (13, 15), (12, 14), (14, 16), (0, 5), (0, 6)]
+
+
+def _write_skeleton_frame(results, shape):
+    """PRIVACY_VIEW_V1: stick figures on a dark canvas, no room, no faces."""
+    try:
+        h, w = shape[:2]
+        canvas = np.full((h, w, 3), 24, np.uint8)
+        if len(results) > 0 and getattr(results[0], "keypoints", None) is not None:
+            data = results[0].keypoints.data
+            data = data.cpu().numpy() if hasattr(data, "cpu") else np.asarray(data)
+            for p in data:
+                for a, b in _SK_EDGES:
+                    if p[a][2] >= 0.3 and p[b][2] >= 0.3:
+                        cv2.line(canvas, (int(p[a][0]), int(p[a][1])),
+                                 (int(p[b][0]), int(p[b][1])), (120, 220, 90), 5, cv2.LINE_AA)
+                if p[0][2] >= 0.3:
+                    cv2.circle(canvas, (int(p[0][0]), int(p[0][1])), 18, (120, 220, 90), 4, cv2.LINE_AA)
+                for x, y, c in p[5:]:
+                    if c >= 0.3:
+                        cv2.circle(canvas, (int(x), int(y)), 5, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.imwrite("/dev/shm/.vigil_skel.tmp.jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        os.replace("/dev/shm/.vigil_skel.tmp.jpg", "/dev/shm/vigil_skeleton.jpg")
+    except Exception:
+        pass
+
+
+# FALL_REPLAY_V1: last 30 s of body points (no image), 5 per second.
+_REPLAY = deque(maxlen=150)
+_REPLAY_LAST = [0.0]
+
+
+def _replay_push(kp, shape):
+    try:
+        now = time.time()
+        if now - _REPLAY_LAST[0] < 0.2:
+            return
+        _REPLAY_LAST[0] = now
+        h, w = float(shape[0]), float(shape[1])
+        _REPLAY.append([round(now, 2),
+                        [[round(float(p[0]) / w, 3), round(float(p[1]) / h, 3)] for p in kp],
+                        [round(float(p[2]), 2) for p in kp]])
+    except Exception:
+        pass
+
+
+_NAME_CACHE = [0.0, {}]
+
+
+def _vigil_names():
+    """NAME_OVERLAY_V1: id -> name for named people, refreshed every 10 s."""
+    now = time.time()
+    if now - _NAME_CACHE[0] > 10:
+        _NAME_CACHE[0] = now
+        try:
+            import sqlite3 as _sq
+            _c = _sq.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vigil.db"), timeout=2)
+            _NAME_CACHE[1] = {r[0]: r[1] for r in _c.execute(
+                "SELECT id, name FROM persons WHERE name IS NOT NULL AND name != ''")}
+            _c.close()
+        except Exception:
+            pass
+    return _NAME_CACHE[1]
+
+
+def _vigil_annotate(results, frame):
+    """Skeleton and box, labelled with the person's name instead of
+    'id:7 person 0.87'."""
+    try:
+        if len(results) == 0:
+            return frame
+        r = results[0]
+        img = r.plot(labels=False, conf=False)
+        boxes = getattr(r, "boxes", None)
+        if boxes is None or getattr(boxes, "xyxy", None) is None:
+            return img
+        xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes.xyxy, "cpu") else np.asarray(boxes.xyxy)
+        ids = None
+        if getattr(boxes, "id", None) is not None:
+            _i = boxes.id.cpu().numpy() if hasattr(boxes.id, "cpu") else np.asarray(boxes.id)
+            ids = [int(v) for v in _i]
+        try:
+            import person_hook as _ph
+            t2p = dict(getattr(_ph, "_track_to_pid", {}) or {})
+            st = dict(getattr(_ph, "_trk_status", {}) or {})
+        except Exception:
+            t2p = {}
+            st = {}
+        names = _vigil_names()
+        for i, b in enumerate(xyxy):
+            tid = ids[i] if ids is not None and i < len(ids) else None
+            pid = t2p.get(tid) if tid is not None else None
+            name = names.get(pid) if pid else None
+            label = name or ((st.get(tid) or "Identifying...") if pid is None else "New person")
+            known = bool(name)
+            x1, y1 = int(b[0]), int(b[1])
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+            y0 = max(0, y1 - th - 16)
+            cv2.rectangle(img, (x1, y0), (x1 + tw + 18, y0 + th + 14),
+                          (75, 215, 50) if known else (70, 70, 70), -1)
+            cv2.putText(img, label, (x1 + 9, y0 + th + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                        (10, 20, 4) if known else (255, 255, 255), 2, cv2.LINE_AA)
+        return img
+    except Exception:
+        try:
+            return results[0].plot()
+        except Exception:
+            return frame
+
+
+class FallDetector:
+    """FALL_DETECTOR_V4 (v4.2) -- torso goes horizontal fast and stays down."""
+
+    UP_ASPECT = 1.00            # compact: box taller than wide ...
+    UP_TORSO_DEG = 40.0         # ... and torso near vertical (stand, kneel, squat)
+    DOWN_TORSO_DEG = 55.0       # torso within 35 deg of horizontal
+    DOWN_ASPECT_WITH_TORSO = 1.00
+    DOWN_ASPECT_NO_TORSO = 1.80 # fallback when shoulders/hips are not visible
+    MAX_DESCENT_S = 2.5         # measured: chair slumps 1.78 s and 2.07 s
+    CANCEL_COMPACT_S = 1.0      # must look upright this long to cancel a fall
+    MIN_PTS_COMPACT = 8         # 'upright' needs enough of the body visible
+    HOLD_S = 3.0                # and stays down this long
     MIN_PTS = 5
 
     def __init__(self):
         self.state = "upright"
-        self.candidate_start = None
-        self.last_alert = 0
+        self.last_up_t = 0.0
+        self.down_since = None
+        self.compact_since = None
+        self.last_alert = 0.0
         self.hip_drop_pct = 0.0
         self.torso_angle = 0.0
         self.aspect = 0.0
-        self._hist = []          # (t, aspect, height) short window
-        self._stand = []         # (t, height) upright samples, long window
         self._zones = self._load_zones()
 
     @staticmethod
@@ -473,6 +685,19 @@ class FallDetector:
             return []
 
     def _in_zone(self, pts, frame_shape):
+        # ZONES_HOT_RELOAD_V1: pick up zones saved from the app within 5 s.
+        try:
+            _now = time.time()
+            if _now - getattr(self, "_zchk", 0.0) > 5:
+                self._zchk = _now
+                _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fall_zones.json")
+                _m = os.path.getmtime(_p) if os.path.exists(_p) else 0
+                if _m != getattr(self, "_zmtime", None):
+                    if getattr(self, "_zmtime", None) is not None:
+                        self._zones = self._load_zones()
+                    self._zmtime = _m
+        except Exception:
+            pass
         if not self._zones or frame_shape is None:
             return False
         try:
@@ -486,25 +711,55 @@ class FallDetector:
             pass
         return False
 
-    def _standing_height(self):
-        """90th percentile of upright heights over a long window."""
-        if len(self._stand) < self.MIN_STAND_SAMPLES:
-            return None
-        hs = sorted(h for (_t, h) in self._stand)
-        return hs[int(0.9 * (len(hs) - 1))]
-
-    def _payload_metrics(self, kp, aspect):
+    @staticmethod
+    def _torso_deg(kp):
+        """Angle of the shoulder-to-hip line from vertical. 0 = upright,
+        90 = lying flat. None when shoulders or hips are not visible."""
         try:
-            lh, rh = kp[KP_LH], kp[KP_RH]
-            ls, rs = kp[KP_LS], kp[KP_RS]
-            if min(float(lh[2]), float(rh[2]),
-                   float(ls[2]), float(rs[2])) >= 0.3:
-                dx = (float(ls[0]) + float(rs[0])) / 2 - (float(lh[0]) + float(rh[0])) / 2
-                dy = (float(ls[1]) + float(rs[1])) / 2 - (float(lh[1]) + float(rh[1])) / 2
-                self.torso_angle = float(np.degrees(np.arctan2(abs(dx), abs(dy) + 1e-6)))
-            self.hip_drop_pct = float(min(1.0, aspect / 2.0))
+            ls, rs, lh, rh = kp[KP_LS], kp[KP_RS], kp[KP_LH], kp[KP_RH]
+            if min(float(ls[2]), float(rs[2]), float(lh[2]), float(rh[2])) < 0.3:
+                return None
+            dx = (float(ls[0]) + float(rs[0])) / 2 - (float(lh[0]) + float(rh[0])) / 2
+            dy = (float(ls[1]) + float(rs[1])) / 2 - (float(lh[1]) + float(rh[1])) / 2
+            return float(np.degrees(np.arctan2(abs(dx), abs(dy) + 1e-6)))
         except Exception:
-            pass
+            return None
+
+    @staticmethod
+    def _legs_standing(kp, frame_shape):
+        """FALL_V43: thigh hanging below the hip and shin continuing down =
+        the person is on their feet (bending over), not lying on the floor."""
+        try:
+            fh = float(frame_shape[0]) if frame_shape is not None else None
+            def pt(i, c=0.25):
+                return (float(kp[i][0]), float(kp[i][1])) if float(kp[i][2]) >= c else None
+            ls, rs, lh, rh = pt(5), pt(6), pt(11), pt(12)
+            sh = [p for p in (ls, rs) if p]
+            hp = [p for p in (lh, rh) if p]
+            if not sh or not hp:
+                return False
+            sx, sy = sum(p[0] for p in sh) / len(sh), sum(p[1] for p in sh) / len(sh)
+            hx, hy = sum(p[0] for p in hp) / len(hp), sum(p[1] for p in hp) / len(hp)
+            torso = ((sx - hx) ** 2 + (sy - hy) ** 2) ** 0.5
+            if torso < 10:
+                return False
+            for k_i, a_i, h_p in ((13, 15, lh), (14, 16, rh)):
+                k = pt(k_i)
+                hpt = h_p or (hx, hy)
+                if k is None:
+                    continue
+                dy, dx = k[1] - hpt[1], abs(k[0] - hpt[0])
+                if dy < 0.5 * torso or dx > dy:          # thigh not hanging down
+                    continue
+                a_any = (float(kp[a_i][0]), float(kp[a_i][1])) if float(kp[a_i][2]) >= 0.1 else None
+                if fh and a_any and a_any[1] >= 0.98 * fh:
+                    return True                          # shin runs off the bottom
+                a = pt(a_i)
+                if a and (a[1] - k[1]) >= 0.4 * torso and abs(a[0] - k[0]) <= (a[1] - k[1]):
+                    return True                          # shin hangs below the knee
+            return False
+        except Exception:
+            return False
 
     def update(self, kp, frame_shape=None):
         now = time.time()
@@ -513,68 +768,82 @@ class FallDetector:
         except Exception:
             return False
         if len(pts) < self.MIN_PTS:
-            if self.state == "descending":
-                self.state = "upright"
-                self.candidate_start = None
             return False
-
-        xs, ys = pts[:, 0], pts[:, 1]
-        w = float(xs.max() - xs.min())
-        height = float(ys.max() - ys.min())
-        if height < 10.0:
+        w = float(pts[:, 0].max() - pts[:, 0].min())
+        h = float(pts[:, 1].max() - pts[:, 1].min())
+        if h < 10.0:
             return False
-        aspect = w / height
+        aspect = w / h
+        ang = self._torso_deg(kp)
+        if ang is not None and frame_shape is not None:
+            try:
+                _fh, _fw = float(frame_shape[0]), float(frame_shape[1])
+                for _i in (5, 6, 11, 12):
+                    _x, _y = float(kp[_i][0]), float(kp[_i][1])
+                    if _x <= 0.01 * _fw or _x >= 0.99 * _fw or _y <= 0.01 * _fh or _y >= 0.99 * _fh:
+                        ang = None          # FALL_V43: clamped at the edge, not a real position
+                        break
+            except Exception:
+                pass
         self.aspect = aspect
+        if ang is not None:
+            self.torso_angle = ang
+        self.hip_drop_pct = float(min(1.0, aspect / 2.0))
 
-        self._hist.append((now, aspect, height))
-        self._hist = [s for s in self._hist if now - s[0] <= self.HIST_S]
-        if aspect <= 0.70:
-            self._stand.append((now, height))
-            self._stand = [s for s in self._stand if now - s[0] <= self.STAND_WINDOW_S]
-        self._payload_metrics(kp, aspect)
-
-        stand_h = self._standing_height()
-        collapsed = bool(stand_h and height <= self.COLLAPSE_RATIO * stand_h)
-        is_low = (aspect >= self.ASPECT_FALL) or collapsed
-
-        rapid = False
-        d_aspect = d_height = 0.0
-        win = [s for s in self._hist if now - s[0] <= self.RAPID_WINDOW_S]
-        if len(win) >= 2:
-            min_a = min(s[1] for s in win)
-            max_h = max(s[2] for s in win)
-            d_aspect = aspect - min_a
-            d_height = (max_h - height) / max_h if max_h > 0 else 0.0
-            rapid = (d_aspect >= self.MIN_ASPECT_JUMP
-                     or d_height >= self.MIN_HEIGHT_DROP)
-
+        compact = (len(pts) >= self.MIN_PTS_COMPACT and aspect < self.UP_ASPECT
+                   and (ang is None or ang < self.UP_TORSO_DEG))
+        if ang is not None:
+            down = ang >= self.DOWN_TORSO_DEG and aspect >= self.DOWN_ASPECT_WITH_TORSO
+        else:
+            down = aspect >= self.DOWN_ASPECT_NO_TORSO
+        if down and self._legs_standing(kp, frame_shape):
+            down = False            # FALL_V43: bending over, still on their feet
+            self.last_up_t = now    # a fall is timed from the last moment on their feet
         in_zone = self._in_zone(pts, frame_shape)
 
-        if is_low and (self.state == "upright"):
-            _dbg_print("[FALL_DBG] low a=%.2f h=%.0f stand=%s coll=%s rapid=%s "
-                       "(da=%.2f dh=%.2f) zone=%s"
-                       % (aspect, height, ("%.0f" % stand_h) if stand_h else "NA",
-                          collapsed, rapid, d_aspect, d_height, in_zone))
+        if compact:
+            self.last_up_t = now
+            if self.state == "falling":
+                # One upright-looking frame while down is usually lost body
+                # points, not recovery. Cancel only if it holds for a second.
+                if self.compact_since is None:
+                    self.compact_since = now
+                if now - self.compact_since < self.CANCEL_COMPACT_S:
+                    return False
+            if self.state != "upright":
+                self.state = "upright"
+                self.down_since = None
+            self.compact_since = None
+            return False
+        self.compact_since = None
 
-        if is_low and in_zone:
-            self.state = "upright"
-            self.candidate_start = None
+        if self.state == "upright":
+            if down:
+                dt = now - self.last_up_t
+                if in_zone:
+                    self.state = "resting"
+                elif dt <= self.MAX_DESCENT_S:
+                    self.state = "falling"
+                    self.down_since = now
+                else:
+                    self.state = "resting"      # lay down on purpose
+                _dbg_print("[FALL_DBG] down a=%.2f torso=%s descent=%.2fs zone=%s -> %s" % (
+                    aspect, ("%.0f" % ang) if ang is not None else "NA",
+                    dt, in_zone, self.state))
             return False
 
-        if is_low:
-            if self.state == "upright":
-                if rapid:
-                    self.state = "descending"
-                    self.candidate_start = now
-            elif self.state == "descending" and self.candidate_start is not None \
-                    and now - self.candidate_start >= FALL_CONFIRM_SEC:
-                self.state = "fallen_confirmed"
+        if self.state == "falling":
+            # Furniture is judged at the moment of going down. A fall that
+            # starts on the floor and ends against the couch is still a fall.
+            if now - self.down_since >= self.HOLD_S:
+                if in_zone and not down:
+                    self.state = "resting"     # FALL_V43: ended up sitting on the bed/couch
+                    _dbg_print("[FALL_DBG] ended seated in a furniture zone -> resting")
+                    return False
+                self.state = "fallen"
                 if now - self.last_alert > FALL_COOLDOWN_SEC:
                     self.last_alert = now
                     return True
-        else:
-            self.state = "upright"
-            self.candidate_start = None
         return False
 
 
@@ -867,6 +1136,7 @@ def main():
     client.room_id = args.room_id
     gait=GaitTracker(TARGET_FPS)
     fall=FallDetector()
+    bedexit = BedExitDetector(fall)
     activity=ActivityTracker(client)
     calib=Calibrator()
     tracker = PersonTracker() if PERSON_TRACKING else None
@@ -917,6 +1187,8 @@ def main():
                     _track_ids = [t[1] for t in _tracked]
                     main_pid = vigil_track_persons(all_persons, frame=frame,
                                                    track_ids=_track_ids)
+                    if all_persons:
+                        globals().setdefault('_PIDS_WIN', set()).add(main_pid)
                     person_count = len(all_persons)
                     if person_count > 0:
                         kp = all_persons[0]  # Track the largest person (resident)
@@ -950,10 +1222,11 @@ def main():
                 try:
                     # Encode the live-stream frame every 2nd iteration. The
                     # MJPEG view stays smooth and ~20 ms per frame is recovered.
-                    if _PF["sk"] % 3 == 0:
-                        annotated_frame = results[0].plot() if len(results) > 0 else frame
+                    if _PF["sk"] % 2 == 0:   # LIVE_VIDEO_V1 (was every 3rd)
+                        annotated_frame = _vigil_annotate(results, frame)
                         cv2.imwrite('/dev/shm/vigil_latest.jpg', annotated_frame,
                                     [cv2.IMWRITE_JPEG_QUALITY, 70])
+                        _write_skeleton_frame(results, frame.shape)
                     # Clean frame for the face service. The annotated frame
                     # above has skeleton dots over the eyes and nose, which
                     # would corrupt facial landmark measurement.
@@ -977,9 +1250,15 @@ def main():
                     if n_ok and a_ok:
                         ay=kp[KP_LA,1] if kp[KP_LA,2]>=CONF_THRESHOLD else kp[KP_RA,1]
                         calib.update(kp[KP_NOSE,1],ay,True)
+                    bedexit.update(kp, frame.shape, client)
+                    _replay_push(kp, frame.shape)
                     if fall.update(kp, frame.shape):
                         print(f"[FALL] hip={fall.hip_drop_pct:.2f} torso={fall.torso_angle:.0f} aspect={fall.aspect:.2f}")
                         client.alert_fall(fall.hip_drop_pct,fall.torso_angle)
+                        try:
+                            client._post("/alert/fall/replay", {"frames": [f for f in list(_REPLAY) if f[0] >= time.time() - 30]})
+                        except Exception:
+                            pass
                     gait.update(kp,frame_idx,fh)
                     # Head crop for the face service. MediaPipe downscales
                     # its input, so a face that is ~60 px in a 1920x1080
@@ -1013,7 +1292,11 @@ def main():
                         except Exception:
                             pass
                     bscale=max(np.percentile(list(calib.max_body_px),90) if calib.max_body_px else 100,1)
-                    activity.update(True,kp,bscale)
+                    _rp0 = getattr(client, 'resident_pid', None)
+                    if _rp0 and main_pid and main_pid != _rp0:
+                        activity.update(False)        # someone else is the main person
+                    else:
+                        activity.update(True,kp,bscale)
                 else:
                     activity.update(False)
 
@@ -1069,13 +1352,26 @@ def main():
                           f"body_scale_px={locals().get('bscale')}")
 
                     if any(v is not None for k,v in payload.items() if k not in ("date","camera_mode","stride_count")):
-                        client.sync_camera(payload)
-                        print(f"[SYNC] cadence={payload.get('cadence_spm')} speed={payload.get('gait_speed_ms')} posture={payload.get('posture_score')}")
+                        _win = {p for p in globals().get('_PIDS_WIN', set()) if p}
+                        globals()['_PIDS_WIN'] = set()
+                        _rp = getattr(client, 'resident_pid', None)
+                        _mixed = len(_win) > 1
+                        if not _mixed and (_rp is None or _win == {_rp}):
+                            client.sync_camera(payload)
+                        print(f"[SYNC] who={sorted(_win)} mixed={_mixed} cadence={payload.get('cadence_spm')} speed={payload.get('gait_speed_ms')} posture={payload.get('posture_score')}")
 
-                        if main_pid and payload.get('cadence_spm'):
+                        if main_pid and payload.get('cadence_spm') and not _mixed and main_pid in _win:
+                            _gs = payload.get('gait_speed_ms')
+                            if _gs and _rp and main_pid != _rp:
+                                try:
+                                    import person_hook as _ph2
+                                    _a, _b = _ph2._body_ratio(main_pid), _ph2._body_ratio(_rp)
+                                    _gs = round(_gs * _a / _b, 3) if (_a and _b) else None
+                                except Exception:
+                                    _gs = None
                             try:
                                 client._post(f"/persons/{main_pid}/record", {
-                                    'gait_speed_ms': payload.get('gait_speed_ms'),
+                                    'gait_speed_ms': _gs,
                                     'cadence_spm': payload.get('cadence_spm'),
                                     'posture_score': payload.get('posture_score'),
                                     'asymmetry_pct': payload.get('asymmetry_pct'),

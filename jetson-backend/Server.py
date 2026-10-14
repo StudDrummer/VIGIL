@@ -358,6 +358,12 @@ def _rebuild_daily(conn, date_str):
     ))
 
 def _check_anomalies(conn, date_str):
+    # SIGNALS_V2: callers pass today; judge YESTERDAY, a finished day, once.
+    try:
+        from datetime import timedelta as _td
+        date_str = (datetime.strptime(date_str[:10], "%Y-%m-%d") - _td(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        return
     cols = {
         "active_minutes": ("Activity Level", "min", False),
         "activity_level_pct": ("Activity Ratio", "%", False),
@@ -379,6 +385,8 @@ def _check_anomalies(conn, date_str):
     for col, (label, unit, worse_high) in cols.items():
         tv = today[col]
         if tv is None: continue
+        if col in ("camera_gait_speed_ms", "posture_score") and (today["camera_data_points"] or 0) < 300:
+            continue        # SIGNALS_V2: too little walking seen that day to judge
         hv = [r[col] for r in hist if r[col] is not None]
         if len(hv) < 3: continue
         mean = sum(hv) / len(hv)
@@ -387,18 +395,18 @@ def _check_anomalies(conn, date_str):
         z = (tv - mean) / std
         is_anom = (worse_high and z > 1.5) or (not worse_high and z < -1.5)
         if not is_anom: continue
-        ex = conn.execute("SELECT id FROM alerts WHERE alert_type='health_signal' AND date(detected_at)=? AND json_extract(payload,'$.metric')=?", (date_str, label)).fetchone()
+        ex = conn.execute("SELECT id FROM alerts WHERE alert_type='health_signal' AND json_extract(payload,'$.day')=? AND json_extract(payload,'$.metric')=?", (date_str, label)).fetchone()
         if ex: continue
         direction = "elevated" if z > 0 else "low"
-        msg = f"{label} is {direction} vs 14-day baseline ({tv:.1f} vs avg {mean:.1f} {unit})"
+        msg = f"{label} was {direction} yesterday vs 14-day baseline ({tv:.1f} vs avg {mean:.1f} {unit})"
         conn.execute("INSERT INTO alerts (alert_type,detected_at,payload) VALUES ('health_signal',?,?)", (
             datetime.now().isoformat(),
-            json.dumps({"metric": label, "value": round(tv, 2), "unit": unit,
+            json.dumps({"metric": label, "day": date_str, "value": round(tv, 2), "unit": unit,
                         "baseline": round(mean, 2), "z_score": round(z, 2),
                         "direction": direction, "message": msg})
         ))
         print(f"Anomaly alert: {msg}")
-        send_sms(f"VIGIL: {name}'s {label.lower()} is {direction} today ({tv:.1f} vs usual {mean:.1f} {unit}). Consider checking in.")
+        send_sms(f"VIGIL: {name}'s {label.lower()} was {direction} yesterday ({tv:.1f} vs usual {mean:.1f} {unit}). Consider checking in.")
 
 @app.route("/health")
 def health(): return jsonify({"status": "ok", "db": DB_PATH, "version": "v6"})
@@ -524,6 +532,7 @@ def camera_heartbeat():
     return jsonify({"status": "ok"})
 
 @app.route("/camera/status")
+@require_api_key
 def camera_status():
     conn = get_db()
     row = conn.execute("SELECT * FROM camera_status WHERE id=1").fetchone()
@@ -556,6 +565,7 @@ def camera_status():
     })
 
 @app.route("/config", methods=["GET"])
+@require_api_key
 def config_get(): return jsonify(get_config())
 
 @app.route("/config", methods=["POST"])
@@ -570,6 +580,7 @@ def config_set():
     return jsonify({"status": "ok"})
 
 @app.route("/summary/today")
+@require_api_key
 def today_summary():
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_db()
@@ -578,6 +589,7 @@ def today_summary():
     return jsonify(dict(row)) if row else jsonify({"date": today, "status": "no data yet"})
 
 @app.route("/summary/recent")
+@require_api_key
 def recent_summary():
     conn = get_db()
     rows = conn.execute("SELECT * FROM daily_summary ORDER BY date DESC LIMIT 30").fetchall()
@@ -654,6 +666,7 @@ def alerts_ack():
     return jsonify({"status": "ok"})
 
 @app.route("/alerts/recent")
+@require_api_key
 def alerts_recent():
     conn = get_db()
     rows = conn.execute("SELECT * FROM alerts WHERE seen=0 ORDER BY created_at DESC LIMIT 20").fetchall()
@@ -667,6 +680,7 @@ def alerts_recent():
     return jsonify(alerts)
 
 @app.route("/alerts/all")
+@require_api_key
 def alerts_all():
     conn = get_db()
     rows = conn.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT 100").fetchall()
@@ -680,6 +694,7 @@ def alerts_all():
     return jsonify(alerts)
 
 @app.route("/ml/scores/latest")
+@require_api_key
 def ml_scores_latest():
     try:
         conn = get_db()
@@ -697,6 +712,7 @@ def ml_scores_latest():
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route("/status")
+@require_api_key
 def full_status():
     conn = get_db()
     counts = {}
@@ -712,6 +728,7 @@ def full_status():
                     "server_time": datetime.now().isoformat()})
 
 @app.route("/debug/dump")
+@require_api_key
 def debug_dump():
     conn = get_db()
     metrics = conn.execute("""SELECT metric_type,COUNT(*) as count,ROUND(AVG(value),2) as avg,
@@ -719,9 +736,54 @@ def debug_dump():
     conn.close()
     return jsonify({"by_metric": [dict(r) for r in metrics]})
 
+def _vigil_small(raw):
+    """LIVE_SMALL_V1: shrink a JPEG to the width the app asked for (?w=)."""
+    try:
+        w = int(request.args.get("w", "0"))
+    except Exception:
+        w = 0
+    if w < 160 or w > 1920:
+        return raw
+    try:
+        import cv2 as _cv
+        import numpy as _np
+        img = _cv.imdecode(_np.frombuffer(raw, _np.uint8), _cv.IMREAD_COLOR)
+        if img is None or img.shape[1] <= w:
+            return raw
+        h = int(img.shape[0] * w / img.shape[1])
+        img = _cv.resize(img, (w, h), interpolation=_cv.INTER_AREA)
+        ok, buf = _cv.imencode(".jpg", img, [_cv.IMWRITE_JPEG_QUALITY, 72])
+        return buf.tobytes() if ok else raw
+    except Exception:
+        return raw
+
+
 @app.route("/camera/snapshot")
+@require_api_key
 def camera_snapshot():
     """Returns the latest camera frame as a base64 JPEG."""
+    if request.args.get("view") == "skeleton":
+        try:
+            if time.time() - os.stat("/dev/shm/vigil_skeleton.jpg").st_mtime > 10:
+                return jsonify({"frame": None, "available": False})
+            with open("/dev/shm/vigil_skeleton.jpg", "rb") as _f:
+                return jsonify({"frame": __import__("base64").b64encode(_vigil_small(_f.read())).decode(),
+                                "available": True, "view": "skeleton"})
+        except Exception:
+            return jsonify({"frame": None, "available": False})
+    # LIVE_VIDEO_V1: serve the newest annotated frame the camera wrote to
+    # memory, not the picture it posted every 2 s. Refuse a frame that is
+    # stale or cut off mid-write.
+    try:
+        _lp = "/dev/shm/vigil_latest.jpg"
+        if time.time() - os.stat(_lp).st_mtime < 3:
+            with open(_lp, "rb") as _lf:
+                _lb = _lf.read()
+            if _lb[:2] == b"\xff\xd8" and _lb[-2:] == b"\xff\xd9":
+                return jsonify({"frame": __import__("base64").b64encode(_vigil_small(_lb)).decode(),
+                                "available": True, "view": "video"})
+    except Exception:
+        pass
     with _frame_lock:
         if _latest_frame_b64 is None:
             return jsonify({"frame": None, "available": False})
@@ -762,6 +824,7 @@ def camera_snapshot_post():
     return jsonify({"status": "ok"})
 
 @app.route("/rooms", methods=["GET"])
+@require_api_key
 def get_rooms():
     conn = get_db()
     rooms = conn.execute("SELECT * FROM rooms WHERE active=1 ORDER BY id").fetchall()
@@ -819,6 +882,7 @@ def create_room():
     return jsonify({"status": "ok", "room_id": room_id})
 
 @app.route("/rooms/<room_id>", methods=["GET"])
+@require_api_key
 def get_room(room_id):
     conn = get_db()
     row = conn.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
@@ -858,6 +922,7 @@ def delete_room(room_id):
     return jsonify({"status": "ok"})
 
 @app.route("/rooms/<room_id>/summary/today")
+@require_api_key
 def room_today(room_id):
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_db()
@@ -873,6 +938,7 @@ def room_today(room_id):
     return jsonify(dict(row)) if row else jsonify({"date": today, "status": "no data yet"})
 
 @app.route("/rooms/<room_id>/status")
+@require_api_key
 def room_camera_status(room_id):
     conn = get_db()
     row = conn.execute(
@@ -902,6 +968,7 @@ def room_camera_status(room_id):
     })
 
 @app.route("/persons", methods=["GET"])
+@require_api_key
 def get_persons():
     conn = get_db()
     room_id = request.args.get("room_id", "room_1")
@@ -924,10 +991,17 @@ def person_detect():
             continue
         existing = conn.execute("SELECT id FROM persons WHERE id=?", (pid,)).fetchone()
         if existing:
-            conn.execute("""UPDATE persons SET last_seen_at=?, frames_seen=?,
-                height_px=?, confidence=? WHERE id=?""",
-                (now, person.get("frames_seen",0), person.get("height_px"),
-                 person.get("confidence",0), pid))
+            _ch = person.get("colour_hist")
+            if _ch:
+                conn.execute("""UPDATE persons SET last_seen_at=?, frames_seen=?,
+                    height_px=?, confidence=?, colour_hist=? WHERE id=?""",
+                    (now, person.get("frames_seen",0), person.get("height_px"),
+                     person.get("confidence",0), _ch, pid))
+            else:
+                conn.execute("""UPDATE persons SET last_seen_at=?, frames_seen=?,
+                    height_px=?, confidence=? WHERE id=?""",
+                    (now, person.get("frames_seen",0), person.get("height_px"),
+                     person.get("confidence",0), pid))
         else:
             conn.execute("""INSERT INTO persons
                 (id,room_id,height_px,shoulder_width_px,cadence_est,
@@ -943,18 +1017,30 @@ def person_detect():
         AND datetime(last_seen_at) > datetime('now','-10 minutes')
     """, (room_id,)).fetchone()[0]
     result = {"status":"ok","unidentified_count":unidentified}
-    if unidentified > 1:
-        existing_alert = conn.execute("""
-            SELECT id FROM person_alerts WHERE room_id=?
-            AND alert_type='multiple_persons' AND resolved=0
-            AND datetime(created_at) > datetime('now','-30 minutes')
-        """, (room_id,)).fetchone()
-        if not existing_alert:
-            conn.execute("INSERT INTO person_alerts (alert_type,room_id,person_ids) VALUES (?,?,?)",
-                ("multiple_persons", room_id,
-                 json.dumps([p["person_id"] for p in data.get("persons",[]) if p.get("person_id")])))
-            conn.commit()
-            result["new_alert"] = True
+    # One prompt per new unnamed person, holding only that person, created
+    # once. Anyone who has ever had a prompt, or has a name, is never asked
+    # about again.
+    _asked = set()
+    for _r in conn.execute("SELECT person_ids FROM person_alerts"):
+        try:
+            _ids = json.loads(_r["person_ids"] or "[]")
+            _asked.update(_ids if isinstance(_ids, list) else [])
+        except Exception:
+            pass
+    _new = []
+    for person in data.get("persons", []):
+        pid = person.get("person_id")
+        if not pid or pid in _asked or pid in _new:
+            continue
+        _row = conn.execute("SELECT name, confidence FROM persons WHERE id=?", (pid,)).fetchone()
+        if _row is None or (_row["name"] or "") or (_row["confidence"] or 0) < 0.9:   # LIVE_VIDEO_V1
+            continue
+        conn.execute("INSERT INTO person_alerts (alert_type,room_id,person_ids) VALUES (?,?,?)",
+                     ("new_person", room_id, json.dumps([pid])))
+        _new.append(pid)
+    if _new:
+        conn.commit()
+        result["new_alert"] = True
     conn.close()
     return jsonify(result)
 
@@ -970,6 +1056,7 @@ def identify_person(person_id):
     return jsonify({"status":"ok"})
 
 @app.route("/persons/alerts", methods=["GET"])
+@require_api_key
 def person_alerts():
     conn = get_db()
     room_id = request.args.get("room_id","room_1")
@@ -1012,6 +1099,7 @@ def record_person_detection(person_id):
     return jsonify({"status":"ok"})
 
 @app.route("/persons/<person_id>/baseline-status", methods=["GET"])
+@require_api_key
 def person_baseline_status(person_id):
     conn = get_db()
     rows = conn.execute(
@@ -1034,6 +1122,7 @@ def person_baseline_status(person_id):
 
 
 @app.route("/persons/<person_id>/detections", methods=["GET"])
+@require_api_key
 def person_detections_history(person_id):
     conn = get_db()
     days = int(request.args.get("days", 14))
@@ -1066,6 +1155,13 @@ def save_person_photo(person_id):
         return jsonify({"status": "error", "reason": "no photo"}), 400
     if len(photo) > MAX_PHOTO_B64_BYTES:
         return jsonify({"status": "error", "reason": "photo too large"}), 400
+    # ONE_PHOTO_PER_PERSON: the first photo is kept for good, and a named
+    # person is never photographed again.
+    _pc = get_db()
+    _pr = _pc.execute("SELECT name, photo_b64 FROM persons WHERE id=?", (person_id,)).fetchone()
+    _pc.close()
+    if _pr is not None and ((_pr["name"] or "") or _pr["photo_b64"]):
+        return jsonify({"status": "kept", "reason": "one photo per person"}), 200
     conn = get_db()
     # The photo can arrive before /persons/detect has created the row (photo
     # capture is attempted every frame, independent of the 60s metadata
@@ -1084,6 +1180,7 @@ def save_person_photo(person_id):
     return jsonify({"status": "ok"})
 
 @app.route("/persons/<person_id>/photo", methods=["GET"])
+@require_api_key
 def get_person_photo(person_id):
     conn = get_db()
     row = conn.execute("SELECT photo_b64 FROM persons WHERE id=?", (person_id,)).fetchone()
@@ -1095,6 +1192,7 @@ def get_person_photo(person_id):
 
 
 @app.route("/persons/<person_id>/weekly-trend", methods=["GET"])
+@require_api_key
 def person_weekly_trend(person_id):
     conn = get_db()
     def week_avg(offset_weeks):
@@ -1564,6 +1662,21 @@ def merge_person(person_id):
             conn.close()
             return jsonify({"error": "person not found"}), 404
 
+        # Carry the newest appearance onto the named record. The duplicate is
+        # the person as they look right now; the target may hold no colour
+        # and a stale height from one distant glimpse.
+        _srow = conn.execute("SELECT height_px, colour_hist FROM persons WHERE id=?",
+                             (person_id,)).fetchone()
+        if _srow is not None:
+            conn.execute("UPDATE persons SET height_px=COALESCE(?, height_px), "
+                         "colour_hist=COALESCE(?, colour_hist), "
+                         "last_seen_at=datetime('now','localtime') WHERE id=?",
+                         (_srow[0], _srow[1], target))
+        conn.execute("CREATE TABLE IF NOT EXISTS person_merges ("
+                     "source TEXT PRIMARY KEY, target TEXT NOT NULL, "
+                     "merged_at TEXT DEFAULT (datetime('now','localtime')))")
+        conn.execute("INSERT OR REPLACE INTO person_merges (source, target) "
+                     "VALUES (?,?)", (person_id, target))
         moved = conn.execute("SELECT COUNT(*) FROM person_detections "
                              "WHERE person_id=?", (person_id,)).fetchone()[0]
         conn.execute("UPDATE person_detections SET person_id=? WHERE person_id=?",
@@ -1897,7 +2010,11 @@ def ack_all_alerts():
         conn = get_db()
         _ensure_ack_columns(conn)
         n = conn.execute("SELECT COUNT(*) FROM alerts WHERE seen=0").fetchone()[0]
-        conn.execute("UPDATE alerts SET seen=1, acknowledged_by=?, "
+        if "ack_bulk" not in [c[1] for c in conn.execute("PRAGMA table_info(alerts)")]:
+            conn.execute("ALTER TABLE alerts ADD COLUMN ack_bulk INTEGER DEFAULT 0")
+        # Bulk clearing is housekeeping, not a response; flag it so it never
+        # counts toward response-time figures.
+        conn.execute("UPDATE alerts SET seen=1, acknowledged_by=?, ack_bulk=1, "
                      "acknowledged_at=datetime('now','localtime') WHERE seen=0",
                      (who,))
         conn.commit()
@@ -1922,6 +2039,680 @@ def alerts_unseen():
                         "oldest_unseen_at": oldest})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+
+@app.route("/persons/merges")
+@require_api_key
+def person_merges():
+    """Recent merges, so the camera can stop using an id the caregiver has
+    already folded into someone. Also undoes any duplicate that the camera
+    re-reported in the seconds before it learned about the merge."""
+    try:
+        conn = get_db()
+        conn.execute("CREATE TABLE IF NOT EXISTS person_merges ("
+                     "source TEXT PRIMARY KEY, target TEXT NOT NULL, "
+                     "merged_at TEXT DEFAULT (datetime('now','localtime')))")
+        rows = conn.execute(
+            "SELECT source, target FROM person_merges "
+            "WHERE merged_at > datetime('now','localtime','-7 days')").fetchall()
+        for r in rows:
+            conn.execute("UPDATE person_detections SET person_id=? WHERE person_id=?",
+                         (r["target"], r["source"]))
+            conn.execute("DELETE FROM persons WHERE id=?", (r["source"],))
+        conn.commit()
+        conn.close()
+        return jsonify({"merges": [{"source": r["source"], "target": r["target"]}
+                                   for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Escalation. A fall nobody acknowledges should not end with one text.
+# ---------------------------------------------------------------------------
+ESCALATE_AFTER_S = 5 * 60
+ESCALATE_REPEAT_S = 15 * 60
+ESCALATE_MAX = 3
+
+
+def _escalation_loop():
+    import time as _t
+    first_seen = {}      # alert id -> monotonic time first seen unacknowledged
+    last_sent = {}       # alert id -> monotonic time of last escalation
+    sent_count = {}
+    ignore = None        # alerts already open at startup are never escalated
+    while True:
+        try:
+            conn = get_db()
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(alerts)")]
+            if "escalation_count" not in cols:
+                conn.execute("ALTER TABLE alerts ADD COLUMN escalation_count INTEGER DEFAULT 0")
+            if "escalated_at" not in cols:
+                conn.execute("ALTER TABLE alerts ADD COLUMN escalated_at TEXT")
+            conn.commit()
+            open_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM alerts WHERE alert_type='fall' AND seen=0")]
+            cfg = conn.execute("SELECT resident_name FROM config LIMIT 1").fetchone()
+            name = (cfg[0] if cfg and cfg[0] else "the resident")
+
+            if ignore is None:
+                ignore = set(open_ids)
+                print("[ESCALATE] watching; %d pre-existing open alert(s) ignored"
+                      % len(ignore), flush=True)
+
+            now = _t.monotonic()
+            for aid in open_ids:
+                if aid in ignore:
+                    continue
+                first_seen.setdefault(aid, now)
+                age = now - first_seen[aid]
+                n = sent_count.get(aid, 0)
+                if n >= ESCALATE_MAX or age < ESCALATE_AFTER_S:
+                    continue
+                if n > 0 and now - last_sent.get(aid, 0) < ESCALATE_REPEAT_S:
+                    continue
+                mins = int(age // 60)
+                send_sms("VIGIL URGENT: A fall detected for %s has not been "
+                         "acknowledged after %d minutes. Please check on them now."
+                         % (name, mins))
+                send_push("VIGIL URGENT: fall not acknowledged",
+                          "A possible fall has not been acknowledged after %d minutes. "
+                          "Check on the resident now." % mins,
+                          "urgent", "rotating_light")
+                sent_count[aid] = n + 1
+                last_sent[aid] = now
+                conn.execute("UPDATE alerts SET escalation_count=?, "
+                             "escalated_at=datetime('now','localtime') WHERE id=?",
+                             (n + 1, aid))
+                conn.commit()
+                print("[ESCALATE] alert %s escalation %d after %d min"
+                      % (aid, n + 1, mins), flush=True)
+
+            for aid in list(first_seen):
+                if aid not in open_ids:          # acknowledged or removed
+                    first_seen.pop(aid, None)
+                    last_sent.pop(aid, None)
+                    sent_count.pop(aid, None)
+            conn.close()
+        except Exception as e:
+            print("[ESCALATE] error: %s" % e, flush=True)
+        _t.sleep(60)
+
+
+def _start_escalation():
+    import threading as _th
+    import os as _os
+    # Flask's debug reloader imports the app twice; only run in the real process.
+    if _os.environ.get("WERKZEUG_RUN_MAIN") == "false":
+        return
+    _th.Thread(target=_escalation_loop, daemon=True, name="escalation").start()
+
+
+_start_escalation()
+
+
+
+@app.route("/alert/bed_exit", methods=["POST"])
+@require_api_key
+def alert_bed_exit():
+    """Night-time bed exit. Recorded and shown in the app; never texted,
+    because the SMS campaign is registered for falls and inactivity only."""
+    data = request.get_json() or {}
+    if alert_rate_limited("bed_exit"):
+        return jsonify({"status": "rate_limited"}), 429
+    conn = get_db()
+    now = datetime.now()
+    mins = round((data.get("rested_s") or 0) / 60)
+    conn.execute("INSERT INTO alerts (alert_type,detected_at,payload) VALUES ('bed_exit',?,?)", (
+        now.isoformat(), json.dumps({
+            "rested_min": mins, "hour": now.hour,
+            "message": "Got up during the night after resting about %d minute%s"
+                       % (mins, "" if mins == 1 else "s")})))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+
+# ---------------------------------------------------------------------------
+# Weekly summary. Plain language, own-history comparisons, response times.
+# ---------------------------------------------------------------------------
+_WEEK_LABELS = {"fall": ("fall", "falls"),
+                "bed_exit": ("night bed exit", "night bed exits"),
+                "stillness": ("long stillness alert", "long stillness alerts"),
+                "health_signal": ("health signal", "health signals")}
+
+
+def _parse_ts(v):
+    from datetime import datetime as _dt
+    try:
+        return _dt.fromisoformat(str(v).replace("Z", "").replace("T", " ")[:19])
+    except Exception:
+        return None
+
+
+@app.route("/summary/weekly")
+@require_api_key
+def summary_weekly():
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        import statistics as _st
+        conn = get_db()
+        now = _dt.now()
+        w0, w1 = now - _td(days=7), now - _td(days=14)
+
+        cfg = get_config(conn)
+        name = cfg.get("resident_name") or "the resident"
+        prow = conn.execute("SELECT id, name FROM persons WHERE name IS NOT NULL "
+                            "AND name != '' ORDER BY is_resident DESC LIMIT 1").fetchone()
+        pid = prow["id"] if prow else None
+        if prow and prow["name"]:
+            name = prow["name"]
+
+        def gait(lo, hi):
+            if not pid:
+                return None, None
+            r = conn.execute(
+                "SELECT AVG(NULLIF(gait_speed_ms,0)), AVG(NULLIF(cadence_spm,0)), COUNT(*) "
+                "FROM person_detections WHERE person_id=? "
+                "AND detected_at >= datetime('now', ?) AND detected_at < datetime('now', ?)",
+                (pid, "-%d days" % lo, "-%d days" % hi)).fetchone()
+            return (r[0], r[1]) if r and r[2] and r[2] >= 10 else (None, None)
+
+        sp0, cad0 = gait(7, 0)
+        sp1, cad1 = gait(14, 7)
+
+        act = [{}, {}]
+        nights = [0, 0]
+        for r in conn.execute("SELECT activity, started_at, duration_s FROM activity_events "
+                              "WHERE started_at >= ?", (w1.isoformat(),)):
+            t = _parse_ts(r["started_at"])
+            if t is None or r["activity"] != "active":
+                continue
+            k = 0 if t >= w0 else 1
+            d = t.strftime("%Y-%m-%d")
+            act[k][d] = act[k].get(d, 0.0) + float(r["duration_s"] or 0) / 60.0
+            if t.hour >= 22 or t.hour < 6:
+                nights[k] += 1
+
+        def hours(m):
+            return (sum(m.values()) / len(m) / 60.0) if m else None
+
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(alerts)")]
+        has_ack = "acknowledged_at" in cols
+        has_bulk = "ack_bulk" in cols
+        q = ("SELECT alert_type, detected_at, seen%s%s FROM alerts"
+             % (", acknowledged_at" if has_ack else "",
+                ", ack_bulk" if has_bulk else ""))
+        counts, waits, open_n = {}, [], 0
+        for r in conn.execute(q):
+            t = _parse_ts(r["detected_at"])
+            if t is None or t < w0:
+                continue
+            counts[r["alert_type"]] = counts.get(r["alert_type"], 0) + 1
+            if not r["seen"]:
+                open_n += 1
+            elif has_ack and r["acknowledged_at"] and not (has_bulk and r["ack_bulk"]):
+                a = _parse_ts(r["acknowledged_at"])
+                if a and a >= t:
+                    waits.append((a - t).total_seconds() / 60.0)
+        conn.close()
+
+        def cmp(cur, prev, unit, fmt):
+            if cur is None:
+                return None
+            s = (fmt % cur) + " " + unit
+            if prev:
+                pct = (cur - prev) / prev * 100.0
+                s += (", about the same as last week" if abs(pct) < 5 else
+                      ", %s %d%% from last week" % ("up" if pct > 0 else "down",
+                                                    round(abs(pct))))
+            return s
+
+        lines = []
+        x = cmp(sp0, sp1, "m/s", "%.2f")
+        if x:
+            lines.append("Walking speed averaged " + x + ".")
+        x = cmp(cad0, cad1, "steps/min", "%.0f")
+        if x:
+            lines.append("Cadence averaged " + x + ".")
+        h0, h1 = hours(act[0]), hours(act[1])
+        if h0 is not None:
+            s = ("About %d minutes active per day" % round(h0 * 60) if h0 < 1.0
+                 else "About %.1f hours active per day" % h0)
+            # A percentage on a few minutes a day swings wildly and means nothing.
+            if h1 and h0 >= 0.5 and h1 >= 0.5:
+                pct = (h0 - h1) / h1 * 100.0
+                s += (", about the same as last week" if abs(pct) < 5 else
+                      ", %s %d%% from last week" % ("up" if pct > 0 else "down",
+                                                    round(abs(pct))))
+            lines.append(s + ".")
+        lines.append("Night-time activity: %d episode%s this week (%d last week)."
+                     % (nights[0], "" if nights[0] == 1 else "s", nights[1]))
+        if counts:
+            parts = []
+            for k, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+                one, many = _WEEK_LABELS.get(k, ("other alert", "other alerts"))
+                parts.append("%d %s" % (n, one if n == 1 else many))
+            lines.append("Alerts this week: " + ", ".join(parts) + ".")
+        else:
+            lines.append("No alerts this week.")
+        if waits:
+            _m = _st.median(waits)
+            lines.append("Median time to acknowledge an alert: %s."
+                         % (("%d min" % round(_m)) if _m < 90
+                            else ("about %d hours" % round(_m / 60))))
+        if open_n:
+            lines.append("%d alert%s still unacknowledged."
+                         % (open_n, "" if open_n == 1 else "s"))
+
+        period = "%s to %s" % (w0.strftime("%b %d"), now.strftime("%b %d"))
+        text = ("VIGIL weekly summary for %s (%s)\n\n" % (name, period)
+                + "\n".join(lines)
+                + "\n\nVIGIL compares each resident with their own history. "
+                  "It does not diagnose conditions.")
+        return jsonify({"period": period, "name": name, "lines": lines, "text": text})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+# ---------------------------------------------------------------------------
+# Push notifications via ntfy. Generic text only: the resident's name and
+# health details never leave the Jetson. Replaced by Apple push later.
+# ---------------------------------------------------------------------------
+_PUSH_TEXT = {
+    "fall": ("VIGIL: possible fall",
+             "A possible fall was detected. Open VIGIL and confirm someone is responding.",
+             "urgent", "rotating_light"),
+    "stillness": ("VIGIL: no movement",
+                  "No movement for an unusually long time. Open VIGIL to check.",
+                  "high", "warning"),
+    "bed_sitting": ("VIGIL: sitting up at night",
+                    "The resident sat up in bed during the night and may be about to get up. Open VIGIL.",
+                    "high", "crescent_moon"),
+    "bed_exit": ("VIGIL: up during the night",
+                 "The resident got up during the night. Open VIGIL to check.",
+                 "default", "crescent_moon"),
+    "health_signal": ("VIGIL: change noted",
+                      "A change from the resident's usual pattern was noted. Open VIGIL.",
+                      "low", "chart_with_downwards_trend"),
+}
+
+
+def send_push(title, message, priority="default", tags=""):
+    topic = os.environ.get("VIGIL_NTFY_TOPIC")
+    if not topic:
+        return False
+    server = os.environ.get("VIGIL_NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+    try:
+        import requests as _rq
+        _rq.post("%s/%s" % (server, topic), data=message.encode("utf-8"),
+                 headers={"Title": title, "Priority": priority, "Tags": tags},
+                 timeout=5)
+        print("[PUSH] sent: %s" % title, flush=True)
+        return True
+    except Exception as e:
+        print("[PUSH] failed: %s" % e, flush=True)
+        return False
+
+
+def _push_loop():
+    import time as _t
+    last = None
+    while True:
+        try:
+            conn = get_db()
+            mx = conn.execute("SELECT COALESCE(MAX(id),0) FROM alerts").fetchone()[0]
+            if last is None:
+                last = mx                  # history at startup never pushes
+                print("[PUSH] watching alerts from id %d" % last, flush=True)
+            if mx < last:
+                last = 0                   # table was cleared; ids restarted
+            if mx > last:
+                for r in conn.execute("SELECT id, alert_type, payload FROM alerts "
+                                      "WHERE id > ? ORDER BY id", (last,)):
+                    if "TEST" in str(r["payload"] or "").upper():
+                        continue           # end-to-end test alerts
+                    t = _PUSH_TEXT.get(r["alert_type"])
+                    if t:
+                        send_push(*t)
+                last = mx
+            conn.close()
+        except Exception as e:
+            print("[PUSH] loop error: %s" % e, flush=True)
+        _t.sleep(5)
+
+
+def _start_push():
+    import threading as _th
+    import os as _os
+    if _os.environ.get("WERKZEUG_RUN_MAIN") == "false":
+        return
+    _th.Thread(target=_push_loop, daemon=True, name="push").start()
+
+
+_start_push()
+
+
+
+# ---------------------------------------------------------------------------
+# Identity hygiene. Ask about a person once, never re-prompt for someone who
+# has been named, and forget unnamed people who stop appearing.
+# ---------------------------------------------------------------------------
+UNNAMED_EXPIRE_H = 12
+UNFAMILIAR_PUSH_GAP_S = 600
+
+
+def _hyg_ts(v):
+    from datetime import datetime as _dt
+    try:
+        return _dt.fromisoformat(str(v).replace("Z", "").replace("T", " ")[:19])
+    except Exception:
+        return None
+
+
+def _hygiene_loop():
+    import time as _t
+    import json as _js
+    from datetime import datetime as _dt, timedelta as _td
+    last_alert_id = None
+    last_push = 0.0
+    while True:
+        try:
+            conn = get_db()
+            people = {r["id"]: (r["name"], r["last_seen_at"]) for r in
+                      conn.execute("SELECT id, name, last_seen_at FROM persons")}
+            named = {p for p, (n, _ls) in people.items() if n}
+
+            cutoff = _dt.now() - _td(hours=UNNAMED_EXPIRE_H)
+            expired = []
+            for p, (n, ls) in people.items():
+                if n:
+                    continue
+                t = _hyg_ts(ls)
+                if t is not None and t < cutoff:
+                    expired.append(p)
+            for p in expired:
+                conn.execute("DELETE FROM person_detections WHERE person_id=?", (p,))
+                conn.execute("DELETE FROM persons WHERE id=?", (p,))
+            alive = set(people) - set(expired)
+
+            prompted = set()
+            for r in conn.execute("SELECT id, person_ids FROM person_alerts "
+                                  "WHERE resolved=0 ORDER BY id").fetchall():
+                raw = r["person_ids"]
+                try:
+                    ids = _js.loads(raw) if isinstance(raw, str) else list(raw or [])
+                except Exception:
+                    ids = [s.strip() for s in str(raw or "").strip("[]").replace('"', "").split(",") if s.strip()]
+                pending = [p for p in ids if p in alive and p not in named]
+                if not pending or all(p in prompted for p in pending):
+                    conn.execute("UPDATE person_alerts SET resolved=1 WHERE id=?", (r["id"],))
+                else:
+                    prompted.update(pending)
+            conn.commit()
+
+            mx = conn.execute("SELECT COALESCE(MAX(id),0) FROM person_alerts").fetchone()[0]
+            if last_alert_id is None:
+                last_alert_id = mx
+            if mx < last_alert_id:
+                last_alert_id = 0
+            if mx > last_alert_id:
+                fresh = conn.execute("SELECT COUNT(*) FROM person_alerts "
+                                     "WHERE id>? AND resolved=0", (last_alert_id,)).fetchone()[0]
+                last_alert_id = mx
+                push = globals().get("send_push")
+                if fresh and push and _t.time() - last_push > UNFAMILIAR_PUSH_GAP_S:
+                    last_push = _t.time()
+                    push("VIGIL: unfamiliar person",
+                         "Someone VIGIL does not recognise was seen. Open VIGIL to identify them.",
+                         "default", "bust_in_silhouette")
+            conn.close()
+            if expired:
+                print("[HYGIENE] removed %d unnamed person(s) unseen for %dh"
+                      % (len(expired), UNNAMED_EXPIRE_H), flush=True)
+        except Exception as e:
+            print("[HYGIENE] error: %s" % e, flush=True)
+        _t.sleep(30)
+
+
+def _start_hygiene():
+    import threading as _th
+    import os as _os
+    if _os.environ.get("WERKZEUG_RUN_MAIN") == "false":
+        return
+    _th.Thread(target=_hygiene_loop, daemon=True, name="hygiene").start()
+
+
+_start_hygiene()
+
+
+
+@app.route("/alert/bed_sitting", methods=["POST"])
+@require_api_key
+def alert_bed_sitting():
+    """Sitting up in bed at night after resting. In-app and push only."""
+    data = request.get_json() or {}
+    if alert_rate_limited("bed_sitting"):
+        return jsonify({"status": "rate_limited"}), 429
+    conn = get_db()
+    now = datetime.now()
+    mins = round((data.get("rested_s") or 0) / 60)
+    conn.execute("INSERT INTO alerts (alert_type,detected_at,payload) VALUES ('bed_sitting',?,?)", (
+        now.isoformat(), json.dumps({
+            "rested_min": mins, "hour": now.hour,
+            "message": "Sat up in bed during the night after resting about %d minute%s"
+                       % (mins, "" if mins == 1 else "s")})))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+
+# FALL_REPLAY_V1 ------------------------------------------------------------
+def _replay_table(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS fall_replays (
+        alert_id INTEGER PRIMARY KEY, frames TEXT, created_at TEXT)""")
+
+
+@app.route("/alert/fall/replay", methods=["POST"])
+@require_api_key
+def alert_fall_replay():
+    """Attach the camera's last 30 s of body points to the newest fall
+    alert from the last 2 minutes that has no replay yet."""
+    data = request.get_json() or {}
+    frames = data.get("frames") or []
+    if not isinstance(frames, list) or not frames or len(frames) > 400:
+        return jsonify({"status": "ignored"}), 200
+    conn = get_db()
+    _replay_table(conn)
+    # Only a fall from the last 2 minutes, so a rate-limited repeat never
+    # attaches itself to an older alert.
+    row = conn.execute("""SELECT id FROM alerts WHERE alert_type='fall'
+        AND id NOT IN (SELECT alert_id FROM fall_replays)
+        AND datetime(replace(substr(detected_at,1,19),'T',' '))
+            >= datetime('now','localtime','-2 minutes')
+        ORDER BY id DESC LIMIT 1""").fetchone()
+    if row is None:
+        conn.close()
+        return jsonify({"status": "no_alert"}), 200
+    conn.execute("INSERT OR REPLACE INTO fall_replays (alert_id, frames, created_at) VALUES (?,?,datetime('now','localtime'))",
+                 (row["id"], json.dumps(frames)))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "alert_id": row["id"]})
+
+
+@app.route("/alerts/<int:alert_id>/replay")
+@require_api_key
+def get_fall_replay(alert_id):
+    conn = get_db()
+    _replay_table(conn)
+    row = conn.execute("SELECT frames FROM fall_replays WHERE alert_id=?", (alert_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return jsonify({"available": False})
+    return jsonify({"available": True, "frames": json.loads(row["frames"])})
+
+
+
+# ZONES_API_V1: bed and couch zones, set from the app's Room setup screen.
+_ZONES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fall_zones.json")
+
+
+@app.route("/zones", methods=["GET"])
+@require_api_key
+def get_zones():
+    try:
+        with open(_ZONES_PATH) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = [data]
+    except Exception:
+        data = []
+    return jsonify({"zones": data})
+
+
+@app.route("/zones", methods=["POST"])
+@require_api_key
+def save_zones():
+    body = request.get_json() or {}
+    out = []
+    for z in (body.get("zones") or [])[:6]:
+        try:
+            x1, y1, x2, y2 = (float(z[k]) for k in ("x1", "y1", "x2", "y2"))
+        except Exception:
+            continue
+        x1, x2 = sorted((max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))))
+        y1, y2 = sorted((max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))))
+        if x2 - x1 < 0.03 or y2 - y1 < 0.03:
+            continue
+        out.append({"x1": round(x1, 3), "y1": round(y1, 3), "x2": round(x2, 3), "y2": round(y2, 3),
+                    "label": str(z.get("label") or "Furniture")[:24]})
+    tmp = _ZONES_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(out, f)
+    os.replace(tmp, _ZONES_PATH)
+    return jsonify({"status": "ok", "zones": out})
+
+
+
+# PERSON_CORRECT_V1: "this is someone else", from the app.
+@app.route("/persons/<person_id>/correct", methods=["POST"])
+@require_api_key
+def correct_person(person_id):
+    target = (request.get_json() or {}).get("target_person_id")
+    if not target or target == person_id:
+        return jsonify({"status": "error", "reason": "target_person_id required"}), 400
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS person_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')), applied INTEGER DEFAULT 0)""")
+    conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, ?)", (person_id, target))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+
+# IN_VIEW_V1: exactly who is in the camera picture right now.
+@app.route("/persons/in-view", methods=["GET"])
+@require_api_key
+def persons_in_view():
+    try:
+        with open("/dev/shm/vigil_in_view.json") as f:
+            d = json.load(f)
+        if time.time() - float(d.get("t", 0)) > 3:
+            return jsonify({"people": [], "identifying": 0, "fresh": False})
+        ids = d.get("ids") or []
+    except Exception:
+        return jsonify({"people": [], "identifying": 0, "fresh": False})
+    conn = get_db()
+    people, seen = [], set()
+    for pid in ids:
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        row = conn.execute("SELECT name, is_resident FROM persons WHERE id=?", (pid,)).fetchone()
+        people.append({"id": pid, "name": (row["name"] if row else None) or None,
+                       "is_resident": int(row["is_resident"] or 0) if row else 0})
+    conn.close()
+    labels = d.get("labels") or []
+    tids = d.get("tids") or []
+    others = [{"label": (labels[i] if i < len(labels) and labels[i] else "Identifying..."),
+               "track": (tids[i] if i < len(tids) else None)}
+              for i, p in enumerate(ids) if not p]
+    return jsonify({"people": people, "identifying": sum(1 for p in ids if not p),
+                    "others": others, "fresh": True})
+
+
+
+# IDENTITY_MODE_V1: one resident per camera, or everyone in the home.
+@app.route("/identity/mode", methods=["GET", "POST"])
+@require_api_key
+def identity_mode():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vigil_mode.json")
+    if request.method == "POST":
+        body = request.get_json() or {}
+        mode = body.get("mode")
+        if mode not in ("resident", "family"):
+            return jsonify({"status": "error", "reason": "mode must be resident or family"}), 400
+        with open(path + ".tmp", "w") as f:
+            json.dump({"mode": mode}, f)
+        os.replace(path + ".tmp", path)
+        rid = body.get("resident_person_id")
+        if rid:
+            conn = get_db()
+            conn.execute("UPDATE config SET resident_person_id=?", (rid,))
+            conn.commit()
+            conn.close()
+    try:
+        with open(path) as f:
+            mode = json.load(f).get("mode", "family")
+    except Exception:
+        mode = "family"
+    conn = get_db()
+    try:
+        r = conn.execute("SELECT resident_person_id FROM config").fetchone()
+        rid = r[0] if r else None
+    except Exception:
+        rid = None
+    conn.close()
+    return jsonify({"mode": mode, "resident_person_id": rid})
+
+
+@app.route("/tracks/<int:track_id>/assign", methods=["POST"])
+@require_api_key
+def assign_track(track_id):
+    """'This is <name>' for someone VIGIL has not named yet."""
+    target = (request.get_json() or {}).get("target_person_id")
+    if not target:
+        return jsonify({"status": "error", "reason": "target_person_id required"}), 400
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS person_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')), applied INTEGER DEFAULT 0)""")
+    conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, ?)", ("track:%d" % track_id, target))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/persons/<person_id>/confirm", methods=["POST"])
+@require_api_key
+def confirm_person(person_id):
+    """'Yes, this is <name>': pin the current look into their memory."""
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS person_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')), applied INTEGER DEFAULT 0)""")
+    conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, ?)", (person_id, person_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
 
 
 if __name__ == "__main__":
