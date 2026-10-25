@@ -57,6 +57,7 @@ try {
 }
 
 import axios from 'axios';
+import {launchImageLibrary} from 'react-native-image-picker';  // PHOTO_PICK_V1
 
 // ─────────────────────────────────────────────
 // CONFIG
@@ -65,7 +66,7 @@ const DEFAULT_IP    = 'your-jetson-ip';
 const DEFAULT_PORT  = '5001';
 const TIMEOUT_MS    = 10_000;
 const AUTO_SYNC_SEC = 60;
-const VIGIL_KEY     = 'set-your-api-key-here';
+const VIGIL_KEY     = 'YOUR_VIGIL_API_KEY';   // must match VIGIL_API_KEY on the monitoring unit
 const FALLBACK_URL  = `http://${DEFAULT_IP}:${DEFAULT_PORT}`;
 
 const SK_ONBOARDING = '@vigil_onboarding_v1';
@@ -588,9 +589,9 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
 // AI INSIGHTS SCREEN
 // ─────────────────────────────────────────────
 function PersonDetailScreen({
-  personId, personName, serverUrl, onClose, demoMode,
+  personId, personName, serverUrl, onClose, demoMode, embedded, view='week',
 }:{personId:string; personName:string; serverUrl:string; onClose:()=>void;
-   demoMode?:boolean}) {
+   demoMode?:boolean; embedded?:boolean; view?:'week'|'baseline'}) {
   const [trends,setTrends]         = useState<PersonTrendDay[]>([]);
   const [baseline,setBaseline]     = useState<PersonBaselineStatus|null>(null);
   const [weeklyTrend,setWeeklyTrend] = useState<any>(null);
@@ -650,6 +651,75 @@ function PersonDetailScreen({
   const daysNeeded = baseline?.days_needed ?? 7;
   const hasBaseline = baseline?.has_baseline ?? (daysCollected>=daysNeeded);
   const progressPct = Math.min(100,(daysCollected/Math.max(1,daysNeeded))*100);
+
+  // TRENDS_INLINE_V1: the same person's 7-day and baseline, shown inside Trends.
+  if(embedded){
+    if(pdLoading)return <View style={{paddingVertical:40,alignItems:'center'}}><ActivityIndicator color={C.green}/></View>;
+    const cutoff=new Date(); cutoff.setDate(cutoff.getDate()-6);
+    const cut=cutoff.toISOString().slice(0,10);
+    const wk=trends.filter(t=>t.date>=cut);
+    const stat=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>{
+      const b=baseline?.baseline?.[k];
+      if(b)return {mean:b.mean,std:b.std,src:'baseline'};
+      const v=trends.map(t=>t[k]).filter(x=>x!=null) as number[];
+      if(v.length<3)return null;
+      const m=v.reduce((a,b2)=>a+b2,0)/v.length;
+      return {mean:m,std:Math.sqrt(v.reduce((a,b2)=>a+(b2-m)**2,0)/v.length),src:'sofar'};
+    };
+    const rows:[string,'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry',string,number][]=[
+      ['Walking Speed','avg_speed','m/s',2],['Cadence','avg_cadence','spm',0],
+      ['Posture Score','avg_posture','/100',0],['Gait Asymmetry','avg_asymmetry','%',1]];
+    const latest=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>{const v=trends.map(t=>t[k]).filter(x=>x!=null) as number[];return v.length?v[v.length-1]:null;};
+    return(
+      <View>
+        <View style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:16,padding:16}}>
+          <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>{hasBaseline?`${personName}'s baseline is set`:`Learning ${personName}'s normal`}</Text>
+            <Text style={{color:hasBaseline?C.green:C.orange,fontSize:13,fontWeight:'600'}}>{hasBaseline?'Active':`Day ${daysCollected} of ${daysNeeded}`}</Text>
+          </View>
+          <View style={{height:6,backgroundColor:C.fill,borderRadius:3}}>
+            <View style={{height:6,width:`${progressPct}%` as any,backgroundColor:C.green,borderRadius:3}}/>
+          </View>
+        </View>
+        {view==='week'?(
+          wk.length===0?(
+            <View style={{alignItems:'center',paddingVertical:36}}>
+              <Text style={{color:C.sub,fontSize:15}}>No walking recorded this week</Text>
+              <Text style={{color:C.muted,fontSize:12,marginTop:4}}>Data appears after {personName} is seen walking by the camera</Text>
+            </View>
+          ):(
+            <>
+              <Text style={s.secHeader}>Gait & Posture — This Week</Text>
+              <PTrendBar data={wk.map(t=>t.avg_speed)} label="Walking Speed" unit="m/s" color={C.teal} dec={2}/>
+              <PTrendBar data={wk.map(t=>t.avg_cadence)} label="Cadence" unit="spm" color={C.blue} dec={0}/>
+              <PTrendBar data={wk.map(t=>t.avg_posture)} label="Posture Score" unit="/100" color={C.purple} dec={0}/>
+              <PTrendBar data={wk.map(t=>t.avg_asymmetry)} label="Gait Asymmetry" unit="%" color={C.orange} dec={1}/>
+            </>
+          )
+        ):(
+          <>
+            <Text style={s.secHeader}>{personName}'s usual range</Text>
+            {rows.map(([lbl,k,unit,dec])=>{
+              const st=stat(k); const lv=latest(k);
+              return(
+                <View key={k} style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16}}>
+                  <Text style={{color:C.sub,fontSize:12.5,fontWeight:'600',marginBottom:4}}>{lbl}</Text>
+                  {st?(
+                    <>
+                      <Text style={{color:C.text,fontSize:20,fontWeight:'800'}}>{st.mean.toFixed(dec)} <Text style={{color:C.sub,fontSize:12}}>± {st.std.toFixed(dec)} {unit}</Text></Text>
+                      <Text style={{color:C.muted,fontSize:12,marginTop:4}}>
+                        {lv!=null?`Latest day: ${lv.toFixed(dec)} ${unit}. `:''}{st.src==='baseline'?'Personal baseline.':`So far, from ${trends.filter(t=>t[k]!=null).length} days; the baseline is set after ${daysNeeded}.`}
+                      </Text>
+                    </>
+                  ):<Text style={{color:C.muted,fontSize:13}}>Not enough days yet</Text>}
+                </View>
+              );
+            })}
+          </>
+        )}
+      </View>
+    );
+  }
 
   return(
     <View style={{flex:1,backgroundColor:C.bg}}>
@@ -826,30 +896,42 @@ function PersonPhotoCard({personId, serverUrl, large=false}:{personId:string; se
 
 // PEOPLE_UI_V1: photo avatars and a person picker, shared by every screen.
 const PHOTO_CACHE:{[k:string]:string} = {};
+// PHOTO_PICK_V1: avatars reload when a caregiver changes or removes a photo.
+const PHOTO_SUBS = new Set<()=>void>();
+function bumpPhoto(personId:string){ delete PHOTO_CACHE[personId]; PHOTO_SUBS.forEach(f=>f()); }
+function initialsOf(name:string|null|undefined){
+  const parts=(name??'').trim().split(/\s+/).filter(Boolean);
+  if(!parts.length) return '?';
+  return (parts[0].charAt(0)+(parts.length>1?parts[parts.length-1].charAt(0):'')).toUpperCase();
+}
 function PersonAvatar({personId,name,serverUrl,size=44,isResident=false}:
   {personId:string; name:string|null|undefined; serverUrl:string; size?:number; isResident?:boolean}) {
   const [photo,setPhoto] = useState<string|null>(PHOTO_CACHE[personId]??null);
+  const [ver,setVer] = useState(0);
+  useEffect(()=>{ const f=()=>setVer(v=>v+1); PHOTO_SUBS.add(f); return ()=>{ PHOTO_SUBS.delete(f); }; },[]);
   useEffect(()=>{
     if(PHOTO_CACHE[personId]){ setPhoto(PHOTO_CACHE[personId]); return; }
     let alive = true;
     AX.get(`${serverUrl||FALLBACK_URL}/persons/${personId}/photo`,{timeout:5000})
       .then(r=>{
-        if(alive && r.data?.available && r.data?.photo_b64){
+        if(!alive) return;
+        if(r.data?.available && r.data?.photo_b64){
           PHOTO_CACHE[personId] = r.data.photo_b64;
           setPhoto(r.data.photo_b64);
-        }
+        } else { setPhoto(null); }
       })
       .catch(()=>{});
     return ()=>{ alive = false; };
-  },[personId,serverUrl]);
+  },[personId,serverUrl,ver]);
   const tint = isResident ? C.green : C.blue;
   if(photo) return (
     <Image source={{uri:`data:image/jpeg;base64,${photo}`}}
       style={{width:size,height:size,borderRadius:size/2,borderWidth:2,borderColor:tint}} resizeMode="cover"/>
   );
+  const ini = initialsOf(name);
   return (
-    <View style={{width:size,height:size,borderRadius:size/2,backgroundColor:tint+'22',alignItems:'center',justifyContent:'center',borderWidth:2,borderColor:tint+'55'}}>
-      <Text style={{color:tint,fontWeight:'700',fontSize:Math.round(size*0.4)}}>{(name??'?').charAt(0).toUpperCase()}</Text>
+    <View style={{width:size,height:size,borderRadius:size/2,backgroundColor:tint+'26',alignItems:'center',justifyContent:'center',borderWidth:2,borderColor:tint+'66'}}>
+      <Text style={{color:tint,fontWeight:'800',fontSize:Math.round(size*(ini.length>1?0.36:0.42)),letterSpacing:0.5}}>{ini}</Text>
     </View>
   );
 }
@@ -1962,6 +2044,9 @@ export default function App() {
   const [identifying,setIdentifying]=useState(0);
   // IDENTITY_V6_APP
   const [inViewOthers,setInViewOthers]=useState<{label:string;track:number|null}[]>([]);
+  // STATUS_SYNC_V1: the status line agrees with the 'In view now' list.
+  const someoneInView = !!cameraStatus?.person_present || inViewList.length>0 || identifying>0;
+  const inViewNames = inViewList.map(v=>v.name).filter(Boolean).join(', ');
   const [idMode,setIdMode]=useState<'resident'|'family'|null>(null);
   const loadIdMode=useCallback(async()=>{
     try{ const r=await AX.get(`${urlRef.current||FALLBACK_URL}/identity/mode`,{timeout:5000}); setIdMode(r.data?.mode==='resident'?'resident':'family'); }catch(_e){}
@@ -1983,6 +2068,7 @@ export default function App() {
   const [emergencyPhone,setEmergencyPhone]= useState('');
   const [responderName,setResponderName]  = useState('');
   const [trendView,setTrendView]          = useState<'week'|'baseline'>('week');
+  const [trendPid,setTrendPid]            = useState<string|null>(null);   // TRENDS_INLINE_V1
   useEffect(()=>{AsyncStorage.getItem('vigil_caregiver_name')
     .then(v=>{if(v)setResponderName(v);}).catch(()=>{});},[]);
   const [emergencyEmail,setEmergencyEmail]= useState('');
@@ -2164,6 +2250,33 @@ export default function App() {
     }catch(e:any){log('ERROR',`Edit person: ${e?.message}`);}
     fetchPersons();
   },[fetchPersons,log]);
+  // DELETE_PERSON_APP
+  const deletePerson=useCallback((p:Person)=>{
+    Alert.alert(`Delete ${p.name??'this person'}?`,
+      'Their walking history, baseline and appearance memory are removed. Past alerts stay. This cannot be undone.',[
+      {text:'Cancel',style:'cancel'},
+      {text:'Delete',style:'destructive',onPress:async()=>{
+        try{ await AX.post(`${url()}/persons/${p.id}/delete`,{},{timeout:8000}); }
+        catch(_e){ Alert.alert('Could not delete','Check the connection to the camera unit.'); }
+        fetchPersons();
+      }},
+    ]);
+  },[fetchPersons]);
+  // PHOTO_PICK_V1: the caregiver chooses a clear photo, or uses initials.
+  const choosePhoto=useCallback(async(p:Person)=>{
+    try{
+      const r:any=await launchImageLibrary({mediaType:'photo',includeBase64:true,maxWidth:360,maxHeight:360,quality:0.8,selectionLimit:1});
+      if(r?.didCancel) return;
+      const b64=r?.assets?.[0]?.base64;
+      if(!b64){ Alert.alert('Could not read that photo','Try a different picture.'); return; }
+      await AX.post(`${url()}/persons/${p.id}/photo/set`,{photo_b64:b64},{timeout:15000});
+      bumpPhoto(p.id);
+    }catch(_e){ Alert.alert('Could not update the photo','Check the connection to the camera unit.'); }
+  },[]);
+  const setInitials=useCallback(async(p:Person)=>{
+    try{ await AX.post(`${url()}/persons/${p.id}/photo/clear`,{},{timeout:8000}); bumpPhoto(p.id); }
+    catch(_e){ Alert.alert('Could not update the photo','Check the connection to the camera unit.'); }
+  },[]);
   const editPerson=useCallback((p:Person)=>{
     const others=persons.filter(o=>o.id!==p.id&&!!o.name);
     Alert.alert(p.name??'Person','What would you like to change?',[
@@ -2171,14 +2284,17 @@ export default function App() {
         {text:'Cancel',style:'cancel'},
         {text:'Save',onPress:(v?:string)=>{const n=(v||'').trim();if(n)savePersonEdit(p,n,!!p.is_resident);}},
       ],'plain-text',p.name??'')},
+      {text:'Choose photo',onPress:()=>choosePhoto(p)},
+      {text:'Use initials instead of photo',onPress:()=>setInitials(p)},
       {text:p.is_resident?'Mark as visitor':'Mark as resident',onPress:()=>savePersonEdit(p,p.name??'Person',!p.is_resident)},
       ...(others.length>0?[{text:'Same person as another entry',onPress:()=>Alert.alert(
         `Merge ${p.name}`,'Everything recorded for this entry moves to the person you choose, and this entry is removed.',
         [...others.slice(0,6).map(o=>({text:`Merge into ${o.name}`,style:'destructive' as const,onPress:()=>mergePerson(p.id,o.id)})),
          {text:'Cancel',style:'cancel' as const}])}]:[]),
+      {text:'Delete',style:'destructive',onPress:()=>deletePerson(p)},
       {text:'Cancel',style:'cancel'},
     ]);
-  },[persons,savePersonEdit,mergePerson]);
+  },[persons,savePersonEdit,mergePerson,deletePerson,choosePhoto,setInitials]);
 
   const identifyPerson=useCallback(async(personId:string,name:string,isRes:boolean,alertId?:number)=>{
     try{
@@ -2422,6 +2538,7 @@ export default function App() {
   // ─────────────────────────────────────────────
   const namedPeople=persons.filter(p=>!!p.name);
   const residentPerson=namedPeople.find(p=>!!p.is_resident)??null;
+  const trendPerson=trendPid?(namedPeople.find(p=>p.id===trendPid)??null):null;
   const renderToday=()=>(
     <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>} showsVerticalScrollIndicator={false}>
       <View style={s.pageHead}>
@@ -2509,10 +2626,10 @@ export default function App() {
           <View style={{width:12,height:12,borderRadius:6,backgroundColor:cameraStatus?.online?C.green:C.red}}/>
           <View style={{flex:1}}>
             <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>
-              {cameraStatus?.online&&cameraStatus?.person_present?'Resident Detected':cameraStatus?.online?'Room Empty':'Camera Offline'}
+              {cameraStatus?.online&&someoneInView?'Resident Detected':cameraStatus?.online?'Room Empty':'Camera Offline'}
             </Text>
             <Text style={{color:C.sub,fontSize:12,marginTop:2}}>
-              {cameraStatus?.online?`${cameraStatus.fps?.toFixed(1)??'?'} fps · Live`:'Monitoring unit offline'}
+              {cameraStatus?.online?`${inViewNames?inViewNames+' in view · ':''}${cameraStatus.fps?.toFixed(1)??'?'} fps · Live`:'Monitoring unit offline'}
             </Text>
           </View>
           {(cameraStatus?.person_count??0)>1&&(
@@ -2810,10 +2927,12 @@ export default function App() {
           <Text style={s.pageTitle}>Trends</Text>
           <Text style={s.pageSub}>{history.length} days recorded</Text>
         </View>
-        <PersonChips people={namedPeople} selectedId={residentPerson?.id??null}
-          serverUrl={urlRef.current} onPick={p=>{if(p)setSelectedPerson(p);}}/>
+        <PersonChips people={namedPeople} selectedId={trendPid??residentPerson?.id??null}
+          serverUrl={urlRef.current} onPick={p=>{if(!p)return; setTrendPid(p.id===residentPerson?.id?null:p.id);}}/>
         <Text style={{color:C.muted,fontSize:12,lineHeight:17,marginHorizontal:16,marginBottom:12}}>
-          {`These charts follow ${residentPerson?.name??(residentName||'the person most in view')}, measured by the camera. Tap anyone above to open their own trends.`}
+          {trendPerson
+            ?`${trendPerson.name}'s walking and posture, from the times VIGIL recognised them. Tap another person to switch.`
+            :`These charts follow ${residentPerson?.name??(residentName||'the resident')}, measured by the camera. Tap anyone above to see their trends.`}
         </Text>
         <View style={{flexDirection:'row',marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:12,padding:4}}>
           {([['week','7-Day'],['baseline','Baseline']] as const).map(([key,lbl])=>(
@@ -2824,7 +2943,11 @@ export default function App() {
             </TouchableOpacity>
           ))}
         </View>
-        {trendView==='baseline'?renderBaseline():history.length===0?(
+        {trendPerson?(
+          <PersonDetailScreen key={trendPerson.id} embedded view={trendView} demoMode={demoMode}
+            personId={trendPerson.id} personName={trendPerson.name??'This person'}
+            serverUrl={urlRef.current} onClose={()=>setTrendPid(null)}/>
+        ):trendView==='baseline'?renderBaseline():history.length===0?(
           <View style={s.empty}><View style={s.emptyGlyph}><Text style={s.emptyGlyphTxt}>…</Text></View><Text style={s.emptyTxt}>No trend data yet</Text><Text style={s.emptySub}>Data collects automatically each day</Text></View>
         ):(
           <>
@@ -3118,14 +3241,14 @@ export default function App() {
         <>
           <Text style={s.secHeader}>Monitored People</Text>
           <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginBottom:8,lineHeight:17}}>
-            Everyone VIGIL has recognised. Tap Edit to rename someone, mark them as a visitor, or merge a duplicate.
+            Everyone VIGIL has recognised. Tap Edit to rename, mark as a visitor, merge a duplicate or delete. Press and hold anyone to delete them.
           </Text>
           {persons.map(p=>(
             <TouchableOpacity
               key={p.id}
-              disabled={!p.name}
               activeOpacity={p.name?0.6:1}
               onPress={()=>{if(p.name)setSelectedPerson(p);}}
+              onLongPress={()=>deletePerson(p)}
               style={[s.card,{marginHorizontal:16,marginBottom:8,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}]}>
               <View style={{flexDirection:'row',alignItems:'center',gap:10,flex:1,minWidth:0}}>
                 <PersonAvatar personId={p.id} name={p.name} serverUrl={urlRef.current} size={48} isResident={!!p.is_resident}/>
@@ -3304,7 +3427,7 @@ export default function App() {
             </View>
           )}
           <Text style={{position:'absolute',bottom:48,color:C.muted,fontSize:12}}>
-            {cameraStatus?.person_present?'Resident Detected':'Room Empty'} · {cameraStatus?.fps?.toFixed(1)??'?'} fps
+            {someoneInView?'Resident Detected':'Room Empty'} · {cameraStatus?.fps?.toFixed(1)??'?'} fps
           </Text>
         </View>
       </Modal>

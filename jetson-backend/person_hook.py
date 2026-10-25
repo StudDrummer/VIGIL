@@ -461,6 +461,21 @@ def _apply_corrections():
         except Exception:
             rows = []
         for cid, src, dst in rows:
+            if dst == "__deleted__":          # DELETE_PERSON_V1
+                _signatures.pop(src, None)
+                for _k, _v in list(_track_to_pid.items()):
+                    if _v == src:
+                        _track_to_pid.pop(_k, None)
+                try:
+                    _BODY.pop(src, None)
+                except Exception:
+                    pass
+                if _VR is not None:
+                    _VR.GALLERY.drop(src)
+                    _VR.GALLERY.save(force=True)
+                c.execute("UPDATE person_corrections SET applied=1 WHERE id=?", (cid,))
+                print("[CORRECTION] deleted %s" % src, flush=True)
+                continue
             if str(src).startswith("track:"):
                 try:
                     _t = int(str(src).split(":", 1)[1])

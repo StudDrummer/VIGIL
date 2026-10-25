@@ -74,6 +74,7 @@ except ImportError:
 DEFAULT_SERVER     = "http://localhost:5001"
 MODEL_PATH         = "yolov8n-pose.pt"
 CONF_THRESHOLD     = 0.25
+ID_MIN_CONF        = 0.62   # GHOST_FILTER_V1: below this, a box must move to count as a person
 TARGET_FPS         = 12
 HEARTBEAT_SEC      = 30
 CAMERA_SYNC_SEC    = 20
@@ -545,7 +546,10 @@ def _write_skeleton_frame(results, shape):
         if len(results) > 0 and getattr(results[0], "keypoints", None) is not None:
             data = results[0].keypoints.data
             data = data.cpu().numpy() if hasattr(data, "cpu") else np.asarray(data)
-            for p in data:
+            _gi = getattr(select_all_persons_tracked, "_ghost_idx", set())   # GHOST_FILTER_V1
+            for _j, p in enumerate(data):
+                if _j in _gi:
+                    continue
                 for a, b in _SK_EDGES:
                     if p[a][2] >= 0.3 and p[b][2] >= 0.3:
                         cv2.line(canvas, (int(p[a][0]), int(p[a][1])),
@@ -847,6 +851,108 @@ class FallDetector:
         return False
 
 
+# FALL_V44: one fall detector and one replay per tracked person.
+_FALL_BY_TID = {}
+_REPLAY_BY_TID = {}
+_TID_SEEN = {}
+_FALL_LAST_ALERT = [0.0]
+_FALL_SOLO = [None, 0.0]   # FALL_V45
+_PROBE_CHK = [0.0]
+
+
+def _replay_push_tid(tid, kp, shape):
+    try:
+        now = time.time()
+        q = _REPLAY_BY_TID.setdefault(tid, deque(maxlen=200))
+        if q and now - q[-1][0] < 0.2:
+            return
+        h, w = float(shape[0]), float(shape[1])
+        q.append([round(now, 2),
+                  [[round(float(p[0]) / w, 3), round(float(p[1]) / h, 3)] for p in kp],
+                  [round(float(p[2]), 2) for p in kp]])
+    except Exception:
+        pass
+
+
+def _fall_per_person(persons, tids, shape, client):
+    """Run a fall detector for every tracked person. Returns True if an alert was sent."""
+    now = time.time()
+    sent = False
+    # FALL_V45: with one real person in view, one detector follows them even
+    # when the tracker changes their id mid-fall.
+    try:
+        _nr = int(getattr(select_all_persons_tracked, "_n_real", len(persons)))
+    except Exception:
+        _nr = len(persons)
+    if persons and (_nr == 1 or (_nr == 0 and len(persons) == 1)):   # FALL_V46
+        if _FALL_SOLO[0] is None or now - _FALL_SOLO[1] > 5.0:
+            _FALL_SOLO[0] = FallDetector()
+        _FALL_SOLO[1] = now
+        if _FALL_SOLO[0].update(persons[0], shape) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC:
+            _FALL_LAST_ALERT[0] = now
+            _fd = _FALL_SOLO[0]
+            print(f"[FALL] track=solo hip={_fd.hip_drop_pct:.2f} torso={_fd.torso_angle:.0f} aspect={_fd.aspect:.2f}",
+                  flush=True)
+            client.alert_fall(_fd.hip_drop_pct, _fd.torso_angle)
+            try:
+                _t0 = tids[0] if (tids and tids[0] is not None) else "main"
+                _frames = [f for f in list(_REPLAY_BY_TID.get(_t0, [])) if f[0] >= now - 30]
+                client._post("/alert/fall/replay", {"frames": _frames})
+            except Exception:
+                pass
+            sent = True
+    elif _nr >= 2:
+        _FALL_SOLO[0] = None   # FALL_V46: only two clear people restart it
+    for i, kp in enumerate(persons):
+        tid = tids[i] if (tids and i < len(tids) and tids[i] is not None) else ("main" if i == 0 else None)
+        if tid is None:
+            continue
+        _TID_SEEN[tid] = now
+        _replay_push_tid(tid, kp, shape)
+        fd = _FALL_BY_TID.get(tid)
+        if fd is None:
+            fd = _FALL_BY_TID[tid] = FallDetector()
+        if fd.update(kp, shape) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC:
+            _FALL_LAST_ALERT[0] = now
+            print(f"[FALL] track={tid} hip={fd.hip_drop_pct:.2f} torso={fd.torso_angle:.0f} aspect={fd.aspect:.2f}")
+            client.alert_fall(fd.hip_drop_pct, fd.torso_angle)
+            try:
+                frames = [f for f in list(_REPLAY_BY_TID.get(tid, [])) if f[0] >= now - 30]
+                client._post("/alert/fall/replay", {"frames": frames})
+            except Exception:
+                pass
+            sent = True
+    for t in [t for t, s in _TID_SEEN.items() if now - s > 60]:
+        _TID_SEEN.pop(t, None)
+        _FALL_BY_TID.pop(t, None)
+        _REPLAY_BY_TID.pop(t, None)
+    return sent
+
+
+def _probe_check():
+    """FALL_PROBE: save the last 40 s of everyone's body points on request."""
+    now = time.time()
+    if now - _PROBE_CHK[0] < 1.0:
+        return
+    _PROBE_CHK[0] = now
+    flag = "/dev/shm/vigil_probe"
+    if not os.path.exists(flag):
+        return
+    try:
+        import json as _js
+        label = (open(flag).read().strip() or "probe")[:60]
+        os.remove(flag)
+        d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fall_probes")
+        os.makedirs(d, exist_ok=True)
+        out = {"label": label, "t": now, "tracks": {
+            str(t): [f for f in list(q) if f[0] >= now - 40] for t, q in _REPLAY_BY_TID.items()}}
+        with open(os.path.join(d, label + ".json"), "w") as f:
+            _js.dump(out, f)
+        print("[PROBE] saved %s (%d tracks)" % (label, len(out["tracks"])), flush=True)
+    except Exception as e:
+        print("[PROBE] error: %s" % e, flush=True)
+
+
 class ActivityTracker:
     def __init__(self, client):
         self.client = client
@@ -943,6 +1049,33 @@ def select_all_persons(result, conf_threshold=0.4):
     persons.sort(key=lambda x: x[1], reverse=True)
     return [p[0] for p in persons]
 
+_GHOST_SEEN = {}   # GHOST_FILTER_V1: track id -> [first x, first y, has moved]
+
+
+def _is_ghost(conf, tid, kp, width):
+    """GHOST_FILTER_V1: a faint detection that has never moved is not a person."""
+    try:
+        if conf >= ID_MIN_CONF:
+            return False
+        if tid is None:
+            return True
+        pts = kp[kp[:, 2] >= 0.3]
+        if len(pts) == 0:
+            return True
+        cx, cy = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+        st = _GHOST_SEEN.get(tid)
+        if st is None:
+            if len(_GHOST_SEEN) > 500:
+                _GHOST_SEEN.clear()
+            _GHOST_SEEN[tid] = [cx, cy, False]
+            return True
+        if not st[2] and abs(cx - st[0]) + abs(cy - st[1]) > 0.03 * max(1.0, float(width)):
+            st[2] = True
+        return not st[2]
+    except Exception:
+        return False
+
+
 def select_all_persons_tracked(result, conf_threshold=0.4):
     """Like select_all_persons, but preserves ByteTrack IDs.
 
@@ -959,6 +1092,9 @@ def select_all_persons_tracked(result, conf_threshold=0.4):
         except Exception:
             ids = None
     out = []
+    _ghost_idx = set()   # GHOST_FILTER_V1
+    select_all_persons_tracked._ghost_idx = _ghost_idx
+    select_all_persons_tracked._n_real = 0
     for i, kp_data in enumerate(result.keypoints.data):
         kp = kp_data.cpu().numpy()
         if np.sum(kp[:, 2] >= conf_threshold) < 6:
@@ -986,8 +1122,25 @@ def select_all_persons_tracked(result, conf_threshold=0.4):
                     ids.tolist() if ids is not None else None))
         except Exception:
             pass
-        out.append((kp, area, tid))
-    out.sort(key=lambda x: x[1], reverse=True)
+        # GHOST_FILTER_V1: keep the box confidence and whether this is a ghost.
+        _c = 1.0
+        try:
+            if boxes is not None and getattr(boxes, "conf", None) is not None and i < len(boxes.conf):
+                _c = float(boxes.conf[i])
+        except Exception:
+            pass
+        try:
+            _w = result.orig_shape[1]
+        except Exception:
+            _w = 1920
+        _g = _is_ghost(_c, tid, kp, _w)
+        if _g:
+            _ghost_idx.add(i)
+        out.append((kp, area, tid, _g))
+    # Real people first (largest first), ghosts last.
+    out.sort(key=lambda x: (not x[3], x[1]), reverse=True)
+    select_all_persons_tracked._n_real = sum(1 for p in out if not p[3])
+    select_all_persons_tracked._ghost_idx = _ghost_idx
     return [(p[0], p[2]) for p in out]
 
 
@@ -1185,8 +1338,10 @@ def main():
                     _tracked = select_all_persons_tracked(results[0], CONF_THRESHOLD)
                     all_persons = [t[0] for t in _tracked]
                     _track_ids = [t[1] for t in _tracked]
-                    main_pid = vigil_track_persons(all_persons, frame=frame,
-                                                   track_ids=_track_ids)
+                    # GHOST_FILTER_V1: only real people go to identity.
+                    _nq = getattr(select_all_persons_tracked, "_n_real", len(all_persons))
+                    main_pid = vigil_track_persons(all_persons[:_nq], frame=frame,
+                                                   track_ids=_track_ids[:_nq])
                     if all_persons:
                         globals().setdefault('_PIDS_WIN', set()).add(main_pid)
                     person_count = len(all_persons)
@@ -1252,13 +1407,10 @@ def main():
                         calib.update(kp[KP_NOSE,1],ay,True)
                     bedexit.update(kp, frame.shape, client)
                     _replay_push(kp, frame.shape)
-                    if fall.update(kp, frame.shape):
-                        print(f"[FALL] hip={fall.hip_drop_pct:.2f} torso={fall.torso_angle:.0f} aspect={fall.aspect:.2f}")
-                        client.alert_fall(fall.hip_drop_pct,fall.torso_angle)
-                        try:
-                            client._post("/alert/fall/replay", {"frames": [f for f in list(_REPLAY) if f[0] >= time.time() - 30]})
-                        except Exception:
-                            pass
+                    # FALL_V44: every tracked person has their own detector.
+                    _fall_per_person(locals().get('all_persons') or [kp],
+                                     locals().get('_track_ids') or [None], frame.shape, client)
+                    _probe_check()
                     gait.update(kp,frame_idx,fh)
                     # Head crop for the face service. MediaPipe downscales
                     # its input, so a face that is ~60 px in a 1920x1080

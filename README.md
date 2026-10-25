@@ -35,12 +35,16 @@ Where VIGIL is wrong, the error is stated.
 | Posture | presence in readings while in view | **6 of 6** |
 | Fall detection (v4.2) | staged falls and everyday movements on a mattress | **2/3 falls detected** (chair slump missed), **0/5 false alarms** |
 | Fall detection (v4.3) | replayed 12 real alerts from home use | 3 everyday false alarms (bending over, leaning close, sitting on the couch) no longer fire; staged falls still do |
+| Fall detection (v4.5, live) | Oct 24 home test, voice-cued, 8 staged falls + 5 everyday movements | **3/8 falls detected** (sideways-left 2/2), **1/5 false alarms** (kneeling) |
+| Fall detection (v4.6, replay) | the same Oct 24 recordings replayed through the fixed detector | **14/16 falls**, **1/25 everyday flagged**; replay, not a live result |
 | Identity (v6) | two home sessions, family of four | 9 phantom people in one session, **0** in the next, after adding "Not sure" |
 | Facial landmarks | 4 conditions incl. talking control | **90%** detection rate |
 
-**Known limits.** Gait speed reads about 10% high; the bias cancels in
-baseline comparisons but the absolute value should not be quoted
-clinically. Readings vary between 20-second windows, so VIGIL is reliable
+**Known limits.** Walking speed is estimated from step rate (cadence x a
+height-based step length), so it catches a slower step rate but not shorter
+steps, and the absolute value should not be quoted clinically. Fall
+detection depends on camera view: falls toward the camera are missed more
+often. Frame rate varies between about 7 and 12 fps. Readings vary between 20-second windows, so VIGIL is reliable
 as a trend over days, not as a single measurement. Routine signals
 require the camera to be in the resident's own living space.
 
@@ -49,7 +53,7 @@ require the camera to be in the resident's own living space.
 ## How it works
 
 ```
-IP camera ──RTSP──► Jetson Orin Nano (~11 fps)
+IP camera ──RTSP──► Jetson Orin Nano (~7-12 fps)
                         │
            YOLOv8n-pose, 17 keypoints
            Gait: heel-strike peak detection, wall-clock intervals

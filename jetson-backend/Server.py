@@ -609,12 +609,28 @@ def alert_health_signal():
     conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
+
+# FALL_GAP_V2: a new fall alert may go out 45 s after the previous one
+# (was 5 minutes, which silenced real second falls).
+FALL_GAP_SEC = 45
+_FALL_GAP_LAST = [0.0]
+
+
+def _fall_gap_limited():
+    import time as _t
+    now = _t.time()
+    if now - _FALL_GAP_LAST[0] < FALL_GAP_SEC:
+        return True
+    _FALL_GAP_LAST[0] = now
+    return False
+
+
 @app.route("/alert/fall", methods=["POST"])
 @require_api_key
 def alert_fall():
     data = request.get_json()
     if not data: return jsonify({"error": "no data"}), 400
-    if alert_rate_limited("fall"):
+    if _fall_gap_limited():
         return jsonify({"status": "rate_limited"}), 429
     conn = get_db()
     conn.execute("INSERT INTO alerts (alert_type,detected_at,payload) VALUES ('fall',?,?)", (
@@ -2710,6 +2726,145 @@ def confirm_person(person_id):
         id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime')), applied INTEGER DEFAULT 0)""")
     conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, ?)", (person_id, person_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+
+# DELETE_PERSON_V1
+@app.route("/persons/<person_id>/delete", methods=["POST"])
+@require_api_key
+def delete_person(person_id):
+    conn = get_db()
+    row = conn.execute("SELECT id, name FROM persons WHERE id=?", (person_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"status": "error", "reason": "no such person"}), 404
+    for sql in ("DELETE FROM person_detections WHERE person_id=?",
+                "DELETE FROM person_baselines WHERE person_id=?",
+                "DELETE FROM persons WHERE id=?"):
+        try:
+            conn.execute(sql, (person_id,))
+        except Exception:
+            pass
+    try:
+        conn.execute("UPDATE config SET resident_person_id=NULL WHERE resident_person_id=?", (person_id,))
+    except Exception:
+        pass
+    conn.execute("""CREATE TABLE IF NOT EXISTS person_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')), applied INTEGER DEFAULT 0)""")
+    conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, '__deleted__')", (person_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "deleted": person_id})
+
+
+
+# AUTO_FORGET_V1: unnamed people and visitors not seen for 24 hours are removed
+# the same way as a manual delete. Named people and the resident are never touched.
+AUTO_FORGET_HOURS = 24
+
+
+def _af_parse(s):
+    try:
+        return datetime.strptime(str(s)[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _auto_forget_once():
+    conn = get_db()
+    gone = []
+    try:
+        cfg = conn.execute("SELECT resident_person_id FROM config LIMIT 1").fetchone()
+        resident = cfg[0] if cfg else None
+        cutoff = datetime.now() - timedelta(hours=AUTO_FORGET_HOURS)
+        rows = conn.execute(
+            "SELECT id, name, last_seen_at, first_seen_at FROM persons "
+            "WHERE name IS NULL OR TRIM(name) = '' OR LOWER(TRIM(name)) = 'visitor'").fetchall()
+        conn.execute("""CREATE TABLE IF NOT EXISTS person_corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime')), applied INTEGER DEFAULT 0)""")
+        for r in rows:
+            pid = r[0]
+            if pid == resident:
+                continue
+            t = _af_parse(r[2]) or _af_parse(r[3])
+            if t is None or t > cutoff:
+                continue
+            for sql in ("DELETE FROM person_detections WHERE person_id=?",
+                        "DELETE FROM person_baselines WHERE person_id=?",
+                        "DELETE FROM persons WHERE id=?"):
+                try:
+                    conn.execute(sql, (pid,))
+                except Exception:
+                    pass
+            try:
+                conn.execute("UPDATE person_alerts SET resolved=1 WHERE person_ids LIKE ?",
+                             ('%"' + pid + '"%',))
+            except Exception:
+                pass
+            conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, '__deleted__')", (pid,))
+            gone.append(pid)
+        conn.commit()
+    except Exception as e:
+        print("[FORGET] error: %s" % e, flush=True)
+    finally:
+        conn.close()
+    if gone:
+        print("[FORGET] removed %d people not seen for %d h: %s" % (len(gone), AUTO_FORGET_HOURS, gone),
+              flush=True)
+    return gone
+
+
+def _auto_forget_loop():
+    import time as _t
+    _t.sleep(60)
+    while True:
+        _auto_forget_once()
+        _t.sleep(1800)
+
+
+def _start_auto_forget():
+    import threading as _th
+    if getattr(_start_auto_forget, "started", False):
+        return
+    _start_auto_forget.started = True
+    _th.Thread(target=_auto_forget_loop, daemon=True, name="auto_forget").start()
+
+
+_start_auto_forget()
+
+
+# PHOTO_PICK_V1: a caregiver-chosen photo replaces the camera's crop; clearing it
+# shows the person's initials. The camera never re-photographs a named person.
+@app.route("/persons/<person_id>/photo/set", methods=["POST"])
+@require_api_key
+def set_person_photo(person_id):
+    data = request.get_json() or {}
+    photo = data.get("photo_b64")
+    if not photo:
+        return jsonify({"status": "error", "reason": "no photo"}), 400
+    if len(photo) > 600 * 1024:
+        return jsonify({"status": "error", "reason": "photo too large"}), 400
+    conn = get_db()
+    row = conn.execute("SELECT id FROM persons WHERE id=?", (person_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"status": "error", "reason": "no such person"}), 404
+    conn.execute("UPDATE persons SET photo_b64=? WHERE id=?", (photo, person_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/persons/<person_id>/photo/clear", methods=["POST"])
+@require_api_key
+def clear_person_photo(person_id):
+    conn = get_db()
+    conn.execute("UPDATE persons SET photo_b64=NULL WHERE id=?", (person_id,))
     conn.commit()
     conn.close()
     return jsonify({"status": "ok"})
