@@ -1,0 +1,5 @@
+# Secrets and per-deployment state: never commit.
+config/
+data/
+docker-compose.yml
+Caddyfile

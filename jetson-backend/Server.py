@@ -2393,6 +2393,16 @@ def _push_loop():
                     if "TEST" in str(r["payload"] or "").upper():
                         continue           # end-to-end test alerts
                     t = _PUSH_TEXT.get(r["alert_type"])
+                    if t and r["alert_type"] == "fall" and "floor" in str(r["payload"] or "").lower():
+                        t = ("VIGIL: person on the floor",
+                             "Someone has been on the floor for over a minute. Check on them now.",
+                             "urgent", "rotating_light")
+                    if t and os.environ.get("VIGIL_BED_EXIT_ALWAYS") == "1" and r["alert_type"] in ("bed_exit", "bed_sitting"):
+                        t = (t[0].replace(" at night", "").replace(" during the night", ""),
+                             t[1].replace(" during the night", ""), "high", t[3])
+                    label = os.environ.get("VIGIL_PUSH_LABEL", "").strip()
+                    if t and label:
+                        t = ("%s (%s)" % (t[0], label),) + tuple(t[1:])
                     if t:
                         send_push(*t)
                 last = mx
@@ -2858,6 +2868,19 @@ def set_person_photo(person_id):
     conn.commit()
     conn.close()
     return jsonify({"status": "ok"})
+
+
+# ADAPT_V1: what the identity model has learned from caregiver corrections.
+@app.route("/identity/learning", methods=["GET"])
+@require_api_key
+def identity_learning():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "identity_model.json")
+    try:
+        with open(path) as f:
+            return jsonify({"status": "ok", "model": json.load(f)})
+    except (OSError, ValueError):
+        return jsonify({"status": "ok", "model": None,
+                        "note": "Learning starts once two named people have 6 confirmed or corrected looks each."})
 
 
 @app.route("/persons/<person_id>/photo/clear", methods=["POST"])

@@ -26,8 +26,8 @@ os.environ.setdefault("TORCH_HOME", os.path.join(HERE, "torch_cache"))   # model
 GALLERY_FILE = os.path.join(HERE, "reid_gallery.npz")
 BACKEND_FILE = os.path.join(HERE, "reid_backend.json")
 
-MAX_ENTRIES = 80          # per person
-MAX_PINNED = 40
+MAX_ENTRIES = 120         # per person
+MAX_PINNED = 80           # caregiver-verified looks; the most redundant goes first, not the oldest
 DIVERSITY = 0.95          # do not store a fingerprint almost identical to one we have
 VERSION = "REID_V62"
 UNSURE_FLOOR = 0.60       # below this for everyone known: a genuinely new person
@@ -149,6 +149,15 @@ class Gallery:
         self.th = None       # (accept, margin), learned
         self.th_t = 0.0
         self.named = set()   # person ids with a name; set by person_hook
+        # ADAPT_V1: a household-specific model learned from caregiver-verified
+        # fingerprints. It is used only while it measurably beats the plain
+        # comparison on held-out verified samples (see learn()).
+        self.proj = None     # (d x d) transform, or None
+        self.cal = (1.0, 0.0)  # maps transformed similarity back to the usual scale
+        self.adapt_info = {}
+        self._pinned_at_learn = -1
+        self._learn_t = 0.0
+        self._learning = False
         self.last_best = None
         self.last_top = []
         self.last_kind = None
@@ -160,8 +169,12 @@ class Gallery:
             z = np.load(self.path, allow_pickle=False)
             meta = json.loads(str(z["meta"]))
             for i, pid in enumerate(meta["pids"]):
-                self.vecs[pid] = z["v%d" % i]
+                self.vecs[pid] = z["v%d" % i].astype(np.float32)
                 self.pinned[pid] = z["p%d" % i].astype(bool)
+            if "proj" in z.files:
+                self.proj = z["proj"].astype(np.float32)
+                self.cal = tuple(meta.get("cal", (1.0, 0.0)))
+                self.adapt_info = meta.get("adapt", {})
             print("[REID6] gallery loaded: %s" % {p: len(v) for p, v in self.vecs.items()}, flush=True)
         except Exception:
             pass
@@ -172,7 +185,13 @@ class Gallery:
             return
         try:
             pids = [p for p in self.vecs if len(self.vecs[p])]
-            arrs = {"meta": np.array(json.dumps({"pids": pids}))}
+            meta = {"pids": pids}
+            if self.proj is not None:
+                meta["cal"] = list(self.cal)
+                meta["adapt"] = self.adapt_info
+            arrs = {"meta": np.array(json.dumps(meta))}
+            if self.proj is not None:
+                arrs["proj"] = self.proj.astype(np.float32)
             for i, p in enumerate(pids):
                 arrs["v%d" % i] = self.vecs[p].astype(np.float16)
                 arrs["p%d" % i] = self.pinned[p].astype(np.uint8)
@@ -181,6 +200,7 @@ class Gallery:
             os.replace(tmp, self.path)
             self.dirty = False
             self.saved = now
+            self.maybe_learn()
         except Exception as e:
             print("[REID6] save error: %s" % e, flush=True)
 
@@ -204,9 +224,16 @@ class Gallery:
             added += 1
         if cur is None:
             return 0
-        # cap: keep all pinned (newest MAX_PINNED), then newest unpinned
+        # cap: keep the most varied pinned looks (drop the most redundant one
+        # at a time, so an old outfit is not forgotten just for being old),
+        # then the newest unpinned.
         idx = np.arange(len(cur))
-        pin_idx = idx[curp][-MAX_PINNED:]
+        pin_idx = idx[curp]
+        while len(pin_idx) > MAX_PINNED:
+            pv = cur[pin_idx]
+            sims = pv @ pv.T
+            np.fill_diagonal(sims, -1.0)
+            pin_idx = np.delete(pin_idx, int(np.argmax(sims.max(axis=1))))
         free_idx = idx[~curp][-(MAX_ENTRIES - len(pin_idx)):] if MAX_ENTRIES > len(pin_idx) else idx[:0]
         keep = np.sort(np.concatenate([pin_idx, free_idx]))
         self.vecs[pid] = cur[keep]
@@ -260,17 +287,169 @@ class Gallery:
                 keep.append(v)
         return np.array(keep, np.float32) if keep else vecs[:0]
 
+    # ---------------------------------------------------------- ADAPT_V1
+    def maybe_learn(self, force=False):
+        """Relearn after every 5 new verified looks, or every 6 hours."""
+        npin = int(sum(int(p.sum()) for p in self.pinned.values()))
+        due = force or npin >= self._pinned_at_learn + 5 or time.time() - self._learn_t > 6 * 3600
+        if not due or self._learning:
+            return
+        self._learning = True
+        self._pinned_at_learn = npin
+        self._learn_t = time.time()
+        threading.Thread(target=self._learn_safe, daemon=True, name="reid-learn").start()
+
+    def _learn_safe(self):
+        try:
+            info = self.learn()
+            if info:
+                print("[ADAPT] %s" % json.dumps(info), flush=True)
+                self.save(force=True) if info.get("adopted") else None
+                try:
+                    with open(os.path.join(HERE, "identity_model.json"), "w") as f:
+                        json.dump(info, f)
+                except OSError:
+                    pass
+        except Exception as e:
+            print("[ADAPT] learn error: %s" % e, flush=True)
+        finally:
+            self._learning = False
+
+    def learn(self, min_people=2, min_verified=6, shrink=0.35):
+        """Learn which differences in a fingerprint matter in THIS household.
+
+        Training data: caregiver-verified fingerprints (confirmations and
+        corrections) of named people. The model is a within-person whitening
+        transform: directions in which one person varies a lot (lighting,
+        pose, sitting vs standing) count less; directions that separate people
+        count more. It is adopted only if, on verified samples held out from
+        training, it names people more accurately than the plain comparison.
+        """
+        people = [p for p in self.vecs if (not self.named or p in self.named)
+                  and int(self.pinned[p].sum()) >= min_verified]
+        if len(people) < min_people:
+            return {"adopted": False, "reason": "need %d people with %d verified looks" % (min_people, min_verified)}
+        X = {p: self.vecs[p][self.pinned[p]].astype(np.float32) for p in people}
+        rng = np.random.default_rng(0)
+        folds = {p: rng.permutation(len(X[p])) % 3 for p in people}
+
+        def fit(train):
+            d = next(iter(train.values())).shape[1]
+            Sw = np.zeros((d, d), np.float64)
+            n = 0
+            for v in train.values():
+                c = v - v.mean(axis=0, keepdims=True)
+                Sw += c.T @ c
+                n += len(v)
+            Sw /= max(n, 1)
+            Sw = (1 - shrink) * Sw + shrink * (np.trace(Sw) / d) * np.eye(d)
+            w, U = np.linalg.eigh(Sw)
+            return (U @ np.diag(1.0 / np.sqrt(np.maximum(w, 1e-8))) @ U.T).astype(np.float32)
+
+        def accuracy(P, train, test):
+            def tx(x):
+                if P is None:
+                    return x
+                y = x @ P
+                return y / np.maximum(np.linalg.norm(y, axis=1, keepdims=True), 1e-6)
+            ok = tot = 0
+            per = {}
+            for p, tv in test.items():
+                good = 0
+                for v in tv:
+                    best, bp = -9.0, None
+                    for q, gv in train.items():
+                        s = np.sort(tx(gv) @ tx(v[None]).T, axis=0)[-3:].mean()
+                        if s > best:
+                            best, bp = s, q
+                    good += int(bp == p)
+                per[p] = good / max(len(tv), 1)
+                ok += good
+                tot += len(tv)
+            return ok / max(tot, 1), per
+
+        base_acc, new_acc, base_per, new_per = [], [], {p: [] for p in people}, {p: [] for p in people}
+        for f in range(3):
+            train = {p: X[p][folds[p] != f] for p in people}
+            test = {p: X[p][folds[p] == f] for p in people}
+            if min(len(v) for v in train.values()) < 3:
+                continue
+            P = fit(train)
+            a0, p0 = accuracy(None, train, test)
+            a1, p1 = accuracy(P, train, test)
+            base_acc.append(a0); new_acc.append(a1)
+            for p in people:
+                base_per[p].append(p0[p]); new_per[p].append(p1[p])
+        if not base_acc:
+            return {"adopted": False, "reason": "not enough verified looks to test"}
+        b, nw = float(np.mean(base_acc)), float(np.mean(new_acc))
+        worst_drop = max(float(np.mean(base_per[p]) - np.mean(new_per[p])) for p in people)
+        info = {"people": len(people), "verified": int(sum(len(v) for v in X.values())),
+                "accuracy_before": round(b, 3), "accuracy_after": round(nw, 3),
+                "worst_person_drop": round(worst_drop, 3), "at": time.strftime("%Y-%m-%d %H:%M")}
+        if nw < b + 0.01 or worst_drop > 0.05:
+            info["adopted"] = False
+            info["reason"] = "did not beat the plain comparison on held-out looks"
+            self.proj = None
+            self.cal = (1.0, 0.0)
+            self.adapt_info = info
+            return info
+        P = fit(X)
+        # Calibrate so a "same person" and "different person" score land where
+        # they did before; every threshold elsewhere keeps its meaning.
+        def pair_sims(transform):
+            gen, imp = [], []
+            for p in people:
+                a = X[p] if transform is None else self._norm(X[p] @ transform)
+                g = a @ a.T
+                gen.extend(g[np.triu_indices(len(a), 1)].tolist())
+                for q in people:
+                    if q <= p:
+                        continue
+                    bq = X[q] if transform is None else self._norm(X[q] @ transform)
+                    imp.extend((a @ bq.T).ravel().tolist())
+            return np.median(gen), np.median(imp)
+        # Typical DINOv2 values for the same person (0.85) and different people
+        # (0.45), the scale the accept/unsure bars were set on.
+        g1, i1 = pair_sims(P)
+        a_ = (0.85 - 0.45) / max(g1 - i1, 1e-3)
+        c = 0.85 - a_ * g1
+        self.proj, self.cal = P, (float(a_), float(c))
+        self.th = None           # relearn thresholds in the new space
+        info["adopted"] = True
+        self.adapt_info = info
+        self.dirty = True
+        return info
+
+    @staticmethod
+    def _norm(y):
+        return y / np.maximum(np.linalg.norm(y, axis=1, keepdims=True), 1e-6)
+
     def drop(self, pid):
         self.vecs.pop(pid, None)
         self.pinned.pop(pid, None)
         self.dirty = True
 
     # ---------------------------------------------------------- matching
+    def _tx(self, x):
+        x = np.asarray(x, np.float32)
+        if self.proj is None:
+            return x
+        y = x @ self.proj
+        return y / np.maximum(np.linalg.norm(y, axis=-1, keepdims=True), 1e-6)
+
+    def _sim(self, a, b):
+        """Similarity on the usual cosine scale, through the learned model if active."""
+        if self.proj is None:
+            return np.asarray(a, np.float32) @ np.asarray(b, np.float32).T
+        a_, c = self.cal
+        return np.clip(a_ * (self._tx(a) @ self._tx(b).T) + c, -1.0, 1.0)
+
     def score(self, vecs, pid, k=3):
         g = self.vecs.get(pid)
         if g is None or len(g) == 0 or vecs is None or len(vecs) == 0:
             return None
-        s = np.asarray(vecs, np.float32) @ g.T
+        s = self._sim(vecs, g)
         kk = min(k, g.shape[0])
         top = -np.sort(-s, axis=1)[:, :kk]
         return float(top.mean())
@@ -295,12 +474,12 @@ class Gallery:
                 g = self.vecs[p]
                 for i in range(len(g)):
                     rest = np.delete(g, i, axis=0)
-                    s = rest @ g[i]
+                    s = self._sim(rest, g[i][None])[:, 0]
                     gen.append(float(np.sort(s)[-3:].mean()))
                     for q in people:
                         if q == p:
                             continue
-                        s2 = self.vecs[q] @ g[i]
+                        s2 = self._sim(self.vecs[q], g[i][None])[:, 0]
                         imp.append(float(np.sort(s2)[-3:].mean()))
             hi_imp = float(np.percentile(imp, 99)) if imp else base[0]
             lo_gen = float(np.percentile(gen, 10)) if gen else base[0]

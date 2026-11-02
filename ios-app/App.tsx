@@ -78,6 +78,23 @@ const AX = axios.create({
   headers: {'X-VIGIL-Key': VIGIL_KEY, 'Content-Type': 'application/json'},
 });
 
+// CLOUD_V1: VIGIL Cloud. One account sees every camera it was granted; each
+// camera is its own VIGIL server behind the gateway at <gateway>/s/<camera id>.
+// The account's token travels in the same header the Jetson key used, so every
+// existing request works unchanged against the cloud.
+const SK_CLOUD      = '@vigil_cloud_v1';
+const DEFAULT_CLOUD = 'https://api.vigilhealth.me';
+type CloudSite = {id:string;name:string;home?:string;room?:string;online?:boolean|null;ntfy_topic?:string};
+type CloudCfg  = {gateway:string;token:string;email:string;sites:CloudSite[];siteId:string};
+let CLOUD_ACTIVE = false;
+function applyCloudHeaders(cfg:CloudCfg|null){
+  CLOUD_ACTIVE = !!cfg;
+  (AX.defaults.headers as any)['X-VIGIL-Key'] = cfg ? cfg.token : VIGIL_KEY;
+}
+function cloudSiteUrl(cfg:CloudCfg, siteId?:string){
+  return `${cfg.gateway.replace(/\/+$/,'')}/s/${encodeURIComponent(siteId||cfg.siteId)}`;
+}
+
 const SW     = Dimensions.get('window').width;
 const CAM_W  = SW - 32;
 const CAM_H  = Math.round(CAM_W * 9 / 16);
@@ -246,6 +263,61 @@ function readDailyTotal(method:string,opts:object,type:string,unit:string,
 // ─────────────────────────────────────────────
 interface OBProps { onComplete:(profile:SavedProfile,serverIp:string,serverPort:string)=>void; onDemo?:()=>void; }
 
+function CloudSignIn({onSignedIn}:{onSignedIn:(cfg:CloudCfg)=>void}){
+  const [gateway,setGateway]=useState(DEFAULT_CLOUD);
+  const [email,setEmail]=useState('');
+  const [password,setPassword]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState<string|null>(null);
+  const signIn=async()=>{
+    setBusy(true);setErr(null);
+    const gw=gateway.trim().replace(/\/+$/,'');
+    try{
+      const r=await axios.post(`${gw}/auth/login`,{email:email.trim(),password,device:Platform.OS},{timeout:15000});
+      const sites:CloudSite[]=r.data?.sites||[];
+      if(!r.data?.token){setErr('Sign-in failed.');return;}
+      if(!sites.length){setErr('Signed in, but no cameras are shared with this account yet.');return;}
+      onSignedIn({gateway:gw,token:r.data.token,email:email.trim().toLowerCase(),sites,siteId:sites[0].id});
+      setPassword('');
+    }catch(e:any){
+      setErr(e?.response?.data?.reason||(e?.message?.includes('Network')?'Cannot reach VIGIL Cloud. Check the internet connection.':'Sign-in failed.'));
+    }finally{setBusy(false);}
+  };
+  const inp={color:C.text,fontSize:15,paddingHorizontal:14,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
+  return(
+    <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
+      <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Sign in to VIGIL Cloud</Text>
+      <Text style={{color:C.sub,fontSize:13,marginTop:4,lineHeight:18}}>Use the email and password you were given. You will see every camera shared with you.</Text>
+      <TextInput style={inp} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor={C.muted}
+        autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="username" returnKeyType="next"/>
+      <TextInput style={inp} value={password} onChangeText={setPassword} placeholder="Password" placeholderTextColor={C.muted}
+        autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType="password" returnKeyType="go" onSubmitEditing={signIn}/>
+      <TextInput style={[inp,{fontSize:13,color:C.sub}]} value={gateway} onChangeText={setGateway} placeholder={DEFAULT_CLOUD}
+        placeholderTextColor={C.muted} autoCapitalize="none" autoCorrect={false} keyboardType="url"/>
+      {err&&<Text style={{color:C.red,fontSize:13,marginTop:10}}>{err}</Text>}
+      <TouchableOpacity style={[s.btnPrimary,{marginTop:14,opacity:(busy||!email||!password)?0.5:1}]} disabled={busy||!email||!password} onPress={signIn}>
+        {busy?<ActivityIndicator color={C.bg}/>:<Text style={s.btnPrimaryTxt}>Sign in</Text>}
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// Module level so its identity is stable: defined inside OnboardingScreen it was
+// recreated on every keystroke, which remounted the TextInput and closed the keyboard.
+const OBField = ({label,value,onChange,placeholder,keyboard='default',note}:any) => (
+  <View style={{marginBottom:20}}>
+    <Text style={{color:C.sub,fontSize:12,fontWeight:'600',letterSpacing:0.5,textTransform:'uppercase',marginBottom:8}}>{label}</Text>
+    {note && <Text style={{color:C.muted,fontSize:12,marginBottom:8,lineHeight:17}}>{note}</Text>}
+    <View style={{backgroundColor:C.card,borderRadius:12,borderWidth:1,borderColor:C.border}}>
+      <TextInput
+        style={{color:C.text,fontSize:15,paddingHorizontal:16,paddingVertical:14}}
+        value={value} onChangeText={onChange} placeholder={placeholder}
+        placeholderTextColor={C.muted} keyboardType={keyboard}
+        autoCapitalize="none" autoCorrect={false}/>
+    </View>
+  </View>
+);
+
 function OnboardingScreen({onComplete,onDemo}:OBProps) {
   const [step,setStep]             = useState(0);
   const [residentName,setRN]       = useState('');
@@ -277,19 +349,6 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
     return true;
   };
 
-  const OBField = ({label,value,onChange,placeholder,keyboard='default',note}:any) => (
-    <View style={{marginBottom:20}}>
-      <Text style={{color:C.sub,fontSize:12,fontWeight:'600',letterSpacing:0.5,textTransform:'uppercase',marginBottom:8}}>{label}</Text>
-      {note && <Text style={{color:C.muted,fontSize:12,marginBottom:8,lineHeight:17}}>{note}</Text>}
-      <View style={{backgroundColor:C.card,borderRadius:12,borderWidth:1,borderColor:C.border}}>
-        <TextInput
-          style={{color:C.text,fontSize:15,paddingHorizontal:16,paddingVertical:14}}
-          value={value} onChangeText={onChange} placeholder={placeholder}
-          placeholderTextColor={C.muted} keyboardType={keyboard}
-          autoCapitalize="none" autoCorrect={false}/>
-      </View>
-    </View>
-  );
 
   const renderStep = () => {
     switch(step) {
@@ -1969,6 +2028,7 @@ export default function App() {
   const [initialized,setInitialized]   = useState(false);
   const [initError,setInitError]       = useState<string|null>(null);
   const [jetsonOk,setJetsonOk]         = useState<boolean|null>(null);
+  const [cloud,setCloud]               = useState<CloudCfg|null>(null);   // CLOUD_V1
   const [serverVersion,setServerVersion]= useState<string|null>(null);
   const [refreshing,setRefreshing]     = useState(false);
 
@@ -2116,10 +2176,11 @@ export default function App() {
   useEffect(()=>{
     (async()=>{
       try{
-        const [done,profileStr,serverStr]=await Promise.all([
+        const [done,profileStr,serverStr,cloudStr]=await Promise.all([
           AsyncStorage.getItem(SK_ONBOARDING),
           AsyncStorage.getItem(SK_PROFILE),
           AsyncStorage.getItem(SK_SERVER),
+          AsyncStorage.getItem(SK_CLOUD),
         ]);
         if(profileStr){
           const p:SavedProfile=JSON.parse(profileStr);
@@ -2135,7 +2196,13 @@ export default function App() {
           setServerIp(ip);setServerPort(port);
           const u=`http://${ip}:${port}`;urlRef.current=u;
         }
-        if(done!=='done'){setOnboarding(true);}
+        if(cloudStr){
+          try{
+            const cfg:CloudCfg=JSON.parse(cloudStr);
+            if(cfg?.token&&cfg?.siteId){applyCloudHeaders(cfg);setCloud(cfg);urlRef.current=cloudSiteUrl(cfg);}
+          }catch(_e){}
+        }
+        if(done!=='done'&&!cloudStr){setOnboarding(true);}
       }catch{setOnboarding(true);}
       finally{setBooting(false);}
     })();
@@ -2393,7 +2460,7 @@ export default function App() {
   },[initialized,jetsonOk]); // eslint-disable-line
 
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchCameraStatus();const id=setInterval(()=>{if(!kbOpenRef.current)fetchCameraStatus();},10000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchCameraStatus]);
-  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal||activeTab!=='today')return;let alive=true;(async()=>{while(alive){try{if(!kbOpenRef.current)await fetchCameraSnapshot();}catch(_e){}await new Promise(r=>setTimeout(r,100));}})();return()=>{alive=false;};},[jetsonOk,showPersonModal,activeTab,fetchCameraSnapshot]);
+  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal||activeTab!=='today')return;let alive=true;(async()=>{while(alive){try{if(!kbOpenRef.current)await fetchCameraSnapshot();}catch(_e){}await new Promise(r=>setTimeout(r,CLOUD_ACTIVE?400:100));}})();return()=>{alive=false;};},[jetsonOk,showPersonModal,activeTab,fetchCameraSnapshot]);
   // Camera-derived metrics (gait speed / cadence / posture) refresh every 4s so they
   // visibly move while someone is walking in frame — the 60s HealthKit auto-sync
   // (above) is far too slow for this to feel live during a walk-test or demo.
@@ -2470,6 +2537,49 @@ export default function App() {
     }catch(e:any){Alert.alert('Save Failed',`Could not reach server: ${e?.message}`);}
     finally{setSavingProfile(false);}
   },[residentName,emergencyPhone,emergencyEmail,residentHeight,watchEnabled]);
+
+  // CLOUD_V1: switch the whole app to another camera, or in and out of the cloud.
+  const resetSiteData=()=>{
+    Object.keys(PHOTO_CACHE).forEach(k=>delete PHOTO_CACHE[k]);
+    prevFrame.current=null;setCameraFrame(null);
+    setPersons([]);setAlerts([]);setRooms([]);
+    setJetsonOk(null);
+  };
+  const enterCloud=async(cfg:CloudCfg|null)=>{
+    applyCloudHeaders(cfg);setCloud(cfg);resetSiteData();
+    if(cfg){
+      urlRef.current=cloudSiteUrl(cfg);
+      await AsyncStorage.setItem(SK_CLOUD,JSON.stringify(cfg));
+      await AsyncStorage.setItem(SK_ONBOARDING,'done');
+    }else{
+      await AsyncStorage.removeItem(SK_CLOUD);
+      urlRef.current=`http://${serverIp}:${serverPort}`;
+    }
+    setTimeout(()=>pingJetson(),300);
+  };
+  const switchSite=(siteId:string)=>{
+    if(!cloud||siteId===cloud.siteId)return;
+    enterCloud({...cloud,siteId});
+  };
+  const refreshCloudSites=useCallback(async()=>{
+    if(!cloud)return;
+    try{
+      const r=await AX.get(`${cloud.gateway}/auth/me`,{timeout:8000});
+      const sites:CloudSite[]=r.data?.sites||[];
+      if(sites.length){
+        const siteId=sites.some(x=>x.id===cloud.siteId)?cloud.siteId:sites[0].id;
+        const next={...cloud,sites,siteId};setCloud(next);
+        if(siteId!==cloud.siteId){urlRef.current=cloudSiteUrl(next);resetSiteData();}
+        AsyncStorage.setItem(SK_CLOUD,JSON.stringify(next)).catch(()=>{});
+      }
+    }catch(e:any){
+      if(e?.response?.status===401){
+        Alert.alert('Signed out','Your VIGIL Cloud session ended. Please sign in again.');
+        enterCloud(null);
+      }
+    }
+  },[cloud]);
+  useEffect(()=>{if(!cloud)return;refreshCloudSites();const id=setInterval(refreshCloudSites,60000);return()=>clearInterval(id);},[cloud?.token]);
 
   const reconnect=()=>{
     const u=`http://${serverIp}:${serverPort}`;
@@ -2548,6 +2658,18 @@ export default function App() {
         </View>
         <Text style={s.pageTitle}>Today</Text>
         <Text style={s.pageSub}>{new Date().toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})}</Text>
+        {cloud&&cloud.sites.length>1&&(
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginTop:12}} contentContainerStyle={{gap:8}}>
+            {cloud.sites.map(site=>{const on=site.id===cloud.siteId;return(
+              <TouchableOpacity key={site.id} onPress={()=>switchSite(site.id)}
+                style={{flexDirection:'row',alignItems:'center',gap:6,paddingHorizontal:12,paddingVertical:7,borderRadius:16,
+                  backgroundColor:on?C.green+'22':C.card,borderWidth:1,borderColor:on?C.green:C.border}}>
+                <View style={{width:7,height:7,borderRadius:4,backgroundColor:site.online===false?C.red:site.online?C.green:C.sub}}/>
+                <Text style={{color:on?C.green:C.text,fontSize:13,fontWeight:on?'700':'500'}}>{site.name}</Text>
+              </TouchableOpacity>);})}
+          </ScrollView>
+        )}
+        {cloud&&cloud.sites.length===1&&<Text style={{color:C.muted,fontSize:13,marginTop:6}}>{cloud.sites[0].name}</Text>}
       </View>
 
       {/* Status pills */}
@@ -3140,6 +3262,39 @@ export default function App() {
 
   const renderServerTab=()=>(
     <ScrollView automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
+      {cloud?(
+        <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
+          <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>VIGIL Cloud</Text>
+          <Text style={{color:C.sub,fontSize:13,marginTop:4}}>Signed in as {cloud.email}</Text>
+          <Text style={[s.secHeader,{marginHorizontal:0,marginTop:14}]}>Cameras</Text>
+          {cloud.sites.map(site=>(
+            <TouchableOpacity key={site.id} onPress={()=>switchSite(site.id)}
+              style={{flexDirection:'row',alignItems:'center',paddingVertical:12,borderTopWidth:1,borderTopColor:C.hair}}>
+              <View style={{width:9,height:9,borderRadius:5,marginRight:10,backgroundColor:site.online===false?C.red:site.online?C.green:C.sub}}/>
+              <View style={{flex:1}}>
+                <Text style={{color:C.text,fontSize:15,fontWeight:site.id===cloud.siteId?'700':'400'}}>{site.name}</Text>
+                {!!site.home&&site.home!==site.name&&<Text style={{color:C.muted,fontSize:12}}>{site.home}</Text>}
+              </View>
+              {site.id===cloud.siteId&&<Text style={{color:C.green,fontSize:13,fontWeight:'600'}}>Viewing</Text>}
+            </TouchableOpacity>
+          ))}
+          {!!cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic&&(
+            <TouchableOpacity onPress={()=>Share.share({message:cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic||''})}>
+              <Text style={{color:C.sub,fontSize:12,marginTop:10,lineHeight:17}}>
+                Alerts for this camera: subscribe to topic <Text style={{color:C.green}}>{cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic}</Text> in the ntfy app (tap to copy).
+              </Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={[s.btnPrimary,{marginTop:16,backgroundColor:C.card,borderWidth:1,borderColor:C.border}]}
+            onPress={()=>Alert.alert('Sign out of VIGIL Cloud?','The app will go back to your local VIGIL server.',[{text:'Cancel',style:'cancel'},{text:'Sign out',style:'destructive',onPress:()=>{AX.post(`${cloud.gateway}/auth/logout`).catch(()=>{});enterCloud(null);}}])}>
+            <Text style={[s.btnPrimaryTxt,{color:C.red}]}>Sign out</Text>
+          </TouchableOpacity>
+        </View>
+      ):(
+        <CloudSignIn onSignedIn={cfg=>enterCloud(cfg)}/>
+      )}
+      {!cloud&&<Text style={[s.secHeader,{marginTop:20}]}>Local VIGIL server</Text>}
+      {!cloud&&<>
       <View style={[s.card,{marginHorizontal:16,marginTop:16,alignItems:'center',paddingVertical:28}]}>
         <View style={{width:16,height:16,borderRadius:8,marginBottom:12,backgroundColor:jetsonOk===true?C.green:jetsonOk===false?C.red:C.sub}}/>
         <Text style={{color:C.text,fontSize:17,fontWeight:'700',marginBottom:4}}>
@@ -3159,6 +3314,7 @@ export default function App() {
           <TouchableOpacity style={[s.btnPrimary,{margin:16}]} onPress={reconnect}><Text style={s.btnPrimaryTxt}>Reconnect</Text></TouchableOpacity>
         </View>
       )}
+      </>}
       <View style={{height:32}}/>
     </ScrollView>
   );

@@ -9,13 +9,14 @@ Usage:
   python3 person_baseline.py --dry-run     # print only, no writes
   python3 person_baseline.py --commit      # write baselines + alerts
 """
+import os
 import sqlite3
 import json
 import argparse
 import statistics
 from datetime import datetime, timedelta
 
-DB = '/home/rushil-mohan/passive-health-moniter/vigil.db'
+DB = os.path.expanduser('~/passive-health-moniter/vigil.db')
 
 MIN_DAYS_FOR_BASELINE = 7     # need this many days of history before trusting a baseline
 LOOKBACK_DAYS         = 30    # how far back to pull history from

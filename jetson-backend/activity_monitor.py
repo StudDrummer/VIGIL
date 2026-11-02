@@ -136,12 +136,12 @@ class ServerClient:
             "room_id": self.room_id,
         })
 
-    def alert_fall(self, hip_drop_pct: float, torso_angle: float):
+    def alert_fall(self, hip_drop_pct: float, torso_angle: float, message: str = "Fall detected by camera"):
         self._post("/alert/fall", {
             "detected_at": datetime.now().isoformat(),
             "hip_drop_pct": hip_drop_pct,
             "torso_angle": torso_angle,
-            "message": "Fall detected by camera",
+            "message": message,
             "resident_name": self.resident_name,
             "room_id": self.room_id,
         })
@@ -458,6 +458,8 @@ class BedExitDetector:
     def _active_window(self):
         if os.path.exists(self.TEST_FLAG):
             return True
+        if os.environ.get("VIGIL_BED_EXIT_ALWAYS") == "1":
+            return True          # hospital bed: getting up matters at any hour
         h = time.localtime().tm_hour
         return h >= self.NIGHT_START or h < self.NIGHT_END
 
@@ -672,6 +674,12 @@ class FallDetector:
         self.torso_angle = 0.0
         self.aspect = 0.0
         self._zones = self._load_zones()
+        # FLOOR_V1: lying on the floor (outside the bed and couch zones) for a
+        # long time alerts however the person got there: a slow slide, a fall
+        # the detector missed, or someone who cannot get up.
+        self.floor_since = None
+        self.floor_last = 0.0
+        self.floor_alerted = False
 
     @staticmethod
     def _load_zones():
@@ -804,6 +812,13 @@ class FallDetector:
             down = False            # FALL_V43: bending over, still on their feet
             self.last_up_t = now    # a fall is timed from the last moment on their feet
         in_zone = self._in_zone(pts, frame_shape)
+        if down and not in_zone:
+            if self.floor_since is None:
+                self.floor_since = now
+            self.floor_last = now
+        elif compact or in_zone or now - self.floor_last > 4.0:
+            self.floor_since = None          # brief lost points do not restart the clock
+            self.floor_alerted = False
 
         if compact:
             self.last_up_t = now
@@ -849,6 +864,19 @@ class FallDetector:
                     self.last_alert = now
                     return True
         return False
+
+
+    def floor_alert_due(self, after_s):
+        """FLOOR_V1: True once per stay on the floor, after `after_s` seconds."""
+        if after_s <= 0 or self.floor_since is None or self.floor_alerted:
+            return False
+        if time.time() - self.floor_since >= after_s:
+            self.floor_alerted = True
+            return True
+        return False
+
+
+FLOOR_ALERT_S = float(os.environ.get("VIGIL_FLOOR_ALERT_S", "60"))   # 0 turns it off
 
 
 # FALL_V44: one fall detector and one replay per tracked person.
@@ -900,6 +928,13 @@ def _fall_per_person(persons, tids, shape, client):
                 client._post("/alert/fall/replay", {"frames": _frames})
             except Exception:
                 pass
+            sent = True
+        elif _FALL_SOLO[0].floor_alert_due(FLOOR_ALERT_S) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC:
+            _FALL_LAST_ALERT[0] = now
+            _fd = _FALL_SOLO[0]
+            print("[FALL] track=solo on the floor for %.0f s" % (now - (_fd.floor_since or now)), flush=True)
+            client.alert_fall(_fd.hip_drop_pct, _fd.torso_angle,
+                              message="Person on the floor for over %d seconds" % FLOOR_ALERT_S)
             sent = True
     elif _nr >= 2:
         _FALL_SOLO[0] = None   # FALL_V46: only two clear people restart it

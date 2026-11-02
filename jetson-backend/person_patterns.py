@@ -3,11 +3,11 @@ VIGIL Person Pattern Job — runs nightly after person_baseline.py
 Builds per-person time-of-day activity heatmap and detects absence from expected windows.
 Add to cron: 0 3 * * * python3 /home/rushil-mohan/passive-health-moniter/person_patterns.py --commit
 """
-import sqlite3, json, argparse
+import os, sqlite3, json, argparse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-DB = '/home/rushil-mohan/passive-health-moniter/vigil.db'
+DB = os.path.expanduser('~/passive-health-moniter/vigil.db')
 LOOKBACK_DAYS = 21
 MIN_DAYS_FOR_PATTERN = 5
 

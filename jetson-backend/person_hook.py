@@ -868,7 +868,7 @@ def reload_known_persons() -> None:
     import sqlite3
     # Single-resident configuration, refreshed on every startup.
     try:
-        _c = sqlite3.connect('/home/rushil-mohan/passive-health-moniter/vigil.db')
+        _c = sqlite3.connect(os.path.expanduser('~/passive-health-moniter/vigil.db'))
         _r = _c.execute(
             "SELECT single_resident_mode, resident_person_id FROM config").fetchone()
         _c.close()
@@ -880,7 +880,7 @@ def reload_known_persons() -> None:
     except Exception:
         pass
     try:
-        conn = sqlite3.connect('/home/rushil-mohan/passive-health-moniter/vigil.db')
+        conn = sqlite3.connect(os.path.expanduser('~/passive-health-moniter/vigil.db'))
         rows = conn.execute(
             'SELECT id, height_px, confidence, frames_seen, colour_hist, last_seen_at FROM persons '
             "WHERE height_px IS NOT NULL AND (name IS NOT NULL OR datetime(last_seen_at) > datetime('now','localtime','-1 day'))"
