@@ -653,6 +653,128 @@ def _body_load():
 _body_load()
 
 
+# ---------------------------------------------------------------------------
+# PROPORTIONS_V1 (watch-only): body proportions from the 17 body points.
+#
+# Each limb is measured relative to the person's own torso, so the numbers do
+# not change with distance from the camera. They are only taken from upright,
+# clearly visible poses, because a bent arm or a body turned sideways changes
+# what a flat camera picture shows.
+#
+# This does NOT change any names. It records, for every named person in view,
+# whether their proportions agree with the name VIGIL gave, so the 4-day trial
+# shows whether it would have caught any mistake. It is switched on only if
+# the trial shows it helps.
+# ---------------------------------------------------------------------------
+_PROP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proportions_check.json")
+_PROP = {}                 # pid -> deque of ratio vectors (assigned frames)
+_PROP_TRK = {}             # track id -> deque of ratio vectors
+_PROP_LOG = {}             # track id -> last log time
+_PROP_STATS = {"checks": 0, "agree": 0, "disagree": 0, "unsure": 0, "since": None, "events": []}
+_PROP_SAVED = [0.0]
+
+
+def _prop_vec(kp):
+    try:
+        k = np.asarray(kp, dtype=float)
+        if k.shape[0] < 17 or min(k[i][2] for i in (5, 6, 11, 12, 13, 14)) < 0.5:
+            return None
+        P = lambda i: k[i][:2]
+        sh, hp = (P(5) + P(6)) / 2, (P(11) + P(12)) / 2
+        torso = float(np.linalg.norm(sh - hp))
+        if torso < 30 or abs(sh[0] - hp[0]) > 0.3 * abs(hp[1] - sh[1]) or hp[1] <= sh[1]:
+            return None                                 # small, or not upright
+        d = lambda a, b: float(np.linalg.norm(P(a) - P(b))) / torso
+
+        def pair(a1, b1, a2, b2, c=(0.5,)):
+            vals = [d(a, b) for a, b in ((a1, b1), (a2, b2)) if k[a][2] >= c[0] and k[b][2] >= c[0]]
+            return float(np.mean(vals)) if vals else None
+        feats = [d(5, 6),                                # shoulder width
+                 d(11, 12),                              # hip width
+                 pair(5, 7, 6, 8),                       # upper arm
+                 pair(11, 13, 12, 14)]                   # thigh
+        shin = pair(13, 15, 14, 16)
+        feats.append(shin)
+        if any(f is None for f in feats[:4]):
+            return None
+        return np.array([f if f is not None else np.nan for f in feats], dtype=float)
+    except Exception:
+        return None
+
+
+def _prop_ref(pid):
+    q = _PROP.get(pid)
+    if not q or len(q) < 40:
+        return None
+    a = np.array(q)
+    med = np.nanmedian(a, axis=0)
+    mad = np.nanmedian(np.abs(a - med), axis=0) * 1.4826 + 0.02
+    return med, mad
+
+
+def _prop_dist(v, ref):
+    med, mad = ref
+    z = np.abs(v - med) / mad
+    z = z[~np.isnan(z)]
+    return float(np.sqrt(np.mean(z ** 2))) if len(z) >= 3 else None
+
+
+def _prop_observe(all_persons, assignments, track_ids, named):
+    now = time.time()
+    if _PROP_STATS["since"] is None:
+        _PROP_STATS["since"] = time.strftime("%Y-%m-%d %H:%M")
+    for i, (kp, (pid, _h)) in enumerate(zip(all_persons, assignments)):
+        if pid is None:
+            continue
+        tid = track_ids[i] if (track_ids and i < len(track_ids)) else None
+        v = _prop_vec(kp)
+        if v is None:
+            continue
+        if pid in named:
+            _PROP.setdefault(pid, deque(maxlen=600)).append(v)
+        if tid is None:
+            continue
+        tq = _PROP_TRK.setdefault(tid, deque(maxlen=30))
+        tq.append(v)
+        if pid not in named or len(tq) < 15 or now - _PROP_LOG.get(tid, 0) < 60:
+            continue
+        refs = {p: r for p in named for r in [_prop_ref(p)] if r is not None}
+        if pid not in refs or len(refs) < 2:
+            continue
+        _PROP_LOG[tid] = now
+        tv = np.nanmedian(np.array(tq), axis=0)
+        ds = {p: _prop_dist(tv, r) for p, r in refs.items()}
+        ds = {p: x for p, x in ds.items() if x is not None}
+        if pid not in ds:
+            continue
+        best = min(ds, key=ds.get)
+        _PROP_STATS["checks"] += 1
+        if best == pid:
+            _PROP_STATS["agree"] += 1
+            verdict = "agrees"
+        elif ds[best] < 0.6 * ds[pid] and ds[pid] > 2.0:
+            _PROP_STATS["disagree"] += 1
+            verdict = "DISAGREES (looks like %s)" % best
+            _PROP_STATS["events"] = (_PROP_STATS["events"] + [
+                {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "named": pid, "proportions_say": best,
+                 "d_named": round(ds[pid], 2), "d_other": round(ds[best], 2)}])[-200:]
+        else:
+            _PROP_STATS["unsure"] += 1
+            verdict = "unsure"
+        print("[PROPORTIONS] track %s named %s: %s %s" % (
+            tid, pid, verdict, " ".join("%s=%.1f" % (p, x) for p, x in sorted(ds.items(), key=lambda t: t[1])[:3])),
+            flush=True)
+    if now - _PROP_SAVED[0] > 120:
+        _PROP_SAVED[0] = now
+        try:
+            import json as _js
+            with open(_PROP_FILE + ".tmp", "w") as f:
+                _js.dump(_PROP_STATS, f)
+            os.replace(_PROP_FILE + ".tmp", _PROP_FILE)
+        except Exception:
+            pass
+
+
 def _reid_decide(ev, used):
     """Decide who a track is from clothing AND true height (BODY_V1).
     Returns (person_id or None, log text)."""
@@ -1242,6 +1364,11 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                                   headers={"X-VIGIL-Key": API_KEY}, timeout=3)
                 except Exception:
                     pass
+
+        try:                                                     # PROPORTIONS_V1
+            _prop_observe(all_persons, frame_assignments, track_ids, _named_ids())
+        except Exception:
+            pass
 
         # Head-crop identification photo — attempted every frame (not gated by
         # the 60s metadata cycle) so we can retry until the person actually

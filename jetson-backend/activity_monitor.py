@@ -43,7 +43,7 @@ def smoothed_person_count(raw_count, window=5):
 VIGIL Camera Pipeline v3 - Camera-First MVP
 Works with RTSP camera or USB webcam (--source 0 for testing)
 """
-import argparse, os, sys, time
+import argparse, json, os, sys, time
 from collections import deque
 from datetime import datetime
 import base64
@@ -879,6 +879,122 @@ class FallDetector:
 FLOOR_ALERT_S = float(os.environ.get("VIGIL_FLOOR_ALERT_S", "60"))   # 0 turns it off
 
 
+class CameraMoveWatch:
+    """CAM_MOVED_V1 -- notices when the camera has been moved or turned, so the
+    bed and couch areas (drawn on the old view) are redrawn.
+
+    Every 30 s the scene is compared with a reference picture taken when the
+    areas were last saved. Fixed things in the room (furniture, door frames,
+    corners) are matched between the two. If they have all shifted, or none
+    can be found any more, for 4 checks in a row (2 minutes), the camera has
+    moved: camera_moved.json is written and the app asks for a redraw.
+    Day/night (colour vs infrared) and darkness are never compared, because
+    they change how the room looks without the camera moving.
+    """
+    CHECK_S = 30.0
+    NEEDED = 4
+
+    def __init__(self):
+        self.base = os.path.dirname(os.path.abspath(__file__))
+        self.ref_path = os.path.join(self.base, "scene_reference.jpg")
+        self.flag_path = os.path.join(self.base, "camera_moved.json")
+        self.zones_path = os.path.join(self.base, "fall_zones.json")
+        self.started = time.time()
+        self.last = 0.0
+        self.strikes = 0
+        self.ref = None
+        self.ref_m = None
+        self.orb = cv2.ORB_create(nfeatures=1000)
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+
+    @staticmethod
+    def _prep(frame):
+        h, w = frame.shape[:2]
+        sc = 480.0 / max(w, 1)
+        small = cv2.resize(frame, (480, max(1, int(h * sc))))
+        b, g, r = [c.astype(np.int16) for c in cv2.split(small)]
+        colour = float((np.abs(r - g) + np.abs(b - g)).mean())
+        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        return gray, colour, float(gray.mean())
+
+    def _zones_exist(self):
+        try:
+            with open(self.zones_path) as f:
+                return len(json.load(f)) > 0
+        except Exception:
+            return False
+
+    def save_reference(self, frame):
+        try:
+            cv2.imwrite(self.ref_path + ".tmp.jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            os.replace(self.ref_path + ".tmp.jpg", self.ref_path)
+            print("[CAM_MOVED] reference view saved", flush=True)
+        except Exception as e:
+            print("[CAM_MOVED] could not save reference: %s" % e, flush=True)
+
+    def update(self, frame, person_present):
+        now = time.time()
+        if now - self.last < self.CHECK_S or frame is None:
+            return
+        self.last = now
+        try:
+            if os.path.exists(self.flag_path):
+                return                                   # already flagged; the app clears it
+            if not os.path.exists(self.ref_path):
+                # No reference yet: take one once the pipeline has settled,
+                # but only if areas have been drawn (they define "the view").
+                if self._zones_exist() and now - self.started > 60 and not person_present:
+                    self.save_reference(frame)
+                return
+            m = os.path.getmtime(self.ref_path)
+            if m != self.ref_m:
+                img = cv2.imread(self.ref_path)
+                if img is None:
+                    return
+                self.ref = self._prep(img)
+                self.ref_m = m
+                self.ref_kp, self.ref_des = self.orb.detectAndCompute(self.ref[0], None)
+                self.strikes = 0
+            gray, colour, bright = self._prep(frame)
+            rgray, rcolour, rbright = self.ref
+            if bright < 35 or rbright < 35:
+                return                                   # too dark to judge
+            if (colour < 4.0) != (rcolour < 4.0):
+                return                                   # infrared vs colour: not comparable
+            kp, des = self.orb.detectAndCompute(gray, None)
+            if des is None or self.ref_des is None or len(kp) < 40 or len(self.ref_kp) < 40:
+                return
+            pairs = self.bf.knnMatch(self.ref_des, des, k=2)
+            good = [a for a, b in (p for p in pairs if len(p) == 2) if a.distance < 0.75 * b.distance]
+            moved, why = False, ""
+            if len(good) < 15:
+                moved, why = True, "the room's fixed features are no longer in view (%d matches)" % len(good)
+            else:
+                src = np.float32([self.ref_kp[g.queryIdx].pt for g in good])
+                dst = np.float32([kp[g.trainIdx].pt for g in good])
+                M, inl = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=4.0)
+                if M is None or inl is None or int(inl.sum()) < 12:
+                    moved, why = True, "no consistent match with the saved view"
+                else:
+                    shift = float(np.hypot(M[0, 2], M[1, 2])) / gray.shape[1]
+                    rot = abs(float(np.degrees(np.arctan2(M[1, 0], M[0, 0]))))
+                    scale = float(np.hypot(M[0, 0], M[1, 0]))
+                    if shift > 0.04 or rot > 3.0 or abs(scale - 1.0) > 0.08:
+                        moved, why = True, "view shifted %.0f%%, turned %.0f degrees" % (shift * 100, rot)
+            self.strikes = self.strikes + 1 if moved else 0
+            if moved:
+                print("[CAM_MOVED] check %d/%d: %s" % (self.strikes, self.NEEDED, why), flush=True)
+            if self.strikes >= self.NEEDED:
+                with open(self.flag_path, "w") as f:
+                    json.dump({"moved": True, "at": datetime.now().isoformat(timespec="seconds"), "reason": why}, f)
+                print("[CAM_MOVED] camera has moved: asking for the bed and couch areas to be redrawn", flush=True)
+        except Exception as e:
+            print("[CAM_MOVED] check error: %s" % e, flush=True)
+
+
+_CAM_MOVE = [None]
+
+
 # FALL_V44: one fall detector and one replay per tracked person.
 _FALL_BY_TID = {}
 _REPLAY_BY_TID = {}
@@ -1433,6 +1549,12 @@ def main():
 
                 client.refresh_config()
                 fh=frame.shape[0]
+                try:                                     # CAM_MOVED_V1
+                    if _CAM_MOVE[0] is None:
+                        _CAM_MOVE[0] = CameraMoveWatch()
+                    _CAM_MOVE[0].update(frame, person_present)
+                except Exception:
+                    pass
 
                 if person_present and kp is not None:
                     n_ok=kp[KP_NOSE,2]>=CONF_THRESHOLD

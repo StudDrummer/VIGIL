@@ -2622,7 +2622,67 @@ def save_zones():
     with open(tmp, "w") as f:
         json.dump(out, f)
     os.replace(tmp, _ZONES_PATH)
+    _camera_view_accepted()
     return jsonify({"status": "ok", "zones": out})
+
+
+# CAM_MOVED_V1: the camera pipeline flags a moved camera; the app asks for the
+# bed and couch areas to be redrawn. Saving areas (or "it didn't move") makes
+# the current view the new reference.
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_MOVED_FLAG = os.path.join(_BASE_DIR, "camera_moved.json")
+_SCENE_REF = os.path.join(_BASE_DIR, "scene_reference.jpg")
+
+
+def _camera_view_accepted():
+    try:
+        if os.path.exists("/dev/shm/vigil_raw.jpg"):
+            shutil.copyfile("/dev/shm/vigil_raw.jpg", _SCENE_REF + ".tmp")
+            os.replace(_SCENE_REF + ".tmp", _SCENE_REF)
+        if os.path.exists(_MOVED_FLAG):
+            os.remove(_MOVED_FLAG)
+    except Exception as e:
+        print("[CAM_MOVED] could not reset: %s" % e, flush=True)
+
+
+@app.route("/camera/setup-status", methods=["GET"])
+@require_api_key
+def camera_setup_status():
+    """What the app should ask for: areas never drawn, or camera moved."""
+    try:
+        with open(_ZONES_PATH) as f:
+            zones = json.load(f)
+    except Exception:
+        zones = []
+    moved = None
+    try:
+        with open(_MOVED_FLAG) as f:
+            moved = json.load(f)
+    except Exception:
+        pass
+    return jsonify({"status": "ok",
+                    "needs_zones": len(zones) == 0,
+                    "camera_moved": bool(moved),
+                    "moved_at": (moved or {}).get("at"),
+                    "zones": len(zones)})
+
+
+@app.route("/identity/proportions", methods=["GET"])
+@require_api_key
+def identity_proportions():
+    """PROPORTIONS_V1 watch-only results: would body proportions have disagreed with a name?"""
+    try:
+        with open(os.path.join(_BASE_DIR, "proportions_check.json")) as f:
+            return jsonify({"status": "ok", "check": json.load(f)})
+    except (OSError, ValueError):
+        return jsonify({"status": "ok", "check": None})
+
+
+@app.route("/camera/moved/dismiss", methods=["POST"])
+@require_api_key
+def camera_moved_dismiss():
+    _camera_view_accepted()
+    return jsonify({"status": "ok"})
 
 
 

@@ -265,6 +265,7 @@ interface OBProps { onComplete:(profile:SavedProfile,serverIp:string,serverPort:
 
 function CloudSignIn({onSignedIn}:{onSignedIn:(cfg:CloudCfg)=>void}){
   const [gateway,setGateway]=useState(DEFAULT_CLOUD);
+  const [adv,setAdv]=useState(false);
   const [email,setEmail]=useState('');
   const [password,setPassword]=useState('');
   const [busy,setBusy]=useState(false);
@@ -283,20 +284,23 @@ function CloudSignIn({onSignedIn}:{onSignedIn:(cfg:CloudCfg)=>void}){
       setErr(e?.response?.data?.reason||(e?.message?.includes('Network')?'Cannot reach VIGIL Cloud. Check the internet connection.':'Sign-in failed.'));
     }finally{setBusy(false);}
   };
-  const inp={color:C.text,fontSize:15,paddingHorizontal:14,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
+  const inp={color:C.text,fontSize:17,paddingHorizontal:14,paddingVertical:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
   return(
     <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
-      <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Sign in to VIGIL Cloud</Text>
-      <Text style={{color:C.sub,fontSize:13,marginTop:4,lineHeight:18}}>Use the email and password you were given. You will see every camera shared with you.</Text>
+      <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>Sign in</Text>
+      <Text style={{color:C.sub,fontSize:15,marginTop:6,lineHeight:21}}>Use the email and password VIGIL gave you.</Text>
       <TextInput style={inp} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor={C.muted}
         autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="username" returnKeyType="next"/>
       <TextInput style={inp} value={password} onChangeText={setPassword} placeholder="Password" placeholderTextColor={C.muted}
         autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType="password" returnKeyType="go" onSubmitEditing={signIn}/>
-      <TextInput style={[inp,{fontSize:13,color:C.sub}]} value={gateway} onChangeText={setGateway} placeholder={DEFAULT_CLOUD}
-        placeholderTextColor={C.muted} autoCapitalize="none" autoCorrect={false} keyboardType="url"/>
+      {adv&&<TextInput style={[inp,{fontSize:13,color:C.sub}]} value={gateway} onChangeText={setGateway} placeholder={DEFAULT_CLOUD}
+        placeholderTextColor={C.muted} autoCapitalize="none" autoCorrect={false} keyboardType="url"/>}
       {err&&<Text style={{color:C.red,fontSize:13,marginTop:10}}>{err}</Text>}
       <TouchableOpacity style={[s.btnPrimary,{marginTop:14,opacity:(busy||!email||!password)?0.5:1}]} disabled={busy||!email||!password} onPress={signIn}>
-        {busy?<ActivityIndicator color={C.bg}/>:<Text style={s.btnPrimaryTxt}>Sign in</Text>}
+        {busy?<ActivityIndicator color={C.bg}/>:<Text style={[s.btnPrimaryTxt,{fontSize:17}]}>Sign in</Text>}
+      </TouchableOpacity>
+      <TouchableOpacity onPress={()=>setAdv(v=>!v)} style={{alignSelf:'center',paddingVertical:12}}>
+        <Text style={{color:C.muted,fontSize:12}}>{adv?'Hide server address':'Server address'}</Text>
       </TouchableOpacity>
     </View>
   );
@@ -306,11 +310,11 @@ function CloudSignIn({onSignedIn}:{onSignedIn:(cfg:CloudCfg)=>void}){
 // recreated on every keystroke, which remounted the TextInput and closed the keyboard.
 const OBField = ({label,value,onChange,placeholder,keyboard='default',note}:any) => (
   <View style={{marginBottom:20}}>
-    <Text style={{color:C.sub,fontSize:12,fontWeight:'600',letterSpacing:0.5,textTransform:'uppercase',marginBottom:8}}>{label}</Text>
+    <Text style={{color:C.sub,fontSize:14,fontWeight:'600',marginBottom:8}}>{label}</Text>
     {note && <Text style={{color:C.muted,fontSize:12,marginBottom:8,lineHeight:17}}>{note}</Text>}
     <View style={{backgroundColor:C.card,borderRadius:12,borderWidth:1,borderColor:C.border}}>
       <TextInput
-        style={{color:C.text,fontSize:15,paddingHorizontal:16,paddingVertical:14}}
+        style={{color:C.text,fontSize:18,paddingHorizontal:16,paddingVertical:16}}
         value={value} onChangeText={onChange} placeholder={placeholder}
         placeholderTextColor={C.muted} keyboardType={keyboard}
         autoCapitalize="none" autoCorrect={false}/>
@@ -318,8 +322,11 @@ const OBField = ({label,value,onChange,placeholder,keyboard='default',note}:any)
   </View>
 );
 
-function OnboardingScreen({onComplete,onDemo}:OBProps) {
-  const [step,setStep]             = useState(0);
+function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:CloudCfg)=>void}) {
+  // SIMPLE_SETUP_V1: most people only sign in. The local monitoring-unit
+  // setup is still here, one tap away, and down to three short screens.
+  const [mode,setMode]             = useState<'choose'|'cloud'|'local'>('choose');
+  const [step,setStep]             = useState(1);
   const [residentName,setRN]       = useState('');
   const [dob,setDOB]               = useState('');
   const [residentHeight,setRH]     = useState('170');
@@ -332,6 +339,7 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
   const [serverOk,setServerOk]     = useState<boolean|null>(null);
   const [agreed,setAgreed]         = useState(false);
   const TOTAL = 6;
+  const LOCAL_STEPS = [1,3,5];   // name, unit address, ready
 
   const testConnection = async () => {
     setTesting(true); setServerOk(null);
@@ -344,6 +352,7 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
 
   const canNext = () => {
     if(step===0)return agreed;
+    if(step===3)return serverOk===true;
     if(step===1)return residentName.trim().length>0 && residentHeight.trim().length>0;
     if(step===2)return emergencyPhone.trim().length>=10;
     return true;
@@ -391,15 +400,12 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
       );
       case 1: return (
         <View style={{flex:1}}>
-          <Text style={{color:C.text,fontSize:24,fontWeight:'800',marginBottom:6}}>Resident Profile</Text>
-          <Text style={{color:C.sub,fontSize:14,marginBottom:28,lineHeight:20}}>
-            This information personalises monitoring and is used to calibrate gait detection for this specific resident.
+          <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Who is VIGIL watching over?</Text>
+          <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
+            Their first name and height. Height helps VIGIL measure walking speed.
           </Text>
-          <OBField label="Full Name" value={residentName} onChange={setRN} placeholder="e.g. Margaret Johnson"
-            note="Used in alert messages sent to emergency contacts."/>
-          <OBField label="Date of Birth" value={dob} onChange={setDOB} placeholder="MM/DD/YYYY"/>
-          <OBField label="Height (cm)" value={residentHeight} onChange={setRH} placeholder="170" keyboard="number-pad"
-            note="Used to calibrate walking speed measurements from the camera."/>
+          <OBField label="First name" value={residentName} onChange={setRN} placeholder="e.g. Margaret"/>
+          <OBField label="Height (cm)" value={residentHeight} onChange={setRH} placeholder="170" keyboard="number-pad"/>
         </View>
       );
       case 2: return (
@@ -427,14 +433,13 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
       );
       case 3: return (
         <View style={{flex:1}}>
-          <Text style={{color:C.text,fontSize:24,fontWeight:'800',marginBottom:6}}>Connect Your Monitoring Unit</Text>
-          <Text style={{color:C.sub,fontSize:14,marginBottom:28,lineHeight:20}}>
-            Enter the address of your VIGIL monitoring unit. It is printed on the setup card that comes with the unit, or your facility administrator can provide it. Your phone needs to be on the same network as the unit.
+          <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Connect to your VIGIL box</Text>
+          <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
+            Type the address from the card that came with the box, then tap Test.
           </Text>
           <OBField label="Unit Address" value={serverIp} onChange={setSI} placeholder="e.g. 192.168.1.50"
             keyboard="numbers-and-punctuation"
             note="Shown on the setup card that came with your unit."/>
-          <OBField label="Port" value={serverPort} onChange={setSP} placeholder="5001" keyboard="number-pad"/>
           {!!onDemo && (
             <TouchableOpacity onPress={onDemo} style={{alignItems:'center',paddingVertical:8,marginBottom:12}}>
               <Text style={{color:C.blue,fontSize:13,fontWeight:'600'}}>No unit yet? Explore VIGIL in Demo Mode</Text>
@@ -445,7 +450,7 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
             onPress={testConnection} disabled={testing}>
             {testing
               ? <View style={{flexDirection:'row',gap:8,alignItems:'center'}}><ActivityIndicator color="#fff" size="small"/><Text style={{color:'#fff',fontWeight:'700'}}>Testing...</Text></View>
-              : <Text style={{color:'#fff',fontSize:15,fontWeight:'700'}}>Test Connection</Text>}
+              : <Text style={{color:'#fff',fontSize:17,fontWeight:'700'}}>Test</Text>}
           </TouchableOpacity>
           {serverOk===true && (
             <View style={{backgroundColor:C.green+'18',borderRadius:12,padding:12,alignItems:'center'}}>
@@ -524,11 +529,7 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
             </Text>
           </View>
           {[
-            ['Resident',residentName||'—'],
-            ['Height',`${residentHeight} cm`],
-            ['Emergency Contact',emergencyPhone||'—'],
-            ['Server',`${serverIp}:${serverPort}`],
-            ['Apple Watch',watchEnabled?'Connected':'Camera only'],
+            ['Watching over',residentName||'—'],
           ].map(([label,val])=>(
             <View key={label} style={{flexDirection:'row',justifyContent:'space-between',paddingVertical:12,borderBottomWidth:1,borderBottomColor:C.border}}>
               <Text style={{color:C.sub,fontSize:14}}>{label}</Text>
@@ -546,7 +547,8 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
     }
   };
 
-  const stepTitles = ['Welcome','Resident','Emergency','Server','Watch','Ready'];
+  const stepTitles = ['Welcome','Who is VIGIL watching over?','Emergency','Connect','Watch','Ready'];
+  const li = LOCAL_STEPS.indexOf(step);
 
   const finish = async () => {
     const profile:SavedProfile = {residentName,residentHeight,emergencyPhone,emergencyEmail,watchEnabled};
@@ -556,17 +558,69 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
     onComplete(profile,serverIp,serverPort);
   };
 
+  const legal=(
+    <Text style={{color:C.muted,fontSize:13,lineHeight:19,textAlign:'center',marginTop:18}}>
+      VIGIL is a safety and wellness tool, not a medical device. By continuing you agree to the{' '}
+      <Text style={{color:C.blue}} onPress={()=>Linking.openURL('https://vigilhealth.me/terms.html')}>Terms</Text> and{' '}
+      <Text style={{color:C.blue}} onPress={()=>Linking.openURL('https://vigilhealth.me/privacy.html')}>Privacy Policy</Text>.
+    </Text>
+  );
+
+  if(mode!=='local'){
+    return (
+      <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
+        <StatusBar barStyle="light-content"/>
+        <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
+          <ScrollView contentContainerStyle={{padding:24,paddingTop:48}} keyboardShouldPersistTaps="handled">
+            <View style={{alignItems:'center',marginBottom:28}}>
+              <Image source={{uri:'LaunchLogo'}} style={{width:84,height:84,borderRadius:20,marginBottom:18}}/>
+              <Text style={{color:C.text,fontSize:32,fontWeight:'800',letterSpacing:-0.5}}>VIGIL</Text>
+              <Text style={{color:C.sub,fontSize:17,textAlign:'center',lineHeight:24,marginTop:8}}>
+                Tells you right away if someone falls. Nothing to wear, nothing to press.
+              </Text>
+            </View>
+            {mode==='cloud'?(
+              <>
+                <CloudSignIn onSignedIn={cfg=>{AsyncStorage.setItem(SK_ONBOARDING,'done').catch(()=>{});onCloud&&onCloud(cfg);}}/>
+                <TouchableOpacity onPress={()=>setMode('choose')} style={{alignItems:'center',paddingVertical:16}}>
+                  <Text style={{color:C.sub,fontSize:16}}>Back</Text>
+                </TouchableOpacity>
+              </>
+            ):(
+              <>
+                <TouchableOpacity style={[s.btnPrimary,{paddingVertical:18}]} onPress={()=>setMode('cloud')}>
+                  <Text style={[s.btnPrimaryTxt,{fontSize:18}]}>Sign in</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={()=>{setMode('local');setStep(1);}}
+                  style={{marginTop:14,paddingVertical:16,borderRadius:14,borderWidth:1,borderColor:C.border,alignItems:'center'}}>
+                  <Text style={{color:C.text,fontSize:16,fontWeight:'600'}}>I have a VIGIL box at home</Text>
+                </TouchableOpacity>
+                {!!onDemo&&(
+                  <TouchableOpacity onPress={onDemo} style={{alignItems:'center',paddingVertical:18}}>
+                    <Text style={{color:C.blue,fontSize:16}}>Just looking? Try the demo</Text>
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+            {legal}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    );
+  }
+
+  const goNext=()=>{ if(li<LOCAL_STEPS.length-1)setStep(LOCAL_STEPS[li+1]); else finish(); };
+  const goBack=()=>{ if(li>0)setStep(LOCAL_STEPS[li-1]); else setMode('choose'); };
   return (
     <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
       <StatusBar barStyle="light-content"/>
-      {/* Progress */}
       <View style={{paddingHorizontal:20,paddingTop:12,paddingBottom:4}}>
         <View style={{flexDirection:'row',gap:4,marginBottom:6}}>
-          {Array.from({length:TOTAL}).map((_,i)=>(
-            <View key={i} style={{flex:1,height:3,borderRadius:2,backgroundColor:i<=step?C.green:C.fill}}/>
+          {LOCAL_STEPS.map((_,i)=>(
+            <View key={i} style={{flex:1,height:4,borderRadius:2,backgroundColor:i<=li?C.green:C.fill}}/>
           ))}
         </View>
-        <Text style={{color:C.muted,fontSize:11,textAlign:'right'}}>{stepTitles[step]} · Step {step+1} of {TOTAL}</Text>
+        <Text style={{color:C.muted,fontSize:13,textAlign:'right'}}>Step {li+1} of {LOCAL_STEPS.length}</Text>
       </View>
 
       <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
@@ -574,17 +628,15 @@ function OnboardingScreen({onComplete,onDemo}:OBProps) {
           {renderStep()}
         </ScrollView>
         <View style={{flexDirection:'row',gap:12,padding:20,paddingBottom:32}}>
-          {step>0 && (
-            <TouchableOpacity style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:16,alignItems:'center'}} onPress={()=>setStep(s=>s-1)}>
-              <Text style={{color:C.text,fontWeight:'700',fontSize:15}}>Back</Text>
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:18,alignItems:'center'}} onPress={goBack}>
+            <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text>
+          </TouchableOpacity>
           <TouchableOpacity
-            style={[s.btnPrimary,{flex:2},!canNext()&&{backgroundColor:C.fill,shadowOpacity:0}]}
-            onPress={()=>step<TOTAL-1?setStep(s=>s+1):finish()}
+            style={[s.btnPrimary,{flex:2,paddingVertical:18},!canNext()&&{backgroundColor:C.fill,shadowOpacity:0}]}
+            onPress={goNext}
             disabled={!canNext()}>
-            <Text style={{color:canNext()?'#000':C.muted,fontWeight:'700',fontSize:15}}>
-              {step===TOTAL-1?'Start Monitoring':'Continue'}
+            <Text style={{color:canNext()?'#000':C.muted,fontWeight:'700',fontSize:17}}>
+              {li===LOCAL_STEPS.length-1?'Start':'Continue'}
             </Text>
           </TouchableOpacity>
         </View>
@@ -2099,6 +2151,34 @@ export default function App() {
   const [isResidentFlag,setIsResidentFlag]   = useState(false);
   const [selectedPerson,setSelectedPerson]   = useState<Person|null>(null);
   const [zoneEditor,setZoneEditor]=useState(false);
+  // SETUP_CHECK_V1: ask for the bed and couch areas on first use, and again
+  // whenever the server notices the camera has moved.
+  const [setupStatus,setSetupStatus]=useState<{needs_zones:boolean;camera_moved:boolean}|null>(null);
+  const setupAsked=useRef<string>('');
+  const zoneEditorRef=useRef(false);
+  useEffect(()=>{zoneEditorRef.current=zoneEditor;},[zoneEditor]);
+  const fetchSetupStatus=useCallback(async()=>{
+    try{
+      const r=await AX.get(`${url()}/camera/setup-status`,{timeout:6000});
+      if(r.data?.status!=='ok')return;
+      const st={needs_zones:!!r.data.needs_zones,camera_moved:!!r.data.camera_moved};
+      setSetupStatus(st);
+      const key=st.camera_moved?'moved:'+(r.data.moved_at||''):st.needs_zones?'zones':'';
+      if(!key||setupAsked.current===key)return;
+      setupAsked.current=key;
+      if(st.camera_moved){
+        Alert.alert('Did the camera move?',
+          "VIGIL's view of the room has changed. Please mark the bed and couch again, so lying down there is not mistaken for a fall.",
+          [{text:'Mark them now',onPress:()=>setZoneEditor(true)},
+           {text:"It didn't move",onPress:()=>{AX.post(`${url()}/camera/moved/dismiss`,{}).then(fetchSetupStatus).catch(()=>{});}},
+           {text:'Later',style:'cancel'}]);
+      }else{
+        Alert.alert('Mark the bed and couch',
+          'Draw a box over each bed and couch the camera can see. Then VIGIL knows lying down there is not a fall. It takes one minute.',
+          [{text:'Mark them now',onPress:()=>setZoneEditor(true)},{text:'Later',style:'cancel'}]);
+      }
+    }catch(_e){}
+  },[]);
   // IN_VIEW_LIVE_V1: exactly who is in the camera picture right now.
   const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number}[]>([]);
   const [identifying,setIdentifying]=useState(0);
@@ -2466,6 +2546,7 @@ export default function App() {
   // (above) is far too slow for this to feel live during a walk-test or demo.
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchDashboard();const id=setInterval(()=>{if(!kbOpenRef.current)fetchDashboard();},4000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchDashboard]);
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;const id=setInterval(()=>{if(!kbOpenRef.current)fetchRooms();},15000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchRooms]);
+  useEffect(()=>{if(!jetsonOk||demoMode)return;fetchSetupStatus();const id=setInterval(()=>{if(!kbOpenRef.current&&!zoneEditorRef.current)fetchSetupStatus();},30000);return()=>clearInterval(id);},[jetsonOk,demoMode,fetchSetupStatus]);
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchPersons();const id=setInterval(()=>{if(!kbOpenRef.current)fetchPersons();},8000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchPersons]);
   // Tightened from 30s -> 6s: this is the "more than one person detected" identification
   // sheet — for a live demo this needs to feel near-instant when a second person walks in.
@@ -2671,6 +2752,18 @@ export default function App() {
         )}
         {cloud&&cloud.sites.length===1&&<Text style={{color:C.muted,fontSize:13,marginTop:6}}>{cloud.sites[0].name}</Text>}
       </View>
+
+      {setupStatus&&(setupStatus.camera_moved||setupStatus.needs_zones)&&!demoMode&&(
+        <TouchableOpacity onPress={()=>setZoneEditor(true)}
+          style={{marginHorizontal:16,marginBottom:12,padding:16,borderRadius:14,backgroundColor:C.orange+'22',borderWidth:1,borderColor:C.orange}}>
+          <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>
+            {setupStatus.camera_moved?'The camera seems to have moved':'Mark the bed and couch'}
+          </Text>
+          <Text style={{color:C.sub,fontSize:14,marginTop:4,lineHeight:20}}>
+            Tap here to mark them, so lying down there is not mistaken for a fall.
+          </Text>
+        </TouchableOpacity>
+      )}
 
       {/* Status pills */}
       <View style={s.pillRow}>
@@ -3506,7 +3599,7 @@ export default function App() {
       <View style={{flexDirection:'row',borderBottomWidth:1,borderBottomColor:C.border,paddingHorizontal:16}}>
         {(['resident','server','camera','support'] as SettingTab[]).map(t=>(
           <TouchableOpacity key={t} style={{flex:1,alignItems:'center',paddingVertical:10}} onPress={()=>setSettingsTab(t)}>
-            <Text style={{color:settingsTab===t?C.green:C.sub,fontSize:13,fontWeight:'600'}}>{t.charAt(0).toUpperCase()+t.slice(1)}</Text>
+            <Text style={{color:settingsTab===t?C.green:C.sub,fontSize:14,fontWeight:'600'}}>{({resident:'Person',server:'Account',camera:'Camera',support:'Help'} as any)[t]||t}</Text>
             {settingsTab===t&&<View style={{position:'absolute',bottom:0,left:0,right:0,height:2,backgroundColor:C.green}}/>}
           </TouchableOpacity>
         ))}
@@ -3536,7 +3629,9 @@ export default function App() {
 
   if(showOnboarding){
     return(
-      <OnboardingScreen onDemo={()=>{setOnboarding(false);enterDemo();}} onComplete={(profile,ip,port)=>{
+      <OnboardingScreen onDemo={()=>{setOnboarding(false);enterDemo();}}
+        onCloud={cfg=>{enterCloud(cfg);setOnboarding(false);}}
+        onComplete={(profile,ip,port)=>{
         setResidentName(profile.residentName);setResidentHeight(profile.residentHeight);
         setEmergencyPhone(profile.emergencyPhone);setEmergencyEmail(profile.emergencyEmail);
         setWatchEnabled(profile.watchEnabled);
@@ -3689,7 +3784,7 @@ export default function App() {
       </Modal>
 
       <Modal visible={zoneEditor} animationType="slide" presentationStyle="fullScreen" onRequestClose={()=>setZoneEditor(false)}>
-        {zoneEditor&&<ZoneEditor serverUrl={urlRef.current} onClose={()=>setZoneEditor(false)}/>}
+        {zoneEditor&&<ZoneEditor serverUrl={urlRef.current} onClose={()=>{setZoneEditor(false);setupAsked.current='';setTimeout(()=>fetchSetupStatus(),800);}}/>}
       </Modal>
 
       {/* Person detail screen */}
