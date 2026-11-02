@@ -2423,6 +2423,56 @@ def _start_push():
 _start_push()
 
 
+# OFFLINE_WATCH_V1: if the camera pipeline stops sending heartbeats, tell the
+# caregivers. Falls cannot be detected while it is down, so this matters as
+# much as a fall alert. (In VIGIL Cloud the gateway does this instead.)
+def _offline_watch_loop():
+    import time as _t
+    was_online = None
+    down_since = None
+    last_push = 0.0
+    _t.sleep(120)                      # give the camera pipeline time to start
+    while True:
+        try:
+            conn = get_db()
+            row = conn.execute("SELECT last_heartbeat_at FROM camera_status WHERE id=1").fetchone()
+            conn.close()
+            age = None
+            if row and row[0]:
+                age = (datetime.now() - datetime.fromisoformat(row[0])).total_seconds()
+            online = age is not None and age < 180
+            now = _t.time()
+            if online:
+                if was_online is False:
+                    send_push("VIGIL: monitoring restored", "The camera is working again.", "default", "white_check_mark")
+                down_since = None
+            else:
+                down_since = down_since or now
+                if was_online is not False or now - last_push > 3600:
+                    last_push = now
+                    send_push("VIGIL: monitoring offline",
+                              "The camera stopped sending data, so falls cannot be detected. Check its power and Wi-Fi.",
+                              "urgent", "warning")
+            was_online = online
+        except Exception as e:
+            print("[OFFLINE] check error: %s" % e, flush=True)
+        _t.sleep(60)
+
+
+if os.environ.get("VIGIL_LOCAL_WATCHDOG", "1") == "1" and os.environ.get("WERKZEUG_RUN_MAIN") != "false":
+    threading.Thread(target=_offline_watch_loop, daemon=True, name="offline-watch").start()
+
+
+# TEST_ALERT_V1: "Send a test alert" in the app, so every caregiver can check
+# that alerts really reach their phone. Never counted as a real alert.
+@app.route("/alert/test", methods=["POST"])
+@require_api_key
+def alert_test():
+    ok = send_push("VIGIL: test alert", "This is a test. Real alerts will look like this.", "high", "bell")
+    return jsonify({"status": "ok" if ok else "error",
+                    "reason": None if ok else "alerts are not set up on this VIGIL (no ntfy topic)"})
+
+
 
 # ---------------------------------------------------------------------------
 # Identity hygiene. Ask about a person once, never re-prompt for someone who

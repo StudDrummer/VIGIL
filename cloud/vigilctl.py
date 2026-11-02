@@ -94,6 +94,7 @@ def render(st):
       VIGIL_ROOM_ID: "room_1"
       VIGIL_NTFY_TOPIC: "{topic}"
       VIGIL_PUSH_LABEL: "{label}"
+      VIGIL_LOCAL_WATCHDOG: "0"
       VIGIL_BED_EXIT_ALWAYS: "{bed_always}"
       VIGIL_FLOOR_ALERT_S: "{floor_s}"
       TZ: "{tz}"

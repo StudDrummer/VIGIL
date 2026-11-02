@@ -3446,6 +3446,18 @@ export default function App() {
         <Text style={s.btnPrimaryTxt}>Set up bed and couch zones</Text>
       </TouchableOpacity>
       <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginTop:8,lineHeight:18}}>Do this once when the camera is installed, and again if it is moved.</Text>
+      <Text style={s.secHeader}>Alerts</Text>
+      <TouchableOpacity disabled={demoMode} style={[s.btnPrimary,{marginHorizontal:16,opacity:demoMode?0.4:1,backgroundColor:C.card,borderWidth:1,borderColor:C.border}]}
+        onPress={async()=>{   // TEST_ALERT_V1
+          try{
+            const r=await AX.post(`${url()}/alert/test`,{},{timeout:10000});
+            if(r.data?.status==='ok')Alert.alert('Test alert sent','Your phone should buzz within a few seconds. If it does not, open the ntfy app and check you are subscribed to this camera.');
+            else Alert.alert('Alerts are not set up',r.data?.reason||'This VIGIL cannot send alerts yet.');
+          }catch(e:any){Alert.alert('Could not send',e?.message||'Check the connection and try again.');}
+        }}>
+        <Text style={[s.btnPrimaryTxt,{color:C.text}]}>Send a test alert</Text>
+      </TouchableOpacity>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginTop:8,lineHeight:18}}>Every caregiver should do this once, to make sure alerts reach their phone.</Text>
       <Text style={s.secHeader} onLayout={()=>{if(idMode===null&&!demoMode)loadIdMode();}}>Who VIGIL recognises</Text>
       <View style={{flexDirection:'row',marginHorizontal:16,backgroundColor:C.card,borderRadius:14,padding:4,borderWidth:1,borderColor:C.border}}>
         {([['resident','One resident'],['family','Everyone']] as const).map(([k,lbl])=>(
