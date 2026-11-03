@@ -73,6 +73,12 @@ def test_everything():
     tok = r.json["token"]
     H = {"X-VIGIL-Key": tok}
     assert wait_mail(1) and "Welcome to VIGIL" in MAIL[-1][1]
+    # VERIFY_EMAIL_V1: the welcome email carries a 6-digit code that confirms the address
+    assert C.get("/auth/me", headers=H).json["user"]["email_verified"] is False
+    vcode = re.search(r"address is (\d{6})", MAIL[-1][1]).group(1)
+    assert C.post("/auth/verify", json={"code": "000000"}, headers=H).status_code == 400
+    r = C.post("/auth/verify", json={"code": vcode}, headers=H)
+    assert r.status_code == 200 and r.json["user"]["email_verified"] is True, r.json
     assert C.post("/auth/signup", json={"email": "dad@example.com", "password": "another one", "name": "x"}).status_code == 409
     # no camera yet; wrong code; right code (spaces, lower case, no dash all fine)
     assert C.get("/s/home01/camera/status", headers=H).status_code == 403
@@ -105,20 +111,33 @@ def test_everything():
     assert C.post("/auth/login", json={"email": "dad@example.com", "password": "good password"}).status_code == 401
     assert C.post("/auth/login", json={"email": "dad@example.com", "password": "new password 1"}).status_code == 200
     assert C.get("/auth/me", headers=H).status_code == 401          # old sessions ended by the reset
-    # alerts: first pass only records where we are; a new fall is emailed to both
+    # alerts: first pass only records where we are. Mom has not confirmed her email
+    # yet, so the first fall goes to Dad only; once she confirms she gets them too.
     gateway._alert_email_once()
     n = len(MAIL)
     ALERTS.insert(0, {"id": 2, "alert_type": "fall", "detected_at": "2026-11-03T10:05:00", "payload": {"message": "x"}})
+    gateway._alert_email_once()
+    assert wait_mail(n + 1)
+    time.sleep(1)
+    assert [to for to, _ in MAIL[n:]] == ["dad@example.com"], MAIL[n:]
+    tok3 = C.post("/auth/login", json={"email": "mom@example.com", "password": "good password"}).json["token"]
+    H3 = {"X-VIGIL-Key": tok3}
+    n = len(MAIL)
+    assert C.post("/auth/verify/resend", headers=H3).status_code == 200 and wait_mail(n + 1)
+    mcode = re.search(r"address is (\d{6})", MAIL[-1][1]).group(1)
+    assert MAIL[-1][0] == "mom@example.com"
+    assert C.post("/auth/verify", json={"code": mcode}, headers=H3).json["user"]["email_verified"] is True
+    n = len(MAIL)
+    ALERTS.insert(0, {"id": 4, "alert_type": "fall", "detected_at": "2026-11-03T10:30:00", "payload": {"message": "x"}})
     gateway._alert_email_once()
     assert wait_mail(n + 2)
     got = {to: body for to, body in MAIL[n:]}
     assert set(got) == {"dad@example.com", "mom@example.com"}
     assert "Possible fall" in got["dad@example.com"] and "Nani - bedroom" in got["dad@example.com"]
     # turning email alerts off stops them for that person only
-    tok3 = C.post("/auth/login", json={"email": "mom@example.com", "password": "good password"}).json["token"]
-    C.post("/auth/profile", json={"email_alerts": False}, headers={"X-VIGIL-Key": tok3})
+    C.post("/auth/profile", json={"email_alerts": False}, headers=H3)
     n = len(MAIL)
-    ALERTS.insert(0, {"id": 3, "alert_type": "stillness", "detected_at": "2026-11-03T11:00:00", "payload": {}})
+    ALERTS.insert(0, {"id": 5, "alert_type": "stillness", "detected_at": "2026-11-03T11:00:00", "payload": {}})
     gateway._alert_email_once()
     assert wait_mail(n + 1)
     time.sleep(1)

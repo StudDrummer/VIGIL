@@ -402,6 +402,8 @@ def cmd_add_user(a):
     c = gw_db()
     c.execute("INSERT INTO users (email, name, pw_hash, is_admin) VALUES (?,?,?,?)",
               (a.email.strip().lower(), a.name, generate_password_hash(pw), 1 if a.admin else 0))
+    if "email_verified" in {r[1] for r in c.execute("PRAGMA table_info(users)")}:
+        c.execute("UPDATE users SET email_verified=1 WHERE email=?", (a.email.strip().lower(),))   # added by hand: trusted
     c.commit()
     print("Account created: %s   password: %s   (they can change it in the app)" % (a.email, pw))
 

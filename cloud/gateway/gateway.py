@@ -94,11 +94,16 @@ def init_db():
         email TEXT PRIMARY KEY, code_hash TEXT, expires REAL, tries INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS site_state (
         site_id TEXT PRIMARY KEY, last_alert_id INTEGER);
+    CREATE TABLE IF NOT EXISTS verify_codes (
+        user_id INTEGER PRIMARY KEY, code_hash TEXT, expires REAL, tries INTEGER DEFAULT 0);
     """)
     cols = {r[1] for r in c.execute("PRAGMA table_info(users)")}
     for col, typ in (("phone", "TEXT"), ("email_alerts", "INTEGER DEFAULT 1")):   # ACCOUNTS_V1
         if col not in cols:
             c.execute("ALTER TABLE users ADD COLUMN %s %s" % (col, typ))
+    if "email_verified" not in cols:                                   # VERIFY_EMAIL_V1
+        c.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0")
+        c.execute("UPDATE users SET email_verified=1")                 # accounts from before this check
     c.commit()
     c.close()
 
@@ -271,6 +276,7 @@ def _new_token(user_id, device=""):
 def _user_json(u):
     return {"email": u["email"], "name": u["name"], "phone": u["phone"] if "phone" in u.keys() else None,
             "email_alerts": bool(u["email_alerts"]) if "email_alerts" in u.keys() else True,
+            "email_verified": bool(u["email_verified"]) if "email_verified" in u.keys() else True,
             "is_admin": bool(u["is_admin"])}
 
 
@@ -294,17 +300,65 @@ def signup():
         db().execute("INSERT INTO login_fail VALUES (?,?)", ("signup|" + ip, time.time()))
         db().commit()
         return jsonify({"status": "error", "reason": "an account with this email already exists; sign in instead"}), 409
-    db().execute("INSERT INTO users (email, name, pw_hash, phone) VALUES (?,?,?,?)",
-                 (email, name, generate_password_hash(pw), phone))
+    # Without email set up on the server nobody could receive a code, so the
+    # address is taken as given; otherwise it must be confirmed with a code.
+    db().execute("INSERT INTO users (email, name, pw_hash, phone, email_verified) VALUES (?,?,?,?,?)",
+                 (email, name, generate_password_hash(pw), phone, 0 if email_enabled() else 1))
     db().commit()
     u = db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     audit("signup", user_id=u["id"])
-    send_email(email, "Welcome to VIGIL",
-               "Hi %s,\n\nYour VIGIL account is ready. To see a camera, open the app and tap "
-               "\"Add a camera\", then type the setup code from the card that came with it.\n\n"
-               "VIGIL will email you here if it sees a possible fall or if a camera stops working.\n\n- VIGIL" % name)
+    if email_enabled():
+        _send_verify_code(u, welcome=True)
     return jsonify({"status": "ok", "token": _new_token(u["id"], body.get("device")),
                     "user": _user_json(u), "sites": []})
+
+
+# ---------------------------------------------------------------- email check (VERIFY_EMAIL_V1)
+def _send_verify_code(u, welcome=False):
+    code = "%06d" % secrets.randbelow(1000000)
+    db().execute("INSERT OR REPLACE INTO verify_codes VALUES (?,?,?,0)", (u["id"], _h(code), time.time() + 86400))
+    db().commit()
+    hello = ("Hi %s,\n\nWelcome to VIGIL. " % (u["name"] or "there")) if welcome else ""
+    return send_email(u["email"], "Your VIGIL code: %s" % code,
+                      hello + "Your code to confirm this email address is %s\n\n"
+                      "Type it in the VIGIL app. It works for 24 hours. VIGIL sends fall alerts only to "
+                      "confirmed addresses.\n\nIf you did not make a VIGIL account, ignore this email.\n\n- VIGIL" % code)
+
+
+@app.route("/auth/verify", methods=["POST"])
+@require_user
+def verify_email():
+    code = _re.sub(r"[^0-9]", "", (request.get_json(silent=True) or {}).get("code") or "")
+    r = db().execute("SELECT * FROM verify_codes WHERE user_id=?", (g.user_id,)).fetchone()
+    if not r or r["expires"] < time.time() or r["tries"] >= 5:
+        return jsonify({"status": "error", "reason": "that code has expired; tap Send a new code"}), 400
+    if not secrets.compare_digest(r["code_hash"], _h(code)):
+        db().execute("UPDATE verify_codes SET tries=tries+1 WHERE user_id=?", (g.user_id,))
+        db().commit()
+        return jsonify({"status": "error", "reason": "that code is not right"}), 400
+    db().execute("UPDATE users SET email_verified=1 WHERE id=?", (g.user_id,))
+    db().execute("DELETE FROM verify_codes WHERE user_id=?", (g.user_id,))
+    db().commit()
+    audit("email_verified")
+    u = db().execute("SELECT * FROM users WHERE id=?", (g.user_id,)).fetchone()
+    return jsonify({"status": "ok", "user": _user_json(u)})
+
+
+@app.route("/auth/verify/resend", methods=["POST"])
+@require_user
+def verify_resend():
+    key = "verify|%s" % g.user_id
+    if _too_many_fails(key):
+        return jsonify({"status": "error", "reason": "too many codes asked for, wait 15 minutes"}), 429
+    if not email_enabled():
+        return jsonify({"status": "error", "reason": "email is not set up on this VIGIL server yet"}), 503
+    db().execute("INSERT INTO login_fail VALUES (?,?)", (key, time.time()))
+    db().commit()
+    u = db().execute("SELECT * FROM users WHERE id=?", (g.user_id,)).fetchone()
+    if u["email_verified"]:
+        return jsonify({"status": "ok", "already": True})
+    _send_verify_code(u)
+    return jsonify({"status": "ok"})
 
 
 def _normalise_code(code):
@@ -399,7 +453,7 @@ def reset_password():
         db().execute("UPDATE reset_codes SET tries=tries+1 WHERE email=?", (email,))
         db().commit()
         return jsonify({"status": "error", "reason": "that code is not right"}), 400
-    db().execute("UPDATE users SET pw_hash=? WHERE email=?", (generate_password_hash(new), email))
+    db().execute("UPDATE users SET pw_hash=?, email_verified=1 WHERE email=?", (generate_password_hash(new), email))
     db().execute("DELETE FROM reset_codes WHERE email=?", (email,))
     u = db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
     db().execute("DELETE FROM tokens WHERE user_id=?", (u["id"],))
@@ -490,7 +544,8 @@ def _site_emails(site_id):
         c = sqlite3.connect(DB_PATH, timeout=10)
         rows = c.execute("""SELECT DISTINCT u.email FROM users u
                             LEFT JOIN grants g ON g.user_id=u.id AND g.site_id=?
-                            WHERE u.disabled=0 AND COALESCE(u.email_alerts,1)=1 AND g.site_id IS NOT NULL""",
+                            WHERE u.disabled=0 AND COALESCE(u.email_alerts,1)=1 AND COALESCE(u.email_verified,1)=1
+                              AND g.site_id IS NOT NULL""",
                          (site_id,)).fetchall()
         c.close()
         return [r[0] for r in rows]

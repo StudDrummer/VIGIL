@@ -268,7 +268,8 @@ interface OBProps { onComplete:(profile:SavedProfile,serverIp:string,serverPort:
 // ACCOUNTS_V1: create an account, sign in, or reset a forgotten password.
 // A new account has no cameras yet; AddCameraCard adds one by its setup code.
 function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=>void;startMode?:'signup'|'signin'}){
-  const [mode,setMode]=useState<'signup'|'signin'|'forgot'|'reset'>(startMode);
+  const [mode,setMode]=useState<'signup'|'signin'|'forgot'|'reset'|'verify'>(startMode);
+  const [pending,setPending]=useState<any>(null);   // VERIFY_EMAIL_V1: signed in, email not confirmed yet
   const [gateway,setGateway]=useState(DEFAULT_CLOUD);
   const [adv,setAdv]=useState(false);
   const [name,setName]=useState('');
@@ -283,6 +284,13 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
   const fail=(e:any,fallback:string)=>setErr(e?.response?.data?.reason||
     (e?.message?.includes('Network')?'Cannot reach VIGIL. Check the internet connection and try again.':fallback));
   const done=(d:any)=>{
+    if(d?.user&&d.user.email_verified===false&&mode!=='verify'){
+      setPending(d);setMode('verify');setCode('');setErr(null);
+      setNote(mode==='signup'?`We emailed a 6-digit code to ${email.trim()}. Type it here to confirm your email.`
+        :`Your email is not confirmed yet. We sent a new 6-digit code to ${email.trim()}.`);
+      if(mode!=='signup')axios.post(`${gw()}/auth/verify/resend`,{},{timeout:15000,headers:{'X-VIGIL-Key':d.token}}).catch(()=>{});
+      return;
+    }
     const sites:CloudSite[]=d?.sites||[];
     onSignedIn({gateway:gw(),token:d.token,email:email.trim().toLowerCase(),sites,siteId:sites[0]?.id||''});
     setPassword('');
@@ -301,6 +309,9 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
         if(r.data?.email_enabled===false){setErr('Password emails are not set up yet. Contact VIGIL support.');return;}
         setNote(`If ${email.trim()} has a VIGIL account, a 6-digit code is on its way. Check your email (and spam).`);
         setMode('reset');
+      }else if(mode==='verify'){
+        await axios.post(`${gw()}/auth/verify`,{code:code.trim()},{timeout:15000,headers:{'X-VIGIL-Key':pending.token}});
+        done(pending);
       }else{
         const r=await axios.post(`${gw()}/auth/reset`,{email:email.trim(),code:code.trim(),new_password:password,device:Platform.OS},{timeout:15000});
         done(r.data);
@@ -311,14 +322,16 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
   const ready=mode==='signup'?(!!name.trim()&&!!email.trim()&&password.length>=8)
     :mode==='signin'?(!!email.trim()&&!!password)
     :mode==='forgot'?!!email.trim()
+    :mode==='verify'?code.trim().length===6
     :(code.trim().length===6&&password.length>=8);
   const inp={color:C.text,fontSize:17,paddingHorizontal:14,paddingVertical:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
-  const title={signup:'Create your account',signin:'Sign in',forgot:'Forgot your password?',reset:'Choose a new password'}[mode];
+  const title={signup:'Create your account',signin:'Sign in',forgot:'Forgot your password?',reset:'Choose a new password',verify:'Confirm your email'}[mode];
   const sub={signup:'You will use this email and password to sign in on any phone.',
     signin:'Use the email and password of your VIGIL account.',
     forgot:'Type your email and we will send you a 6-digit code.',
-    reset:'Type the 6-digit code from the email and a new password.'}[mode];
-  const btn={signup:'Create account',signin:'Sign in',forgot:'Email me a code',reset:'Save and sign in'}[mode];
+    reset:'Type the 6-digit code from the email and a new password.',
+    verify:'Fall alerts are only emailed to confirmed addresses. Check your inbox (and spam).'}[mode];
+  const btn={signup:'Create account',signin:'Sign in',forgot:'Email me a code',reset:'Save and sign in',verify:'Confirm'}[mode];
   return(
     <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
       <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>{title}</Text>
@@ -326,13 +339,13 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
       {note&&<Text style={{color:C.green,fontSize:14,marginTop:10,lineHeight:20}}>{note}</Text>}
       {mode==='signup'&&<TextInput style={inp} value={name} onChangeText={setName} placeholder="Your name" placeholderTextColor={C.muted}
         autoCapitalize="words" autoCorrect={false} textContentType="name" returnKeyType="next"/>}
-      {mode!=='reset'&&<TextInput style={inp} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor={C.muted}
+      {mode!=='reset'&&mode!=='verify'&&<TextInput style={inp} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor={C.muted}
         autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType={mode==='signup'?'emailAddress':'username'} returnKeyType="next"/>}
       {mode==='signup'&&<TextInput style={inp} value={phone} onChangeText={setPhone} placeholder="Mobile number (optional)" placeholderTextColor={C.muted}
         autoCorrect={false} keyboardType="phone-pad" textContentType="telephoneNumber"/>}
-      {mode==='reset'&&<TextInput style={inp} value={code} onChangeText={t=>setCode(t.replace(/[^0-9]/g,'').slice(0,6))} placeholder="6-digit code"
+      {(mode==='reset'||mode==='verify')&&<TextInput style={inp} value={code} onChangeText={t=>setCode(t.replace(/[^0-9]/g,'').slice(0,6))} placeholder="6-digit code"
         placeholderTextColor={C.muted} keyboardType="number-pad" textContentType="oneTimeCode"/>}
-      {mode!=='forgot'&&<TextInput style={inp} value={password} onChangeText={setPassword}
+      {mode!=='forgot'&&mode!=='verify'&&<TextInput style={inp} value={password} onChangeText={setPassword}
         placeholder={mode==='signin'?'Password':'Password (at least 8 characters)'} placeholderTextColor={C.muted}
         autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType={mode==='signin'?'password':'newPassword'}
         returnKeyType="go" onSubmitEditing={()=>{if(ready)go();}}/>}
@@ -349,6 +362,13 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
           <Text style={{color:C.blue,fontSize:16}}>Forgot password?</Text></TouchableOpacity>
         <TouchableOpacity onPress={()=>{setMode('signup');setErr(null);}} style={{alignItems:'center',paddingTop:12}}>
           <Text style={{color:C.sub,fontSize:15}}>New to VIGIL? Create an account</Text></TouchableOpacity>
+      </>}
+      {mode==='verify'&&<>
+        <TouchableOpacity disabled={busy} onPress={()=>{setErr(null);axios.post(`${gw()}/auth/verify/resend`,{},{timeout:15000,headers:{'X-VIGIL-Key':pending?.token}})
+            .then(()=>setNote(`A new code is on its way to ${email.trim()}.`)).catch((e:any)=>fail(e,'Could not send a new code.'));}}
+          style={{alignItems:'center',paddingTop:16}}><Text style={{color:C.blue,fontSize:16}}>Send a new code</Text></TouchableOpacity>
+        <TouchableOpacity onPress={()=>{if(pending){const d={...pending,user:{...pending.user,email_verified:true}};setPending(null);onSignedIn({gateway:gw(),token:d.token,email:email.trim().toLowerCase(),sites:d.sites||[],siteId:d.sites?.[0]?.id||''});}}}
+          style={{alignItems:'center',paddingTop:12}}><Text style={{color:C.sub,fontSize:15}}>Do this later (no alert emails until then)</Text></TouchableOpacity>
       </>}
       {(mode==='forgot'||mode==='reset')&&<TouchableOpacity onPress={()=>{setMode('signin');setErr(null);setNote(null);}} style={{alignItems:'center',paddingTop:16}}>
         <Text style={{color:C.sub,fontSize:15}}>Back to sign in</Text></TouchableOpacity>}
@@ -417,6 +437,20 @@ function AccountSection({cfg}:{cfg:CloudCfg}){
     catch(e:any){setMsg(e?.response?.data?.reason||'The email could not be sent.');}
     finally{setBusy(false);}
   };
+  const [vcode,setVcode]=useState('');
+  const [vsent,setVsent]=useState(false);
+  const verify=async()=>{
+    setBusy(true);setMsg(null);
+    try{const r=await axios.post(`${cfg.gateway}/auth/verify`,{code:vcode},h);setUser(r.data?.user);setVcode('');setMsg('Email confirmed. Alert emails will come here.');}
+    catch(e:any){setMsg(e?.response?.data?.reason||'Could not confirm. Check the internet connection.');}
+    finally{setBusy(false);}
+  };
+  const resend=async()=>{
+    setBusy(true);setMsg(null);
+    try{await axios.post(`${cfg.gateway}/auth/verify/resend`,{},h);setVsent(true);setMsg(`Code sent to ${cfg.email}.`);}
+    catch(e:any){setMsg(e?.response?.data?.reason||'Could not send the code.');}
+    finally{setBusy(false);}
+  };
   const inp={color:C.text,fontSize:16,paddingHorizontal:12,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:6};
   if(!user)return null;
   const changed=name.trim()!==(user.name||'')||phone.trim()!==(user.phone||'');
@@ -424,6 +458,18 @@ function AccountSection({cfg}:{cfg:CloudCfg}){
     <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
       <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Your account</Text>
       <Text style={{color:C.sub,fontSize:13,marginTop:4}}>{cfg.email}{user.role?` · ${user.role==='owner'?'Owner':'Caregiver'}`:''}</Text>
+      {user.email_verified===false&&(
+        <View style={{marginTop:12,padding:12,borderRadius:10,backgroundColor:C.orange+'18',borderWidth:1,borderColor:C.orange}}>
+          <Text style={{color:C.text,fontSize:14,fontWeight:'700'}}>Confirm your email to get alert emails</Text>
+          {vsent?<>
+            <TextInput style={inp} value={vcode} onChangeText={t=>setVcode(t.replace(/[^0-9]/g,'').slice(0,6))} placeholder="6-digit code"
+              placeholderTextColor={C.muted} keyboardType="number-pad" textContentType="oneTimeCode"/>
+            <TouchableOpacity style={[s.btnPrimary,{marginTop:10,opacity:(busy||vcode.length!==6)?0.5:1}]} disabled={busy||vcode.length!==6} onPress={verify}>
+              <Text style={s.btnPrimaryTxt}>Confirm</Text></TouchableOpacity>
+            <TouchableOpacity onPress={resend} disabled={busy} style={{paddingTop:10}}><Text style={{color:C.blue,fontSize:14}}>Send a new code</Text></TouchableOpacity>
+          </>:<TouchableOpacity onPress={resend} disabled={busy} style={{paddingTop:8}}><Text style={{color:C.blue,fontSize:15}}>Email me a code</Text></TouchableOpacity>}
+        </View>
+      )}
       <Text style={{color:C.sub,fontSize:13,marginTop:14}}>Name</Text>
       <TextInput style={inp} value={name} onChangeText={setName} autoCapitalize="words" placeholder="Your name" placeholderTextColor={C.muted}/>
       <Text style={{color:C.sub,fontSize:13,marginTop:10}}>Mobile number</Text>
@@ -2412,6 +2458,24 @@ export default function App() {
   // ── Settings ──
   const [residentName,setResidentName]   = useState('');
   const [residentHeight,setResidentHeight]= useState('170');
+  // SETTINGS_V2: everything asked at sign-up can be changed later in Settings > Person.
+  const [pUnits,setPUnits]   = useState<'us'|'metric'>('us');
+  const [hFt,setHFt]         = useState(''); const [hIn,setHIn]=useState(''); const [hCm,setHCm]=useState('');
+  const [wTxt,setWTxt]       = useState(''); const [pAge,setPAge]=useState('');
+  const fillEditors=(cm:number|null,kg:number|null,u:'us'|'metric')=>{
+    if(cm&&cm>0){const ti=cm/2.54;let ft=Math.floor(ti/12),inch=Math.round(ti-ft*12);if(inch===12){ft+=1;inch=0;}
+      setHFt(String(ft));setHIn(String(inch));setHCm(String(Math.round(cm)));}
+    if(kg!=null&&kg>0)setWTxt(u==='us'?String(Math.round(kg/0.45359237)):String(Math.round(kg*10)/10));
+  };
+  const editorCm=():number|null=>{
+    if(pUnits==='metric'){const v=parseFloat(hCm);return v>=90&&v<=230?v:null;}
+    const ft=parseFloat(hFt)||0,inch=parseFloat(hIn)||0;const v=(ft*12+inch)*2.54;return v>=90&&v<=230?v:null;
+  };
+  const editorKg=():number|null=>{
+    const v=parseFloat(wTxt);if(!(v>0))return null;
+    const kg=pUnits==='us'?v*0.45359237:v;return kg>=10&&kg<=300?Math.round(kg*10)/10:null;
+  };
+  const switchUnits=(u:'us'|'metric')=>{if(u===pUnits)return;const cm=editorCm(),kg=editorKg();setPUnits(u);fillEditors(cm,kg,u);};
   const [emergencyPhone,setEmergencyPhone]= useState('');
   const [responderName,setResponderName]  = useState('');
   const [trendView,setTrendView]          = useState<'week'|'baseline'>('week');
@@ -2476,6 +2540,8 @@ export default function App() {
           setEmergencyPhone(p.emergencyPhone||'');
           setEmergencyEmail(p.emergencyEmail||'');
           setWatchEnabled(p.watchEnabled||false);
+          const u=(p.units==='metric'?'metric':'us') as 'us'|'metric';setPUnits(u);setPAge(p.age||'');
+          fillEditors(parseFloat(p.residentHeight)||null,parseFloat(p.weightKg||'')||null,u);
         }
         if(serverStr){
           const sv=JSON.parse(serverStr);
@@ -2690,6 +2756,11 @@ export default function App() {
         if(r.data.emergency_phone)setEmergencyPhone(r.data.emergency_phone);
         if(r.data.emergency_email)setEmergencyEmail(r.data.emergency_email);
         if(r.data.resident_height_cm)setResidentHeight(String(r.data.resident_height_cm));
+        const u=(r.data.units==='metric'?'metric':(r.data.units==='us'?'us':null)) as 'us'|'metric'|null;
+        if(u)setPUnits(u);
+        if(r.data.resident_age)setPAge(String(r.data.resident_age));
+        if(r.data.has_apple_watch!=null)setWatchEnabled(!!r.data.has_apple_watch);
+        fillEditors(r.data.resident_height_cm||null,r.data.resident_weight_kg??null,u||'us');
       }
     }catch(_){}
   },[]);
@@ -2826,21 +2897,29 @@ export default function App() {
   // ─────────────────────────────────────────────
   // SAVE PROFILE
   // ─────────────────────────────────────────────
-  const saveProfile=useCallback(async()=>{
+  const saveProfile=async()=>{
+    const cm=editorCm(),kg=editorKg(),ag=parseInt(pAge,10);
+    if(!residentName.trim()){Alert.alert('Name needed','Type the name of the person being watched.');return;}
+    if(cm==null){Alert.alert('Check the height',pUnits==='us'?'Use feet and inches, for example 5 ft 6 in.':'Use centimetres, for example 168.');return;}
+    if(wTxt.trim()&&kg==null){Alert.alert('Check the weight',pUnits==='us'?'Use pounds, for example 140.':'Use kilograms, for example 64.');return;}
+    if(pAge.trim()&&!(ag>=1&&ag<=120)){Alert.alert('Check the age','Type the age in years.');return;}
     setSavingProfile(true);
     try{
       await AX.post(`${url()}/config`,{
-        resident_name:residentName||null,
+        resident_name:residentName.trim(),
         emergency_phone:emergencyPhone||null,
         emergency_email:emergencyEmail||null,
-        resident_height_cm:parseFloat(residentHeight)||170,
+        resident_height_cm:Math.round(cm),
+        resident_weight_kg:kg, resident_age:ag>0?ag:null, units:pUnits, has_apple_watch:watchEnabled?1:0,
       });
-      const profile:SavedProfile={residentName,residentHeight,emergencyPhone,emergencyEmail,watchEnabled};
+      setResidentHeight(String(Math.round(cm)));
+      const profile:SavedProfile={residentName:residentName.trim(),residentHeight:String(Math.round(cm)),emergencyPhone,emergencyEmail,watchEnabled,
+        weightKg:kg!=null?String(kg):'',age:pAge.trim(),units:pUnits};
       await AsyncStorage.setItem(SK_PROFILE,JSON.stringify(profile));
-      Alert.alert('Saved','Profile saved and synced to your VIGIL server.');
-    }catch(e:any){Alert.alert('Save Failed',`Could not reach server: ${e?.message}`);}
+      Alert.alert('Saved','Changes saved.');
+    }catch(e:any){Alert.alert('Save failed',`Could not reach VIGIL: ${e?.message}`);}
     finally{setSavingProfile(false);}
-  },[residentName,emergencyPhone,emergencyEmail,residentHeight,watchEnabled]);
+  };
 
   // CLOUD_V1: switch the whole app to another camera, or in and out of the cloud.
   const resetSiteData=()=>{
@@ -2951,6 +3030,7 @@ export default function App() {
   // TODAY SCREEN
   // ─────────────────────────────────────────────
   const namedPeople=persons.filter(p=>!!p.name);
+  const namedPeopleAll=namedPeople;
   const residentPerson=namedPeople.find(p=>!!p.is_resident)??null;
   const trendPerson=trendPid?(namedPeople.find(p=>p.id===trendPid)??null):null;
   const homePerson=selPid?(namedPeople.find(p=>p.id===selPid)??null):null;
@@ -3195,14 +3275,14 @@ export default function App() {
       </View>
 
       {/* Apple Watch — only if enabled and data exists */}
-      {(watchEnabled||hasWatchData)&&!!selPid&&!watchOwnerOk&&!demoMode&&(
+      {watchEnabled&&!!selPid&&!watchOwnerOk&&!demoMode&&(
         <View style={[s.card,{marginHorizontal:16,marginTop:8}]}>
           <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Whose Apple Watch is synced to this phone?</Text>
           <Text style={{color:C.sub,fontSize:13,marginTop:4,marginBottom:10,lineHeight:18}}>Its steps, heart rate and sleep will show only on that person.</Text>
           <PersonChips people={namedPeople} selectedId={null} serverUrl={urlRef.current} onPick={p=>{if(p)setWatchOwner(p.id);}}/>
         </View>
       )}
-      {watchHere&&(watchEnabled||hasWatchData)&&(
+      {watchHere&&(watchEnabled||demoMode)&&(
         <>
           <Text style={s.secHeader}>{homePerson?`${homePerson.name}'s Apple Watch`:residentName?`${residentName}'s Apple Watch`:'Apple Watch'}</Text>
           {watchOwnerOk&&!demoMode&&<TouchableOpacity onPress={()=>{setWatchOwnerS(null);AsyncStorage.removeItem(SK_WATCH_OWNER).catch(()=>{});}}
@@ -3581,34 +3661,69 @@ export default function App() {
   // SETTINGS SCREEN
   // ─────────────────────────────────────────────
 
-  const renderResidentTab=()=>(
+  const renderResidentTab=()=>{
+    const unitBtn=(u:'us'|'metric',label:string)=>(
+      <TouchableOpacity onPress={()=>switchUnits(u)} style={{flex:1,paddingVertical:9,borderRadius:9,alignItems:'center',backgroundColor:pUnits===u?C.green+'22':'transparent',borderWidth:1,borderColor:pUnits===u?C.green:C.border}}>
+        <Text style={{color:pUnits===u?C.green:C.sub,fontWeight:'700',fontSize:13}}>{label}</Text></TouchableOpacity>);
+    const owner=namedPeopleAll.find(p=>p.id===watchOwner);
+    return(
     <ScrollView keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive">
-      <View style={[s.settGrp,{marginTop:16}]}>
-        <OField label="Resident Name" value={residentName} onChange={setResidentName} placeholder="Not set"/>
-        <OField label="Height (cm)" value={residentHeight} onChange={setResidentHeight} placeholder="170" keyboard="number-pad" note="Used to calibrate gait speed measurements."/>
-        <OField label="Emergency Phone" value={emergencyPhone} onChange={setEmergencyPhone} placeholder="+1 (206) 555-0000" keyboard="phone-pad" note="Receives SMS on fall or extended inactivity."/>
+      <Text style={[s.secHeader,{marginTop:16}]}>Person being watched</Text>
+      <View style={s.settGrp}>
+        <OField label="Name" value={residentName} onChange={setResidentName} placeholder="Not set"/>
+        <View style={{flexDirection:'row',gap:8,paddingHorizontal:16,paddingVertical:12,borderBottomWidth:1,borderBottomColor:C.hair}}>
+          {unitBtn('us','US (ft, lb)')}{unitBtn('metric','Metric (cm, kg)')}
+        </View>
+        {pUnits==='us'?(
+          <View style={{flexDirection:'row'}}>
+            <View style={{flex:1}}><OField label="Height ft" value={hFt} onChange={setHFt} placeholder="5" keyboard="number-pad"/></View>
+            <View style={{flex:1}}><OField label="in" value={hIn} onChange={setHIn} placeholder="6" keyboard="number-pad"/></View>
+          </View>
+        ):<OField label="Height (cm)" value={hCm} onChange={setHCm} placeholder="168" keyboard="number-pad"/>}
+        <OField label={pUnits==='us'?'Weight (lb)':'Weight (kg)'} value={wTxt} onChange={setWTxt} placeholder="Optional" keyboard="decimal-pad"/>
+        <OField label="Age" value={pAge} onChange={setPAge} placeholder="Optional" keyboard="number-pad" note="Height is used to estimate walking speed."/>
+      </View>
+
+      <Text style={s.secHeader}>Alerts</Text>
+      <View style={s.settGrp}>
+        <OField label="Emergency Phone" value={emergencyPhone} onChange={setEmergencyPhone} placeholder="+1 (206) 555-0000" keyboard="phone-pad" note="Receives a text on a fall or long inactivity."/>
+        <OField label="Emergency Email" value={emergencyEmail} onChange={setEmergencyEmail} placeholder="Optional" keyboard="email-address"/>
         <OField label="Your Name" value={responderName}
           onChange={(v:string)=>{setResponderName(v);AsyncStorage.setItem('vigil_caregiver_name',v.trim()).catch(()=>{});}}
           placeholder="e.g. Maria" keyboard="default"
           note="Recorded when you acknowledge an alert, so the record shows who responded."/>
-        <OField label="Email" value={emergencyEmail} onChange={setEmergencyEmail} placeholder="Optional" keyboard="email-address"/>
+      </View>
+
+      <Text style={s.secHeader}>Apple Watch</Text>
+      <View style={s.settGrp}>
         <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14}}>
-          <View>
-            <Text style={{color:C.text,fontSize:15}}>Apple Watch</Text>
-            <Text style={{color:C.muted,fontSize:11,marginTop:2}}>Show Apple Watch metrics on dashboard</Text>
+          <View style={{flex:1,paddingRight:10}}>
+            <Text style={{color:C.text,fontSize:15}}>Show Apple Watch data</Text>
+            <Text style={{color:C.muted,fontSize:11,marginTop:2}}>Steps, heart rate and sleep from the watch paired with this phone.</Text>
           </View>
           <Switch value={watchEnabled} onValueChange={setWatchEnabled} trackColor={{false:C.fill,true:C.green}} thumbColor="#FFFFFF"/>
         </View>
+        {watchEnabled&&(
+          <View style={{paddingTop:4,paddingBottom:6,borderTopWidth:1,borderTopColor:C.hair}}>
+            <Text style={{color:C.sub,fontSize:13,marginHorizontal:16,marginTop:10,marginBottom:8}}>
+              Whose watch is it? {owner?`Now: ${owner.name}. Tap someone else to change.`:'Tap the person who wears it.'}
+            </Text>
+            {namedPeopleAll.length?
+              <PersonChips people={namedPeopleAll} selectedId={watchOwner} serverUrl={urlRef.current} onPick={p=>{if(p)setWatchOwner(p.id);}}/>
+              :<Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginBottom:8}}>Name people on the camera first.</Text>}
+          </View>
+        )}
       </View>
+
       <TouchableOpacity style={[s.btnPrimary,{marginHorizontal:16,marginTop:20,opacity:savingProfile?0.6:1}]} onPress={saveProfile} disabled={savingProfile}>
-        {savingProfile?<ActivityIndicator color="#000" size="small"/>:<Text style={s.btnPrimaryTxt}>Save Profile</Text>}
+        {savingProfile?<ActivityIndicator color="#000" size="small"/>:<Text style={s.btnPrimaryTxt}>Save changes</Text>}
       </TouchableOpacity>
-      <Text style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:10,marginHorizontal:16}}>
-        Profile is synced to your VIGIL server and used for emergency alert messages.
+      <Text style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:10,marginHorizontal:16,lineHeight:17}}>
+        The watch choice saves right away. To rename someone, mark them as a visitor, or remove them: Settings, Camera, Monitored People, Edit.
       </Text>
       <View style={{height:32}}/>
     </ScrollView>
-  );
+  );};
 
   const renderServerTab=()=>(
     <ScrollView automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
