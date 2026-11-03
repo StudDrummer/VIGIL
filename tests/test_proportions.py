@@ -49,6 +49,30 @@ def test_learns_and_checks():
     assert ph._PROP_STATS["disagree"] == d0 + 1
 
 
+
+
+def test_correction_teaches_and_vetoes():
+    ph._PROP.clear(); ph._PROP_TRK.clear(); ph._PROP_VER.clear()
+    ph._V7["last_cross"].clear(); ph._V7["pending"].clear()
+    ph._prop_ver_save = lambda: None
+    # caregiver confirms A on track 10 and B on track 11
+    for _ in range(20):
+        T[0] += 0.25
+        ph._prop_observe([skel(**A)], [(None, 0)], [10], {"a", "b"})
+        ph._prop_observe([skel(**B)], [(None, 0)], [11], {"a", "b"})
+    ph._prop_learn(10, "a")
+    ph._prop_learn(11, "b")
+    assert len(ph._PROP_VER["a"]) == 20 and len(ph._PROP_VER["b"]) == 20
+    # a new track that is really B: naming it "a" is held back
+    for _ in range(12):
+        T[0] += 0.25
+        ph._prop_observe([skel(**B)], [(None, 0)], [12], {"a", "b"})
+    veto, why = ph._prop_veto(12, "a", {"a", "b"})
+    assert veto, why
+    assert not ph._prop_veto(12, "b", {"a", "b"})[0]
+
+
 if __name__ == "__main__":
     test_learns_and_checks()
+    test_correction_teaches_and_vetoes()
     print("ok", ph._PROP_STATS["checks"], "checks:", {k: ph._PROP_STATS[k] for k in ("agree", "disagree", "unsure")})

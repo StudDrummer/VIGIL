@@ -473,6 +473,8 @@ def _apply_corrections():
                 if _VR is not None:
                     _VR.GALLERY.drop(src)
                     _VR.GALLERY.save(force=True)
+                _PROP.pop(src, None)
+                _PROP_VER.pop(src, None)
                 c.execute("UPDATE person_corrections SET applied=1 WHERE id=?", (cid,))
                 print("[CORRECTION] deleted %s" % src, flush=True)
                 continue
@@ -490,6 +492,7 @@ def _apply_corrections():
                     if _VR is not None and _trk_fp.get(_t):
                         _VR.GALLERY.add(dst, np.array(_trk_fp[_t][-8:]), pin=True)
                         _VR.GALLERY.save(force=True)
+                    _prop_learn(_t, dst)                          # LEARN_V2
                     print("[CORRECTION] track %s -> %s" % (_t, dst), flush=True)
                 except Exception as _e:
                     print("[CORRECTION] track error: %s" % _e, flush=True)
@@ -518,6 +521,7 @@ def _apply_corrections():
             for k, v in list(_track_to_pid.items()):
                 if v == src:
                     _track_to_pid[k] = dst
+                    _prop_learn(k, dst, wrong=(src if src != dst else None))   # LEARN_V2
                     _fpk = _trk_fp.get(k)
                     if _VR is not None and _fpk:
                         if src != dst:
@@ -702,7 +706,95 @@ def _prop_vec(kp):
         return None
 
 
-def _prop_ref(pid):
+# LEARN_V2: every "Yes, this is..." and every correction in the app teaches
+# body proportions too. The track's recent proportion measurements are stored
+# as caregiver-verified for that person (and kept across restarts). Verified
+# samples are preferred over automatic ones when comparing.
+_PROP_VER = {}             # pid -> deque of verified ratio vectors
+_PROP_VER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proportions_model.json")
+_PROP_VER_SAVED = [0.0]
+
+
+def _prop_learn(tid, pid, wrong=None):
+    try:
+        q = list(_PROP_TRK.get(tid, []))
+        if not q or pid is None:
+            return
+        _PROP_VER.setdefault(pid, deque(maxlen=400)).extend(q)
+        if wrong and wrong in _PROP:
+            # those frames were filed under the wrong person: take them back out
+            bad = {id(x) for x in q}
+            _PROP[wrong] = deque([v for v in _PROP[wrong] if id(v) not in bad], maxlen=600)
+        _PROP_VER_SAVED[0] = 0.0
+        print("[LEARN] %d body-proportion samples verified for %s (now %d)"
+              % (len(q), pid, len(_PROP_VER[pid])), flush=True)
+        _prop_ver_save()
+    except Exception as e:
+        print("[LEARN] error: %s" % e, flush=True)
+
+
+def _prop_ver_save():
+    now = time.time()
+    if now - _PROP_VER_SAVED[0] < 60:
+        return
+    _PROP_VER_SAVED[0] = now
+    try:
+        import json as _js
+        data = {p: [[None if np.isnan(x) else round(float(x), 4) for x in v] for v in list(q)[-400:]]
+                for p, q in _PROP_VER.items()}
+        with open(_PROP_VER_FILE + ".tmp", "w") as f:
+            _js.dump(data, f)
+        os.replace(_PROP_VER_FILE + ".tmp", _PROP_VER_FILE)
+    except Exception:
+        pass
+
+
+def _prop_ver_load():
+    try:
+        import json as _js
+        with open(_PROP_VER_FILE) as f:
+            data = _js.load(f)
+        for p, vs in data.items():
+            _PROP_VER[p] = deque([np.array([np.nan if x is None else x for x in v], dtype=float) for v in vs],
+                                 maxlen=400)
+        print("[LEARN] loaded verified body proportions for %d people" % len(_PROP_VER), flush=True)
+    except Exception:
+        pass
+
+
+_prop_ver_load()
+
+
+def _prop_veto(tid, pid, named):
+    """LEARN_V2: True if the body proportions of this track clearly belong to a
+    different named person than `pid`. Used only to hold back a name that the
+    appearance match gave without a strong margin; it never names anyone."""
+    tq = _PROP_TRK.get(tid)
+    if not tq or len(tq) < 10:
+        return False, ""
+    refs = {p: r for p in named for r in [_prop_ref(p, verified_only=True)] if r is not None}
+    if pid not in refs or len(refs) < 2:
+        return False, ""
+    tv = np.nanmedian(np.array(tq), axis=0)
+    ds = {p: _prop_dist(tv, r) for p, r in refs.items()}
+    ds = {p: x for p, x in ds.items() if x is not None}
+    if pid not in ds:
+        return False, ""
+    best = min(ds, key=ds.get)
+    if best != pid and ds[best] < 0.6 * ds[pid] and ds[pid] > 2.0:
+        return True, "proportions fit %s (%.1f) not %s (%.1f)" % (best, ds[best], pid, ds[pid])
+    return False, ""
+
+
+def _prop_ref(pid, verified_only=False):
+    vq = _PROP_VER.get(pid)
+    if vq and len(vq) >= 15:
+        a = np.array(vq)
+        med = np.nanmedian(a, axis=0)
+        mad = np.nanmedian(np.abs(a - med), axis=0) * 1.4826 + 0.02
+        return med, mad
+    if verified_only:
+        return None
     q = _PROP.get(pid)
     if not q or len(q) < 40:
         return None
@@ -724,18 +816,25 @@ def _prop_observe(all_persons, assignments, track_ids, named):
     if _PROP_STATS["since"] is None:
         _PROP_STATS["since"] = time.strftime("%Y-%m-%d %H:%M")
     for i, (kp, (pid, _h)) in enumerate(zip(all_persons, assignments)):
-        if pid is None:
-            continue
         tid = track_ids[i] if (track_ids and i < len(track_ids)) else None
         v = _prop_vec(kp)
         if v is None:
             continue
-        if pid in named:
+        if tid is not None and not _v7_hold(tid):
+            tq = _PROP_TRK.setdefault(tid, deque(maxlen=30))
+            tq.append(v)
+            if len(_PROP_TRK) > 300:
+                for _k in list(_PROP_TRK)[:150]:
+                    _PROP_TRK.pop(_k, None)
+        if pid is None:
+            continue
+        if pid in named and not (tid is not None and _v7_hold(tid)):
             _PROP.setdefault(pid, deque(maxlen=600)).append(v)
         if tid is None:
             continue
-        tq = _PROP_TRK.setdefault(tid, deque(maxlen=30))
-        tq.append(v)
+        tq = _PROP_TRK.get(tid)
+        if tq is None:
+            continue
         if pid not in named or len(tq) < 15 or now - _PROP_LOG.get(tid, 0) < 60:
             continue
         refs = {p: r for p in named for r in [_prop_ref(p)] if r is not None}
@@ -1374,6 +1473,14 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                 frame_assignments.append((None, None))     # "Identifying..."
                 continue
             matched, _why = ev.pop("early", None) or _reid6_decide(tid, ev, _used_this_frame)
+            if matched not in (None, "?") and not str(_why).startswith("fingerprint strong"):
+                try:                                              # LEARN_V2
+                    _vt, _vw = _prop_veto(tid, matched, _named_ids())
+                    if _vt:
+                        print("[REID] track %s: held back %s | %s" % (tid, matched, _vw), flush=True)
+                        matched, _why = "?", _why + " | " + _vw
+                except Exception:
+                    pass
             if matched == "?":
                 _trk_status[tid] = "Not sure"
                 ev["n"] = min(ev["n"], _REID_GIVE_UP - 1)
