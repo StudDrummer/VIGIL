@@ -843,6 +843,134 @@ def _write_in_view(ids, labels=None, tids=None):
         pass
 
 
+# ---------------------------------------------------------------------------
+# IDENTITY_V7: names must survive people crossing paths.
+#
+# The tracker follows each person by position and motion. When two people
+# cross, it can hand their track numbers to each other, and the names went
+# with the numbers. Now:
+#   1. Any two people whose boxes overlap are marked as "crossed".
+#   2. While crossed and for 2 s after, nothing is learned from them (a crop
+#      of two overlapping people would teach the wrong look).
+#   3. Once they separate, fresh fingerprints are taken every frame and the
+#      names are re-checked jointly: if swapping them fits clearly better, the
+#      names are swapped back. Logged as "[REID7] SWAP".
+#   4. Every 2 s, with two or more people in view, all visible names are
+#      re-checked the same way, so a mix-up that slipped through is corrected
+#      within seconds rather than staying until someone opens the app.
+# ---------------------------------------------------------------------------
+_V7 = {"pending": {}, "last_cross": {}, "last_check": 0.0, "votes": {}}
+V7_HOLD_S = 2.0
+V7_SWAP_MARGIN = 0.04       # total similarity gain needed to change names
+V7_MIN_FP = 3
+
+
+def _v7_mark_crossings(boxes, tids):
+    if not tids or len(boxes) < 2:
+        return
+    now = time.time()
+    for i in range(len(boxes)):
+        if i >= len(tids) or tids[i] is None or boxes[i] is None:
+            continue
+        for j in range(i + 1, len(boxes)):
+            if j >= len(tids) or tids[j] is None or boxes[j] is None:
+                continue
+            a, b = boxes[i], boxes[j]
+            iw = min(a[2], b[2]) - max(a[0], b[0])
+            ih = min(a[3], b[3]) - max(a[1], b[1])
+            if iw > 0 and ih > 0:
+                # widen to "close": horizontal gap smaller than 10% of a box width also counts
+                pass
+            gap = max(a[0], b[0]) - min(a[2], b[2])
+            wmin = min(a[2] - a[0], b[2] - b[0])
+            if (iw > 0 and ih > 0) or gap < 0.1 * wmin:
+                for t in (tids[i], tids[j]):
+                    _V7["last_cross"][t] = now
+                    _V7["pending"][t] = now
+
+
+def _v7_hold(tid):
+    """True while a track is crossing someone, or just after: do not learn from it."""
+    if tid is None:
+        return False
+    return time.time() - _V7["last_cross"].get(tid, 0.0) < V7_HOLD_S or tid in _V7["pending"]
+
+
+def _v7_fps_since(tid, since, n=6):
+    q, qt = _trk_fp.get(tid, []), _trk_fp_t.get(tid, [])
+    vs = [v for v, t in zip(q, qt) if t > since]
+    return np.array(vs[-n:]) if vs else None
+
+
+def _v7_verify(assignments, tids):
+    if _VR is None or not tids or not _VR.EMBEDDER.kind:
+        return assignments
+    now = time.time()
+    vis = [(i, tids[i], pid) for i, (pid, _h) in enumerate(assignments)
+           if pid is not None and i < len(tids) and tids[i] is not None]
+    # forget tracks no longer in view
+    seen = {t for _i, t, _p in vis}
+    for t in list(_V7["pending"]):
+        if t not in seen and now - _V7["pending"][t] > 10:
+            _V7["pending"].pop(t, None)
+    if len(vis) < 2 and not any(t in _V7["pending"] for _i, t, _p in vis):
+        return assignments
+    due = now - _V7["last_check"] >= 2.0
+    crossed = [t for _i, t, _p in vis if t in _V7["pending"]
+               and now - _V7["last_cross"].get(t, 0) >= 0.5]      # separated for half a second
+    if not due and not crossed:
+        return assignments
+    _V7["last_check"] = now
+    # fingerprints taken after each track's last crossing (or recent ones)
+    fp = {}
+    for _i, t, _p in vis:
+        since = _V7["last_cross"].get(t, now - 4.0)
+        since = max(since, now - 4.0) if t not in _V7["pending"] else since
+        v = _v7_fps_since(t, since)
+        if v is not None and len(v) >= V7_MIN_FP:
+            fp[t] = v
+    cand = [(i, t, p) for i, t, p in vis if t in fp]
+    if len(cand) < 1:
+        return assignments
+    names = [p for _i, _t, p in cand]
+    import itertools
+    sc = {}
+    for _i, t, _p in cand:
+        for p in set(names):
+            s_ = _VR.GALLERY.score(fp[t], p)
+            sc[(t, p)] = s_ if s_ is not None else -1.0
+    cur = sum(sc[(t, p)] for _i, t, p in cand)
+    best, best_perm = cur, None
+    if len(cand) >= 2 and len(cand) <= 5:
+        for perm in itertools.permutations(names):
+            tot = sum(sc[(t, perm[k])] for k, (_i, t, _p) in enumerate(cand))
+            if tot > best + 1e-9:
+                best, best_perm = tot, perm
+    for _i, t, _p in cand:
+        _V7["pending"].pop(t, None)            # checked with clean fingerprints
+    if best_perm is None or best - cur < V7_SWAP_MARGIN:
+        _V7["votes"].clear()
+        return assignments
+    key = tuple((t, best_perm[k]) for k, (_i, t, _p) in enumerate(cand))
+    _V7["votes"][key] = _V7["votes"].get(key, 0) + 1
+    # right after a crossing one clear check is enough; otherwise two in a row
+    need = 1 if crossed else 2
+    if _V7["votes"][key] < need:
+        return assignments
+    _V7["votes"].clear()
+    out = list(assignments)
+    for k, (i, t, old) in enumerate(cand):
+        new = best_perm[k]
+        if new != old:
+            _track_to_pid[t] = new
+            out[i] = (new, out[i][1])
+            _TRACK_BAD.pop(t, None)
+    print("[REID7] SWAP %s (gain %.3f%s)" % (
+        ", ".join("track %s: %s -> %s" % (t, old, best_perm[k]) for k, (_i, t, old) in enumerate(cand)
+                  if best_perm[k] != old), best - cur, ", after crossing" if crossed else ""), flush=True)
+    return out
+
+
 # REID_V6: learned appearance fingerprints with memory (vigil_reid.py).
 try:
     import vigil_reid as _VR
@@ -850,6 +978,7 @@ except Exception as _e_vr:
     _VR = None
     print("[REID6] module not available: %s" % _e_vr, flush=True)
 _trk_fp = {}            # track id -> recent fingerprints
+_trk_fp_t = {}          # track id -> when each of those was taken (IDENTITY_V7)
 _trk_status = {}        # track id -> "Not sure" / "Visitor" while unnamed
 _mode = {"mode": "family", "t": 0.0, "resident": None}
 _fp_frame = [0]
@@ -901,13 +1030,18 @@ def _fp_for(pairs, frame):
     if E is None:
         return {}
     out = {}
+    now = time.time()
     for t, v in zip(owners, E):
         q = _trk_fp.setdefault(t, [])
         q.append(v)
         del q[:-12]
+        qt = _trk_fp_t.setdefault(t, [])
+        qt.append(now)
+        del qt[:-12]
         out[t] = v
     if len(_trk_fp) > 200:
         _trk_fp.clear()
+        _trk_fp_t.clear()
     return out
 
 
@@ -1140,6 +1274,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
         _apply_corrections()
         _apply_merges()
         _boxes = [_kp_box(_k) for _k in all_persons]
+        try:
+            _v7_mark_crossings(_boxes, track_ids)          # IDENTITY_V7
+        except Exception:
+            pass
         _fps = {}
         if _VR is not None and _current_frame is not None and track_ids:
             _fp_frame[0] += 1
@@ -1148,7 +1286,7 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                 _t = track_ids[_i] if _i < len(track_ids) else None
                 if _t is None or _is_occluded(_i, _boxes):
                     continue
-                if _t not in _track_to_pid or _fp_frame[0] % 3 == 0:
+                if _t not in _track_to_pid or _fp_frame[0] % 3 == 0 or _t in _V7["pending"]:
                     _want.append((_t, _k))
             if _want:
                 _fps = _fp_for(_want[:4], _current_frame)
@@ -1191,12 +1329,12 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                 if pid in _signatures and height_px is not None:
                     # A frame whose clothing disagrees never feeds the record.
                     _signatures[pid].update(height_px, shape_r, None if _TRACK_BAD.get(tid) else colour_r)
-                    if not _TRACK_BAD.get(tid) and not _occl:
+                    if not _TRACK_BAD.get(tid) and not _occl and not _v7_hold(tid):
                         _bs = _stand_height(kp, _current_frame.shape[0] if _current_frame is not None else None)
                         if _bs is not None:
                             _ground_add(_bs)
                             _body_add(pid, _bs)
-                    if _VR is not None and tid in _fps and not _TRACK_BAD.get(tid):
+                    if _VR is not None and tid in _fps and not _TRACK_BAD.get(tid) and not _v7_hold(tid):
                         _sc = _VR.GALLERY.score(_fps[tid][None], pid)
                         _acc = _VR.GALLERY.thresholds(_VR.EMBEDDER.kind)[0]
                         if _sc is None or _sc >= _acc:
@@ -1316,6 +1454,11 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                         for _k in list(_track_to_pid)[:250]:
                             _track_to_pid.pop(_k, None)
                 frame_assignments.append((new_id, height_px))
+
+        try:                                                     # IDENTITY_V7
+            frame_assignments = _v7_verify(frame_assignments, track_ids)
+        except Exception as _e7:
+            print("[REID7] verify error: %s" % _e7, flush=True)
 
         # all_persons[0] is the largest = the resident being measured for gait
         main_id = frame_assignments[0][0] if frame_assignments else None

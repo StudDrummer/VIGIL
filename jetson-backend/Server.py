@@ -210,6 +210,18 @@ def init_db():
     persons_existing = {row[1] for row in conn.execute("PRAGMA table_info(persons)")}
     if 'photo_b64' not in persons_existing:
         conn.execute("ALTER TABLE persons ADD COLUMN photo_b64 TEXT")
+    # SCHEMA_SYNC_V1: columns the Jetson gained from later patches. A new
+    # (cloud) database must have them too, or identity cannot load people.
+    if 'colour_hist' not in persons_existing:
+        conn.execute("ALTER TABLE persons ADD COLUMN colour_hist TEXT")
+    cfg_existing = {row[1] for row in conn.execute("PRAGMA table_info(config)")}
+    if 'resident_person_id' not in cfg_existing:
+        conn.execute("ALTER TABLE config ADD COLUMN resident_person_id TEXT")
+    al_existing = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
+    for _c, _t in (("acknowledged_by", "TEXT"), ("acknowledged_at", "TEXT"), ("ack_bulk", "INTEGER DEFAULT 0"),
+                   ("escalation_count", "INTEGER DEFAULT 0"), ("escalated_at", "TEXT")):
+        if _c not in al_existing:
+            conn.execute("ALTER TABLE alerts ADD COLUMN %s %s" % (_c, _t))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS person_baselines (
             person_id TEXT NOT NULL,
