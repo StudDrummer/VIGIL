@@ -3172,10 +3172,10 @@ export default function App() {
 
       {/* Camera metrics */}
       <Text style={s.secHeader}>{dayName?`${dayName}'s walking and posture`:'Walking and posture'}</Text>
-      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Today's averages for {dayName||'the resident'} only.</Text>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Typical values today for {dayName||'the resident'} only, from times they walked. Speed is estimated from steps and height.</Text>
       <View style={s.grid}>
         {[
-          {label:'Gait Speed',val:fmt(dayData?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:(dayData?.camera_gait_speed_ms??1)<0.8&&dayData?.camera_gait_speed_ms!=null},
+          {label:'Speed (est.)',val:fmt(dayData?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:(dayData?.camera_gait_speed_ms??1)<0.8&&dayData?.camera_gait_speed_ms!=null},
           {label:'Posture',val:fmt(dayData?.posture_score,0),unit:'/100',color:C.purple,warn:(dayData?.posture_score??100)<50&&dayData?.posture_score!=null},
           {label:'Asymmetry',val:fmt(dayData?.camera_asymmetry_pct,1),unit:'%',color:C.orange,warn:(dayData?.camera_asymmetry_pct??0)>15},
           {label:'Cadence',val:fmt(dayData?.camera_cadence_spm,0),unit:'spm',color:C.blue,warn:false},

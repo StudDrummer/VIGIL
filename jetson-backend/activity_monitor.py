@@ -1170,6 +1170,10 @@ def compute_posture(kp):
     ls=get(KP_LS); rs=get(KP_RS); lh=get(KP_LH); rh=get(KP_RH); nose=get(KP_NOSE)
     if not (ls is not None and rs is not None and lh is not None and rh is not None): return {}
     smid=(ls+rs)/2; hmid=(lh+rh)/2
+    # POSTURE_VIEW_V1: shoulder level and head position only mean something when the
+    # person faces the camera. Side-on (walking across the room) the shoulders overlap
+    # and the score fell to 0 for a perfectly upright person, so skip those views.
+    if abs(ls[0]-rs[0]) < 0.45*float(np.linalg.norm(smid-hmid)): return {}
     sasym=float(abs(ls[1]-rs[1])/(abs(ls[0]-rs[0])+1e-6)*100); sasym=min(sasym,50.0)
     dx=smid[0]-hmid[0]; dy=smid[1]-hmid[1]
     trunk=float(np.degrees(np.arctan2(abs(dx),abs(dy)+1e-6)))
@@ -1617,7 +1621,11 @@ def main():
                     # went stale (e.g. the tracked person stopped walking or left
                     # frame) it kept computing from the last-known strides forever,
                     # silently repeating a stale reading into the DB every sync cycle.
-                    cadence_fresh = gait.cadence_spm > 0 and (time.time()-getattr(gait,"_cadence_last_updated",0))<20
+                    # WALK_GATE_V1: walking numbers only from a real walk in this window
+                    # (at least 4 new foot strikes). Shifting on a chair or standing
+                    # used to repeat the last cadence and speed every 20 s.
+                    _walked = (gait._stride_count - last_sync_stride_count) >= 4
+                    cadence_fresh = _walked and gait.cadence_spm > 0 and (time.time()-getattr(gait,"_cadence_last_updated",0))<20
                     gait_speed_ms=None
                     if cadence_fresh and len(gait._strides)>0:
                         avg_stride=np.mean(gait._strides)
@@ -1636,7 +1644,7 @@ def main():
                         "camera_mode":"rtsp" if isinstance(src,str) else "usb",
                         "room_id": client.room_id,
                         "cadence_spm": round(gait.cadence_spm,1) if cadence_fresh else None,
-                        "asymmetry_pct":round(gait.asymmetry_pct,1) if gait.asymmetry_pct else None,
+                        "asymmetry_pct":round(gait.asymmetry_pct,1) if (cadence_fresh and gait.asymmetry_pct and gait.asymmetry_pct<=40) else None,
                         "gait_speed_ms":round(gait_speed_ms,3) if gait_speed_ms else None,
                         "stride_variability":round(gait.stride_variability,2) if gait.stride_variability else None,
                         "arm_swing_asymmetry":round(gait.arm_swing_asymmetry,2) if gait.arm_swing_asymmetry else None,

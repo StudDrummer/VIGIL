@@ -1213,23 +1213,36 @@ def persons_activity():
 @app.route("/persons/<person_id>/today", methods=["GET"])
 @require_api_key
 def person_today(person_id):
-    """Same field names as /summary/today, so the app can show either."""
+    """Same field names as /summary/today, so the app can show either.
+    TODAY_ROBUST_V1: each number is the median of today's believable readings and
+    needs at least 3 of them; one odd reading can no longer pull the day's value."""
     conn = get_db()
-    r = conn.execute("""
-        SELECT AVG(NULLIF(gait_speed_ms,0)) AS sp, AVG(NULLIF(cadence_spm,0)) AS cad,
-               AVG(posture_score) AS post, AVG(asymmetry_pct) AS asym, COUNT(*) AS n
-        FROM person_detections
-        WHERE person_id=? AND date(detected_at,'localtime')=date('now','localtime')""", (person_id,)).fetchone()
+    rows = conn.execute("""
+        SELECT gait_speed_ms, cadence_spm, posture_score, asymmetry_pct FROM person_detections
+        WHERE person_id=? AND date(detected_at,'localtime')=date('now','localtime')""", (person_id,)).fetchall()
     a = conn.execute("SELECT active_s, still_s FROM person_activity WHERE person_id=? AND date=?",
                      (person_id, datetime.now().strftime("%Y-%m-%d"))).fetchone()
     conn.close()
+
+    def med(col, lo, hi):
+        v = sorted(float(r[col]) for r in rows if r[col] is not None and lo <= float(r[col]) <= hi)
+        if len(v) < 3:
+            return None, len(v)
+        m = len(v) // 2
+        return (v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0), len(v)
+
+    sp, n_sp = med("gait_speed_ms", 0.2, 2.0)
+    cad, n_cad = med("cadence_spm", 60, 140)
+    post, _ = med("posture_score", 0.1, 100)
+    asym, _ = med("asymmetry_pct", 0, 40)
     act = (a["active_s"] or 0) / 60.0 if a else 0.0
     still = (a["still_s"] or 0) / 60.0 if a else 0.0
     tot = act + still
+    r2 = lambda v, d: round(v, d) if v is not None else None
     return jsonify({"date": datetime.now().strftime("%Y-%m-%d"), "person_id": person_id,
-                    "camera_gait_speed_ms": r["sp"], "camera_cadence_spm": r["cad"],
-                    "posture_score": r["post"], "camera_asymmetry_pct": r["asym"],
-                    "camera_data_points": r["n"], "longest_stillness_min": None,
+                    "camera_gait_speed_ms": r2(sp, 2), "camera_cadence_spm": r2(cad, 1),
+                    "posture_score": r2(post, 1), "camera_asymmetry_pct": r2(asym, 1),
+                    "camera_data_points": max(n_sp, n_cad), "longest_stillness_min": None,
                     "active_minutes": round(act, 1), "still_minutes": round(still, 1),
                     "activity_level_pct": round(100.0 * act / tot, 1) if tot > 0 else None})
 
