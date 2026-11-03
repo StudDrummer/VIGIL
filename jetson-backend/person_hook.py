@@ -706,6 +706,58 @@ def _prop_vec(kp):
         return None
 
 
+# PERSON_ACTIVITY_V1: how long each named person was moving vs still while in
+# view, so the Today screen can show an activity ring for every person.
+# Moving = the body centre (shoulders and hips) shifted by more than 12% of
+# the person's torso length over about one second.
+_ACT = {"acc": {}, "pos": {}, "sent": 0.0}
+
+
+def _activity_observe(all_persons, assignments, named):
+    now = time.time()
+    for kp, (pid, _h) in zip(all_persons, assignments):
+        if pid is None or pid not in named:
+            continue
+        try:
+            k = np.asarray(kp, dtype=float)
+            idx = [i for i in (5, 6, 11, 12) if k[i][2] >= 0.4]
+            if len(idx) < 3:
+                continue
+            c = k[idx, :2].mean(axis=0)
+            sh = [k[i][:2] for i in (5, 6) if k[i][2] >= 0.4]
+            hp = [k[i][:2] for i in (11, 12) if k[i][2] >= 0.4]
+            if not sh or not hp:
+                continue
+            torso = float(np.linalg.norm(np.mean(sh, axis=0) - np.mean(hp, axis=0)))
+            if torso < 15:
+                continue
+        except Exception:
+            continue
+        hist = _ACT["pos"].setdefault(pid, deque(maxlen=40))
+        hist.append((now, c, torso))
+        acc = _ACT["acc"].setdefault(pid, {"active": 0.0, "still": 0.0, "last": now})
+        dt = min(1.0, max(0.0, now - acc["last"]))
+        acc["last"] = now
+        old = [h for h in hist if now - h[0] >= 0.8]
+        if not old or dt <= 0:
+            continue
+        t0, c0, tr0 = old[-1]
+        moving = float(np.linalg.norm(c - c0)) / max(torso, tr0) > 0.12
+        acc["active" if moving else "still"] += dt
+    if now - _ACT["sent"] >= 60 and _ACT["acc"]:
+        _ACT["sent"] = now
+        items = [{"person_id": p, "active_s": round(a["active"], 1), "still_s": round(a["still"], 1)}
+                 for p, a in _ACT["acc"].items() if a["active"] + a["still"] > 0]
+        for a in _ACT["acc"].values():
+            a["active"] = a["still"] = 0.0
+        if items:
+            try:
+                requests.post(f"{SERVER_URL}/persons/activity", json={"items": items},
+                              headers={"X-VIGIL-Key": API_KEY}, timeout=3)
+            except Exception:
+                pass
+
+
 # LEARN_V2: every "Yes, this is..." and every correction in the app teaches
 # body proportions too. The track's recent proportion measurements are stored
 # as caregiver-verified for that person (and kept across restarts). Verified
@@ -1617,6 +1669,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
 
         try:                                                     # PROPORTIONS_V1
             _prop_observe(all_persons, frame_assignments, track_ids, _named_ids())
+        except Exception:
+            pass
+        try:                                                     # PERSON_ACTIVITY_V1
+            _activity_observe(all_persons, frame_assignments, _named_ids())
         except Exception:
             pass
 

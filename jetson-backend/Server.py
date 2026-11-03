@@ -217,6 +217,14 @@ def init_db():
     cfg_existing = {row[1] for row in conn.execute("PRAGMA table_info(config)")}
     if 'resident_person_id' not in cfg_existing:
         conn.execute("ALTER TABLE config ADD COLUMN resident_person_id TEXT")
+    for _c, _t in (("resident_weight_kg", "REAL"), ("resident_age", "INTEGER"), ("units", "TEXT"),
+                   ("has_apple_watch", "INTEGER DEFAULT 0")):             # PROFILE_V2
+        if _c not in cfg_existing:
+            conn.execute("ALTER TABLE config ADD COLUMN %s %s" % (_c, _t))
+    conn.execute("""CREATE TABLE IF NOT EXISTS person_activity (
+        person_id TEXT NOT NULL, date TEXT NOT NULL,
+        active_s REAL DEFAULT 0, still_s REAL DEFAULT 0,
+        PRIMARY KEY (person_id, date))""")
     al_existing = {row[1] for row in conn.execute("PRAGMA table_info(alerts)")}
     for _c, _t in (("acknowledged_by", "TEXT"), ("acknowledged_at", "TEXT"), ("ack_bulk", "INTEGER DEFAULT 0"),
                    ("escalation_count", "INTEGER DEFAULT 0"), ("escalated_at", "TEXT")):
@@ -588,6 +596,13 @@ def config_set():
     conn.execute("UPDATE config SET resident_name=?,emergency_phone=?,emergency_email=?,resident_height_cm=?,updated_at=datetime('now') WHERE id=1", (
         data.get("resident_name"), data.get("emergency_phone"),
         data.get("emergency_email"), data.get("resident_height_cm", 170)))
+    for _k, _col in (("resident_weight_kg", "resident_weight_kg"), ("resident_age", "resident_age"),
+                     ("units", "units"), ("has_apple_watch", "has_apple_watch")):     # PROFILE_V2
+        if _k in data:
+            try:
+                conn.execute("UPDATE config SET %s=? WHERE id=1" % _col, (data.get(_k),))
+            except Exception:
+                pass
     conn.commit(); conn.close()
     return jsonify({"status": "ok"})
 
@@ -1170,6 +1185,53 @@ def person_detections_history(person_id):
     conn.close()
     return jsonify([dict(r) for r in rows])
 
+
+
+# PERSON_TODAY_V1: the Today screen for any person, not just the resident.
+@app.route("/persons/activity", methods=["POST"])
+@require_api_key
+def persons_activity():
+    """Seconds each named person spent moving and still while in view (from the camera)."""
+    data = request.get_json() or {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = get_db()
+    for it in (data.get("items") or [])[:20]:
+        pid = it.get("person_id")
+        if not pid:
+            continue
+        a = max(0.0, min(3600.0, float(it.get("active_s") or 0)))
+        st = max(0.0, min(3600.0, float(it.get("still_s") or 0)))
+        conn.execute("""INSERT INTO person_activity (person_id, date, active_s, still_s) VALUES (?,?,?,?)
+                        ON CONFLICT(person_id, date) DO UPDATE SET
+                        active_s=active_s+excluded.active_s, still_s=still_s+excluded.still_s""",
+                     (pid, today, a, st))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/persons/<person_id>/today", methods=["GET"])
+@require_api_key
+def person_today(person_id):
+    """Same field names as /summary/today, so the app can show either."""
+    conn = get_db()
+    r = conn.execute("""
+        SELECT AVG(NULLIF(gait_speed_ms,0)) AS sp, AVG(NULLIF(cadence_spm,0)) AS cad,
+               AVG(posture_score) AS post, AVG(asymmetry_pct) AS asym, COUNT(*) AS n
+        FROM person_detections
+        WHERE person_id=? AND date(detected_at,'localtime')=date('now','localtime')""", (person_id,)).fetchone()
+    a = conn.execute("SELECT active_s, still_s FROM person_activity WHERE person_id=? AND date=?",
+                     (person_id, datetime.now().strftime("%Y-%m-%d"))).fetchone()
+    conn.close()
+    act = (a["active_s"] or 0) / 60.0 if a else 0.0
+    still = (a["still_s"] or 0) / 60.0 if a else 0.0
+    tot = act + still
+    return jsonify({"date": datetime.now().strftime("%Y-%m-%d"), "person_id": person_id,
+                    "camera_gait_speed_ms": r["sp"], "camera_cadence_spm": r["cad"],
+                    "posture_score": r["post"], "camera_asymmetry_pct": r["asym"],
+                    "camera_data_points": r["n"], "longest_stillness_min": None,
+                    "active_minutes": round(act, 1), "still_minutes": round(still, 1),
+                    "activity_level_pct": round(100.0 * act / tot, 1) if tot > 0 else None})
 
 
 MAX_PHOTO_B64_BYTES = 200 * 1024  # head-crop identification photos are small; reject anything larger

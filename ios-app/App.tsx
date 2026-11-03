@@ -185,6 +185,7 @@ interface PersonBaselineStatus {
 interface SavedProfile {
   residentName:string; residentHeight:string;
   emergencyPhone:string; emergencyEmail:string; watchEnabled:boolean;
+  weightKg?:string; age?:string; units?:'us'|'metric';      // PROFILE_V2
 }
 
 type MainTab    = 'today'|'trends'|'alerts'|'insights'|'settings';
@@ -333,13 +334,30 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   const [emergencyPhone,setEP]     = useState('');
   const [emergencyEmail,setEE]     = useState('');
   const [watchEnabled,setWE]       = useState(false);
+  // PROFILE_V2: basic measurements, in the units the family uses.
+  const [units,setUnits]           = useState<'us'|'metric'>('us');
+  const [heightFt,setHFt]          = useState('');
+  const [heightIn,setHIn]          = useState('');
+  const [weight,setWeight]         = useState('');
+  const [age,setAge]               = useState('');
+  const [cloudCfg,setCloudCfg]     = useState<CloudCfg|null>(null);
   const [serverIp,setSI]           = useState(DEFAULT_IP);
   const [serverPort,setSP]         = useState(DEFAULT_PORT);
   const [testing,setTesting]       = useState(false);
   const [serverOk,setServerOk]     = useState<boolean|null>(null);
   const [agreed,setAgreed]         = useState(false);
   const TOTAL = 6;
-  const LOCAL_STEPS = [1,3,5];   // name, unit address, ready
+  // PROFILE_V2: who + measurements, Apple Watch, then connect (local) or done (cloud).
+  const LOCAL_STEPS = cloudCfg ? [1,4,5] : [1,4,3,5];
+  const heightCm = ():number|null=>{
+    if(units==='metric'){const v=parseFloat(residentHeight);return v>=90&&v<=230?v:null;}
+    const ft=parseFloat(heightFt)||0, inch=parseFloat(heightIn)||0;
+    const cm=(ft*12+inch)*2.54; return cm>=90&&cm<=230?Math.round(cm):null;
+  };
+  const weightKg = ():number|null=>{
+    const v=parseFloat(weight); if(!v)return null;
+    const kg=units==='metric'?v:v*0.45359237; return kg>=20&&kg<=250?Math.round(kg*10)/10:null;
+  };
 
   const testConnection = async () => {
     setTesting(true); setServerOk(null);
@@ -353,7 +371,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   const canNext = () => {
     if(step===0)return agreed;
     if(step===3)return serverOk===true;
-    if(step===1)return residentName.trim().length>0 && residentHeight.trim().length>0;
+    if(step===1){const a=parseInt(age,10);return residentName.trim().length>0 && heightCm()!==null && weightKg()!==null && a>=1 && a<=120;}
     if(step===2)return emergencyPhone.trim().length>=10;
     return true;
   };
@@ -402,10 +420,28 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
         <View style={{flex:1}}>
           <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Who is VIGIL watching over?</Text>
           <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
-            Their first name and height. Height helps VIGIL measure walking speed.
+            A few basics. Height lets VIGIL measure walking speed accurately.
           </Text>
           <OBField label="First name" value={residentName} onChange={setRN} placeholder="e.g. Margaret"/>
-          <OBField label="Height (cm)" value={residentHeight} onChange={setRH} placeholder="170" keyboard="number-pad"/>
+          <View style={{flexDirection:'row',backgroundColor:C.card,borderRadius:12,padding:4,marginBottom:20,borderWidth:1,borderColor:C.border}}>
+            {([['us','Feet and pounds'],['metric','Centimetres and kilograms']] as const).map(([k,lbl])=>(
+              <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:12,borderRadius:9,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
+                <Text style={{color:units===k?'#000':C.sub,fontSize:14,fontWeight:'700'}}>{lbl}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {units==='us'?(
+            <View style={{flexDirection:'row',gap:12}}>
+              <View style={{flex:1}}><OBField label="Height (feet)" value={heightFt} onChange={setHFt} placeholder="5" keyboard="number-pad"/></View>
+              <View style={{flex:1}}><OBField label="and inches" value={heightIn} onChange={setHIn} placeholder="6" keyboard="number-pad"/></View>
+            </View>
+          ):(
+            <OBField label="Height (cm)" value={residentHeight} onChange={setRH} placeholder="170" keyboard="number-pad"/>
+          )}
+          <View style={{flexDirection:'row',gap:12}}>
+            <View style={{flex:1}}><OBField label={units==='us'?'Weight (lb)':'Weight (kg)'} value={weight} onChange={setWeight} placeholder={units==='us'?'150':'68'} keyboard="number-pad"/></View>
+            <View style={{flex:1}}><OBField label="Age" value={age} onChange={setAge} placeholder="78" keyboard="number-pad"/></View>
+          </View>
         </View>
       );
       case 2: return (
@@ -483,9 +519,9 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
       );
       case 4: return (
         <View style={{flex:1}}>
-          <Text style={{color:C.text,fontSize:24,fontWeight:'800',marginBottom:6}}>Apple Watch</Text>
-          <Text style={{color:C.sub,fontSize:14,marginBottom:28,lineHeight:20}}>
-            VIGIL works fully with the camera alone. Connecting an Apple Watch adds heart rate, HRV, sleep, and SpO2 data as additional health signals.
+          <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Does {residentName.trim()||'they'} wear an Apple Watch?</Text>
+          <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
+            VIGIL works fully with the camera alone. If the watch is paired with this iPhone, VIGIL can also show their heart rate, sleep and steps.
           </Text>
           <TouchableOpacity
             style={{backgroundColor:C.card,borderRadius:16,padding:20,marginBottom:12,borderWidth:2,borderColor:watchEnabled?C.green:C.border}}
@@ -530,6 +566,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
           </View>
           {[
             ['Watching over',residentName||'—'],
+            ['Apple Watch',watchEnabled?'Yes':'No'],
           ].map(([label,val])=>(
             <View key={label} style={{flexDirection:'row',justifyContent:'space-between',paddingVertical:12,borderBottomWidth:1,borderBottomColor:C.border}}>
               <Text style={{color:C.sub,fontSize:14}}>{label}</Text>
@@ -551,10 +588,22 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   const li = LOCAL_STEPS.indexOf(step);
 
   const finish = async () => {
-    const profile:SavedProfile = {residentName,residentHeight,emergencyPhone,emergencyEmail,watchEnabled};
+    const hc=heightCm(); const wk=weightKg();
+    const profile:SavedProfile = {residentName:residentName.trim(),residentHeight:String(hc??residentHeight),
+      emergencyPhone,emergencyEmail,watchEnabled,weightKg:wk!=null?String(wk):'',age,units};
     await AsyncStorage.setItem(SK_PROFILE,JSON.stringify(profile));
-    await AsyncStorage.setItem(SK_SERVER,JSON.stringify({ip:serverIp,port:serverPort}));
     await AsyncStorage.setItem(SK_ONBOARDING,'done');
+    const body={resident_name:profile.residentName,resident_height_cm:hc??170,resident_weight_kg:wk,
+      resident_age:parseInt(age,10)||null,units,has_apple_watch:watchEnabled?1:0,
+      emergency_phone:emergencyPhone||null,emergency_email:emergencyEmail||null};
+    if(cloudCfg){
+      applyCloudHeaders(cloudCfg);
+      AX.post(`${cloudSiteUrl(cloudCfg)}/config`,body,{timeout:8000}).catch(()=>{});
+      onCloud&&onCloud(cloudCfg);
+      return;
+    }
+    await AsyncStorage.setItem(SK_SERVER,JSON.stringify({ip:serverIp,port:serverPort}));
+    AX.post(`http://${serverIp}:${serverPort}/config`,body,{timeout:8000}).catch(()=>{});
     onComplete(profile,serverIp,serverPort);
   };
 
@@ -581,7 +630,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
             </View>
             {mode==='cloud'?(
               <>
-                <CloudSignIn onSignedIn={cfg=>{AsyncStorage.setItem(SK_ONBOARDING,'done').catch(()=>{});onCloud&&onCloud(cfg);}}/>
+                <CloudSignIn onSignedIn={cfg=>{setCloudCfg(cfg);setMode('local');setStep(1);}}/>
                 <TouchableOpacity onPress={()=>setMode('choose')} style={{alignItems:'center',paddingVertical:16}}>
                   <Text style={{color:C.sub,fontSize:16}}>Back</Text>
                 </TouchableOpacity>
@@ -610,7 +659,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   }
 
   const goNext=()=>{ if(li<LOCAL_STEPS.length-1)setStep(LOCAL_STEPS[li+1]); else finish(); };
-  const goBack=()=>{ if(li>0)setStep(LOCAL_STEPS[li-1]); else setMode('choose'); };
+  const goBack=()=>{ if(li>0)setStep(LOCAL_STEPS[li-1]); else {setCloudCfg(null);setMode('choose');} };
   return (
     <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
       <StatusBar barStyle="light-content"/>
@@ -2093,6 +2142,9 @@ export default function App() {
 
   // ── Data ──
   const [today,setToday]               = useState<DailySummary|null>(null);
+  // HOME_PEOPLE_V1: the Today screen can show any named person.
+  const [homePid,setHomePid]           = useState<string|null>(null);
+  const [personToday,setPersonToday]   = useState<any>(null);
   const [history,setHistory]           = useState<DailySummary[]>([]);
   const [alerts,setAlerts]             = useState<AlertEntry[]>([]);
   const [cameraStatus,setCameraStatus] = useState<CameraStatus|null>(null);
@@ -2546,6 +2598,15 @@ export default function App() {
   // (above) is far too slow for this to feel live during a walk-test or demo.
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchDashboard();const id=setInterval(()=>{if(!kbOpenRef.current)fetchDashboard();},4000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchDashboard]);
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;const id=setInterval(()=>{if(!kbOpenRef.current)fetchRooms();},15000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchRooms]);
+  useEffect(()=>{
+    if(!homePid||!jetsonOk||demoMode){setPersonToday(null);return;}
+    let alive=true;
+    const load=()=>AX.get(`${url()}/persons/${homePid}/today`,{timeout:8000})
+      .then(r=>{if(alive)setPersonToday(r.data);}).catch(()=>{});
+    setPersonToday(null);load();
+    const id=setInterval(()=>{if(!kbOpenRef.current)load();},10000);
+    return()=>{alive=false;clearInterval(id);};
+  },[homePid,jetsonOk,demoMode]);
   useEffect(()=>{if(!jetsonOk||demoMode)return;fetchSetupStatus();const id=setInterval(()=>{if(!kbOpenRef.current&&!zoneEditorRef.current)fetchSetupStatus();},30000);return()=>clearInterval(id);},[jetsonOk,demoMode,fetchSetupStatus]);
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchPersons();const id=setInterval(()=>{if(!kbOpenRef.current)fetchPersons();},8000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchPersons]);
   // Tightened from 30s -> 6s: this is the "more than one person detected" identification
@@ -2730,6 +2791,9 @@ export default function App() {
   const namedPeople=persons.filter(p=>!!p.name);
   const residentPerson=namedPeople.find(p=>!!p.is_resident)??null;
   const trendPerson=trendPid?(namedPeople.find(p=>p.id===trendPid)??null):null;
+  const homePerson=homePid?(namedPeople.find(p=>p.id===homePid)??null):null;
+  const dayName=homePerson?homePerson.name:residentName;
+  const dayData:any=homePid?personToday:today;
   const renderToday=()=>(
     <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>} showsVerticalScrollIndicator={false}>
       <View style={s.pageHead}>
@@ -2922,22 +2986,33 @@ export default function App() {
         );
       })()}
 
-      {/* Activity ring -- HOME_RESIDENT_APP: the Today page is one person, the resident */}
-      <Text style={s.secHeader}>{residentName?`${residentName}'s activity`:'Activity'}</Text>
-      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,lineHeight:17}}>Share of the time {residentName||'the resident'} was in view today that they were moving. Time out of view doesn't count.</Text>
-      <ActivityRing pct={((today?.active_minutes??0)+(today?.still_minutes??0))>=20?(today?.activity_level_pct??null):null} activeMin={today?.active_minutes??null} stillMin={today?.still_minutes??null}/>
+      {/* HOME_PEOPLE_V1: pick whose day to show. The resident is the default. */}
+      {namedPeople.length>1&&!demoMode&&(
+        <>
+          <Text style={s.secHeader}>Whose day</Text>
+          <PersonChips people={namedPeople} selectedId={homePid??residentPerson?.id??null} serverUrl={urlRef.current}
+            onPick={p=>{if(!p)return;setHomePid(residentPerson&&p.id===residentPerson.id?null:p.id);}}/>
+        </>
+      )}
+
+      {/* Activity ring */}
+      <Text style={s.secHeader}>{dayName?`${dayName}'s activity`:'Activity'}</Text>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,lineHeight:17}}>Share of the time {dayName||'the resident'} was in view today that they were moving. Time out of view doesn't count.</Text>
+      {homePid&&!personToday
+        ?<ActivityIndicator color={C.green} style={{marginVertical:40}}/>
+        :<ActivityRing pct={((dayData?.active_minutes??0)+(dayData?.still_minutes??0))>=(homePid?5:20)?(dayData?.activity_level_pct??null):null} activeMin={dayData?.active_minutes??null} stillMin={dayData?.still_minutes??null}/>}
 
       {/* Camera metrics */}
-      <Text style={s.secHeader}>{residentName?`${residentName}'s walking and posture`:'Walking and posture'}</Text>
-      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Today's averages for {residentName||'the resident'} only. Other people are on their own pages under Trends.</Text>
+      <Text style={s.secHeader}>{dayName?`${dayName}'s walking and posture`:'Walking and posture'}</Text>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Today's averages for {dayName||'the resident'} only.</Text>
       <View style={s.grid}>
         {[
-          {label:'Gait Speed',val:fmt(today?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:(today?.camera_gait_speed_ms??1)<0.8&&today?.camera_gait_speed_ms!=null},
-          {label:'Posture',val:fmt(today?.posture_score,0),unit:'/100',color:C.purple,warn:(today?.posture_score??100)<50&&today?.posture_score!=null},
-          {label:'Asymmetry',val:fmt(today?.camera_asymmetry_pct,1),unit:'%',color:C.orange,warn:(today?.camera_asymmetry_pct??0)>15},
-          {label:'Cadence',val:fmt(today?.camera_cadence_spm,0),unit:'spm',color:C.blue,warn:false},
-          {label:'Longest Still',val:fmt(today?.longest_stillness_min,0),unit:'min',color:C.orange,warn:(today?.longest_stillness_min??0)>90},
-          {label:'Data Points',val:fmtLarge(today?.camera_data_points),unit:'pts',color:C.sub,warn:false},
+          {label:'Gait Speed',val:fmt(dayData?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:(dayData?.camera_gait_speed_ms??1)<0.8&&dayData?.camera_gait_speed_ms!=null},
+          {label:'Posture',val:fmt(dayData?.posture_score,0),unit:'/100',color:C.purple,warn:(dayData?.posture_score??100)<50&&dayData?.posture_score!=null},
+          {label:'Asymmetry',val:fmt(dayData?.camera_asymmetry_pct,1),unit:'%',color:C.orange,warn:(dayData?.camera_asymmetry_pct??0)>15},
+          {label:'Cadence',val:fmt(dayData?.camera_cadence_spm,0),unit:'spm',color:C.blue,warn:false},
+          {label:'Longest Still',val:fmt(dayData?.longest_stillness_min,0),unit:'min',color:C.orange,warn:(dayData?.longest_stillness_min??0)>90},
+          {label:'Data Points',val:fmtLarge(dayData?.camera_data_points),unit:'pts',color:C.sub,warn:false},
         ].map(m=>(
           <View key={m.label} style={s.metCard}>
             <View style={s.metTop}>
@@ -2952,9 +3027,14 @@ export default function App() {
       </View>
 
       {/* Apple Watch — only if enabled and data exists */}
-      {watchEnabled&&(today?.hrv_sdnn!=null||today?.resting_hr!=null)&&(
+      {!homePid&&(watchEnabled||today?.step_count!=null||today?.resting_hr!=null||today?.hrv_sdnn!=null||today?.sleep_hours!=null)&&(
         <>
-          <Text style={s.secHeader}>Apple Watch</Text>
+          <Text style={s.secHeader}>{residentName?`${residentName}'s Apple Watch`:'Apple Watch'}</Text>
+          {today?.step_count==null&&today?.resting_hr==null&&today?.hrv_sdnn==null&&today?.sleep_hours==null&&(
+            <Text style={{color:C.muted,fontSize:13,marginHorizontal:20,marginBottom:8,lineHeight:18}}>
+              No watch data yet today. Make sure the watch is paired with this iPhone and VIGIL is allowed in the Health app (Sharing, Apps, VIGIL).
+            </Text>
+          )}
           <View style={s.grid}>
             {[
               {label:'Steps',val:fmtLarge(today?.step_count),unit:'steps',color:C.green,warn:false},
