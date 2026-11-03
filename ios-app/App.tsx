@@ -70,6 +70,7 @@ const VIGIL_KEY     = 'YOUR_VIGIL_API_KEY';   // must match VIGIL_API_KEY on the
 const FALLBACK_URL  = `http://${DEFAULT_IP}:${DEFAULT_PORT}`;
 
 const SK_ONBOARDING = '@vigil_onboarding_v1';
+const SK_WATCH_OWNER = '@vigil_watch_owner_v1';   // HOME_PEOPLE_V2: whose watch this phone syncs
 const SK_PROFILE    = '@vigil_profile_v1';
 const SK_SERVER     = '@vigil_server_v1';
 
@@ -2296,6 +2297,9 @@ export default function App() {
   // HOME_PEOPLE_V1: the Today screen can show any named person.
   const [homePid,setHomePid]           = useState<string|null>(null);
   const [personToday,setPersonToday]   = useState<any>(null);
+  const [watchOwner,setWatchOwnerS]    = useState<string|null>(null);   // HOME_PEOPLE_V2
+  useEffect(()=>{AsyncStorage.getItem(SK_WATCH_OWNER).then(v=>{if(v)setWatchOwnerS(v);}).catch(()=>{});},[]);
+  const setWatchOwner=(pid:string)=>{setWatchOwnerS(pid);AsyncStorage.setItem(SK_WATCH_OWNER,pid).catch(()=>{});};
   const [history,setHistory]           = useState<DailySummary[]>([]);
   const [alerts,setAlerts]             = useState<AlertEntry[]>([]);
   const [cameraStatus,setCameraStatus] = useState<CameraStatus|null>(null);
@@ -2749,15 +2753,22 @@ export default function App() {
   // (above) is far too slow for this to feel live during a walk-test or demo.
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchDashboard();const id=setInterval(()=>{if(!kbOpenRef.current)fetchDashboard();},4000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchDashboard]);
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;const id=setInterval(()=>{if(!kbOpenRef.current)fetchRooms();},15000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchRooms]);
+  // HOME_PEOPLE_V2: every person, the resident included, shows only their own
+  // numbers from /persons/<id>/today. The answer is tagged with whose it is, so a
+  // late reply for the previous person can never be shown under the new one.
+  const _named=persons.filter(p=>!!p.name);
+  const selPid:string|null=(homePid&&_named.some(p=>p.id===homePid))?homePid
+    :(_named.find(p=>!!p.is_resident)?.id??_named[0]?.id??null);
   useEffect(()=>{
-    if(!homePid||!jetsonOk||demoMode){setPersonToday(null);return;}
+    if(!selPid||!jetsonOk||demoMode){setPersonToday(null);return;}
     let alive=true;
-    const load=()=>AX.get(`${url()}/persons/${homePid}/today`,{timeout:8000})
-      .then(r=>{if(alive)setPersonToday(r.data);}).catch(()=>{});
+    const pid=selPid;
+    const load=()=>AX.get(`${url()}/persons/${encodeURIComponent(pid)}/today`,{timeout:8000})
+      .then(r=>{if(alive)setPersonToday({...r.data,_pid:pid});}).catch(()=>{});
     setPersonToday(null);load();
     const id=setInterval(()=>{if(!kbOpenRef.current)load();},10000);
     return()=>{alive=false;clearInterval(id);};
-  },[homePid,jetsonOk,demoMode]);
+  },[selPid,jetsonOk,demoMode]);
   useEffect(()=>{if(!jetsonOk||demoMode)return;fetchSetupStatus();const id=setInterval(()=>{if(!kbOpenRef.current&&!zoneEditorRef.current)fetchSetupStatus();},30000);return()=>clearInterval(id);},[jetsonOk,demoMode,fetchSetupStatus]);
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchPersons();const id=setInterval(()=>{if(!kbOpenRef.current)fetchPersons();},8000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchPersons]);
   // Tightened from 30s -> 6s: this is the "more than one person detected" identification
@@ -2942,9 +2953,14 @@ export default function App() {
   const namedPeople=persons.filter(p=>!!p.name);
   const residentPerson=namedPeople.find(p=>!!p.is_resident)??null;
   const trendPerson=trendPid?(namedPeople.find(p=>p.id===trendPid)??null):null;
-  const homePerson=homePid?(namedPeople.find(p=>p.id===homePid)??null):null;
+  const homePerson=selPid?(namedPeople.find(p=>p.id===selPid)??null):null;
   const dayName=homePerson?homePerson.name:residentName;
-  const dayData:any=homePid?personToday:today;
+  const dayData:any=(selPid&&!demoMode)?(personToday?._pid===selPid?personToday:null):today;
+  const dayLoading=!!selPid&&!dayData&&!demoMode;
+  // The Apple Watch belongs to whoever this phone is synced for; only their chip shows it.
+  const watchOwnerOk=!!watchOwner&&namedPeople.some(p=>p.id===watchOwner);
+  const watchHere=demoMode||!selPid||(watchOwnerOk&&selPid===watchOwner);
+  const hasWatchData=today?.step_count!=null||today?.resting_hr!=null||today?.hrv_sdnn!=null||today?.sleep_hours!=null;
   const renderToday=()=>(
     <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>} showsVerticalScrollIndicator={false}>
       <View style={s.pageHead}>
@@ -3142,17 +3158,17 @@ export default function App() {
       {namedPeople.length>1&&!demoMode&&(
         <>
           <Text style={s.secHeader}>Whose day</Text>
-          <PersonChips people={namedPeople} selectedId={homePid??residentPerson?.id??null} serverUrl={urlRef.current}
-            onPick={p=>{if(!p)return;setHomePid(residentPerson&&p.id===residentPerson.id?null:p.id);}}/>
+          <PersonChips people={namedPeople} selectedId={selPid} serverUrl={urlRef.current}
+            onPick={p=>{if(!p)return;setHomePid(p.id);}}/>
         </>
       )}
 
       {/* Activity ring */}
       <Text style={s.secHeader}>{dayName?`${dayName}'s activity`:'Activity'}</Text>
       <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,lineHeight:17}}>Share of the time {dayName||'the resident'} was in view today that they were moving. Time out of view doesn't count.</Text>
-      {homePid&&!personToday
+      {dayLoading
         ?<ActivityIndicator color={C.green} style={{marginVertical:40}}/>
-        :<ActivityRing pct={((dayData?.active_minutes??0)+(dayData?.still_minutes??0))>=(homePid?5:20)?(dayData?.activity_level_pct??null):null} activeMin={dayData?.active_minutes??null} stillMin={dayData?.still_minutes??null}/>}
+        :<ActivityRing pct={((dayData?.active_minutes??0)+(dayData?.still_minutes??0))>=(selPid?5:20)?(dayData?.activity_level_pct??null):null} activeMin={dayData?.active_minutes??null} stillMin={dayData?.still_minutes??null}/>}
 
       {/* Camera metrics */}
       <Text style={s.secHeader}>{dayName?`${dayName}'s walking and posture`:'Walking and posture'}</Text>
@@ -3179,9 +3195,18 @@ export default function App() {
       </View>
 
       {/* Apple Watch — only if enabled and data exists */}
-      {!homePid&&(watchEnabled||today?.step_count!=null||today?.resting_hr!=null||today?.hrv_sdnn!=null||today?.sleep_hours!=null)&&(
+      {(watchEnabled||hasWatchData)&&!!selPid&&!watchOwnerOk&&!demoMode&&(
+        <View style={[s.card,{marginHorizontal:16,marginTop:8}]}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Whose Apple Watch is synced to this phone?</Text>
+          <Text style={{color:C.sub,fontSize:13,marginTop:4,marginBottom:10,lineHeight:18}}>Its steps, heart rate and sleep will show only on that person.</Text>
+          <PersonChips people={namedPeople} selectedId={null} serverUrl={urlRef.current} onPick={p=>{if(p)setWatchOwner(p.id);}}/>
+        </View>
+      )}
+      {watchHere&&(watchEnabled||hasWatchData)&&(
         <>
-          <Text style={s.secHeader}>{residentName?`${residentName}'s Apple Watch`:'Apple Watch'}</Text>
+          <Text style={s.secHeader}>{homePerson?`${homePerson.name}'s Apple Watch`:residentName?`${residentName}'s Apple Watch`:'Apple Watch'}</Text>
+          {watchOwnerOk&&!demoMode&&<TouchableOpacity onPress={()=>{setWatchOwnerS(null);AsyncStorage.removeItem(SK_WATCH_OWNER).catch(()=>{});}}
+            style={{marginHorizontal:20,marginTop:-6,marginBottom:6}}><Text style={{color:C.muted,fontSize:12}}>Not {homePerson?.name}'s watch? Tap to change.</Text></TouchableOpacity>}
           {today?.step_count==null&&today?.resting_hr==null&&today?.hrv_sdnn==null&&today?.sleep_hours==null&&(
             <Text style={{color:C.muted,fontSize:13,marginHorizontal:20,marginBottom:8,lineHeight:18}}>
               No watch data yet today. Make sure the watch is paired with this iPhone and VIGIL is allowed in the Health app (Sharing, Apps, VIGIL).
