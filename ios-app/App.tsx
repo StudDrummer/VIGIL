@@ -264,45 +264,183 @@ function readDailyTotal(method:string,opts:object,type:string,unit:string,
 // ─────────────────────────────────────────────
 interface OBProps { onComplete:(profile:SavedProfile,serverIp:string,serverPort:string)=>void; onDemo?:()=>void; }
 
-function CloudSignIn({onSignedIn}:{onSignedIn:(cfg:CloudCfg)=>void}){
+// ACCOUNTS_V1: create an account, sign in, or reset a forgotten password.
+// A new account has no cameras yet; AddCameraCard adds one by its setup code.
+function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=>void;startMode?:'signup'|'signin'}){
+  const [mode,setMode]=useState<'signup'|'signin'|'forgot'|'reset'>(startMode);
   const [gateway,setGateway]=useState(DEFAULT_CLOUD);
   const [adv,setAdv]=useState(false);
+  const [name,setName]=useState('');
   const [email,setEmail]=useState('');
+  const [phone,setPhone]=useState('');
   const [password,setPassword]=useState('');
+  const [code,setCode]=useState('');
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState<string|null>(null);
-  const signIn=async()=>{
-    setBusy(true);setErr(null);
-    const gw=gateway.trim().replace(/\/+$/,'');
-    try{
-      const r=await axios.post(`${gw}/auth/login`,{email:email.trim(),password,device:Platform.OS},{timeout:15000});
-      const sites:CloudSite[]=r.data?.sites||[];
-      if(!r.data?.token){setErr('Sign-in failed.');return;}
-      if(!sites.length){setErr('Signed in, but no cameras are shared with this account yet.');return;}
-      onSignedIn({gateway:gw,token:r.data.token,email:email.trim().toLowerCase(),sites,siteId:sites[0].id});
-      setPassword('');
-    }catch(e:any){
-      setErr(e?.response?.data?.reason||(e?.message?.includes('Network')?'Cannot reach VIGIL Cloud. Check the internet connection.':'Sign-in failed.'));
-    }finally{setBusy(false);}
+  const [note,setNote]=useState<string|null>(null);
+  const gw=()=>gateway.trim().replace(/\/+$/,'');
+  const fail=(e:any,fallback:string)=>setErr(e?.response?.data?.reason||
+    (e?.message?.includes('Network')?'Cannot reach VIGIL. Check the internet connection and try again.':fallback));
+  const done=(d:any)=>{
+    const sites:CloudSite[]=d?.sites||[];
+    onSignedIn({gateway:gw(),token:d.token,email:email.trim().toLowerCase(),sites,siteId:sites[0]?.id||''});
+    setPassword('');
   };
+  const go=async()=>{
+    setBusy(true);setErr(null);setNote(null);
+    try{
+      if(mode==='signup'){
+        const r=await axios.post(`${gw()}/auth/signup`,{name:name.trim(),email:email.trim(),phone:phone.trim(),password,device:Platform.OS},{timeout:15000});
+        done(r.data);
+      }else if(mode==='signin'){
+        const r=await axios.post(`${gw()}/auth/login`,{email:email.trim(),password,device:Platform.OS},{timeout:15000});
+        done(r.data);
+      }else if(mode==='forgot'){
+        const r=await axios.post(`${gw()}/auth/forgot`,{email:email.trim()},{timeout:15000});
+        if(r.data?.email_enabled===false){setErr('Password emails are not set up yet. Contact VIGIL support.');return;}
+        setNote(`If ${email.trim()} has a VIGIL account, a 6-digit code is on its way. Check your email (and spam).`);
+        setMode('reset');
+      }else{
+        const r=await axios.post(`${gw()}/auth/reset`,{email:email.trim(),code:code.trim(),new_password:password,device:Platform.OS},{timeout:15000});
+        done(r.data);
+      }
+    }catch(e:any){fail(e,mode==='signup'?'Could not create the account.':mode==='signin'?'Sign-in failed.':'Something went wrong. Try again.');}
+    finally{setBusy(false);}
+  };
+  const ready=mode==='signup'?(!!name.trim()&&!!email.trim()&&password.length>=8)
+    :mode==='signin'?(!!email.trim()&&!!password)
+    :mode==='forgot'?!!email.trim()
+    :(code.trim().length===6&&password.length>=8);
   const inp={color:C.text,fontSize:17,paddingHorizontal:14,paddingVertical:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
+  const title={signup:'Create your account',signin:'Sign in',forgot:'Forgot your password?',reset:'Choose a new password'}[mode];
+  const sub={signup:'You will use this email and password to sign in on any phone.',
+    signin:'Use the email and password of your VIGIL account.',
+    forgot:'Type your email and we will send you a 6-digit code.',
+    reset:'Type the 6-digit code from the email and a new password.'}[mode];
+  const btn={signup:'Create account',signin:'Sign in',forgot:'Email me a code',reset:'Save and sign in'}[mode];
   return(
     <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
-      <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>Sign in</Text>
-      <Text style={{color:C.sub,fontSize:15,marginTop:6,lineHeight:21}}>Use the email and password VIGIL gave you.</Text>
-      <TextInput style={inp} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor={C.muted}
-        autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType="username" returnKeyType="next"/>
-      <TextInput style={inp} value={password} onChangeText={setPassword} placeholder="Password" placeholderTextColor={C.muted}
-        autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType="password" returnKeyType="go" onSubmitEditing={signIn}/>
+      <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>{title}</Text>
+      <Text style={{color:C.sub,fontSize:15,marginTop:6,lineHeight:21}}>{sub}</Text>
+      {note&&<Text style={{color:C.green,fontSize:14,marginTop:10,lineHeight:20}}>{note}</Text>}
+      {mode==='signup'&&<TextInput style={inp} value={name} onChangeText={setName} placeholder="Your name" placeholderTextColor={C.muted}
+        autoCapitalize="words" autoCorrect={false} textContentType="name" returnKeyType="next"/>}
+      {mode!=='reset'&&<TextInput style={inp} value={email} onChangeText={setEmail} placeholder="Email" placeholderTextColor={C.muted}
+        autoCapitalize="none" autoCorrect={false} keyboardType="email-address" textContentType={mode==='signup'?'emailAddress':'username'} returnKeyType="next"/>}
+      {mode==='signup'&&<TextInput style={inp} value={phone} onChangeText={setPhone} placeholder="Mobile number (optional)" placeholderTextColor={C.muted}
+        autoCorrect={false} keyboardType="phone-pad" textContentType="telephoneNumber"/>}
+      {mode==='reset'&&<TextInput style={inp} value={code} onChangeText={t=>setCode(t.replace(/[^0-9]/g,'').slice(0,6))} placeholder="6-digit code"
+        placeholderTextColor={C.muted} keyboardType="number-pad" textContentType="oneTimeCode"/>}
+      {mode!=='forgot'&&<TextInput style={inp} value={password} onChangeText={setPassword}
+        placeholder={mode==='signin'?'Password':'Password (at least 8 characters)'} placeholderTextColor={C.muted}
+        autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType={mode==='signin'?'password':'newPassword'}
+        returnKeyType="go" onSubmitEditing={()=>{if(ready)go();}}/>}
       {adv&&<TextInput style={[inp,{fontSize:13,color:C.sub}]} value={gateway} onChangeText={setGateway} placeholder={DEFAULT_CLOUD}
         placeholderTextColor={C.muted} autoCapitalize="none" autoCorrect={false} keyboardType="url"/>}
-      {err&&<Text style={{color:C.red,fontSize:13,marginTop:10}}>{err}</Text>}
-      <TouchableOpacity style={[s.btnPrimary,{marginTop:14,opacity:(busy||!email||!password)?0.5:1}]} disabled={busy||!email||!password} onPress={signIn}>
-        {busy?<ActivityIndicator color={C.bg}/>:<Text style={[s.btnPrimaryTxt,{fontSize:17}]}>Sign in</Text>}
+      {err&&<Text style={{color:C.red,fontSize:14,marginTop:10,lineHeight:20}}>{err}</Text>}
+      <TouchableOpacity style={[s.btnPrimary,{marginTop:14,opacity:(busy||!ready)?0.5:1}]} disabled={busy||!ready} onPress={go}>
+        {busy?<ActivityIndicator color={C.bg}/>:<Text style={[s.btnPrimaryTxt,{fontSize:17}]}>{btn}</Text>}
       </TouchableOpacity>
-      <TouchableOpacity onPress={()=>setAdv(v=>!v)} style={{alignSelf:'center',paddingVertical:12}}>
+      {mode==='signup'&&<TouchableOpacity onPress={()=>{setMode('signin');setErr(null);}} style={{alignItems:'center',paddingTop:16}}>
+        <Text style={{color:C.blue,fontSize:16}}>I already have an account</Text></TouchableOpacity>}
+      {mode==='signin'&&<>
+        <TouchableOpacity onPress={()=>{setMode('forgot');setErr(null);}} style={{alignItems:'center',paddingTop:16}}>
+          <Text style={{color:C.blue,fontSize:16}}>Forgot password?</Text></TouchableOpacity>
+        <TouchableOpacity onPress={()=>{setMode('signup');setErr(null);}} style={{alignItems:'center',paddingTop:12}}>
+          <Text style={{color:C.sub,fontSize:15}}>New to VIGIL? Create an account</Text></TouchableOpacity>
+      </>}
+      {(mode==='forgot'||mode==='reset')&&<TouchableOpacity onPress={()=>{setMode('signin');setErr(null);setNote(null);}} style={{alignItems:'center',paddingTop:16}}>
+        <Text style={{color:C.sub,fontSize:15}}>Back to sign in</Text></TouchableOpacity>}
+      <TouchableOpacity onPress={()=>setAdv(v=>!v)} style={{alignSelf:'center',paddingTop:14}}>
         <Text style={{color:C.muted,fontSize:12}}>{adv?'Hide server address':'Server address'}</Text>
       </TouchableOpacity>
+    </View>
+  );
+}
+
+// ACCOUNTS_V1: add a camera to the account with the code printed on its card.
+function AddCameraCard({cfg,onAdded,onSkip}:{cfg:CloudCfg;onAdded:(cfg:CloudCfg,role?:string)=>void;onSkip?:()=>void}){
+  const [code,setCode]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState<string|null>(null);
+  const clean=code.toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const add=async()=>{
+    setBusy(true);setErr(null);
+    try{
+      const r=await axios.post(`${cfg.gateway}/auth/claim`,{code:clean},{timeout:15000,headers:{'X-VIGIL-Key':cfg.token}});
+      const sites:CloudSite[]=r.data?.sites||[];
+      onAdded({...cfg,sites,siteId:r.data?.site?.id||sites[0]?.id||cfg.siteId},r.data?.role);
+      setCode('');
+    }catch(e:any){setErr(e?.response?.data?.reason||'Could not add the camera. Check the internet connection.');}
+    finally{setBusy(false);}
+  };
+  return(
+    <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
+      <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>Add a camera</Text>
+      <Text style={{color:C.sub,fontSize:15,marginTop:6,lineHeight:21}}>Type the 8-character setup code printed on the card that came with the VIGIL camera.</Text>
+      <TextInput style={{color:C.text,fontSize:26,letterSpacing:4,textAlign:'center',paddingVertical:16,backgroundColor:C.bg,
+          borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:14,fontWeight:'700'}}
+        value={code} onChangeText={t=>{const c=t.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);setCode(c.length>4?c.slice(0,4)+'-'+c.slice(4):c);}}
+        placeholder="ABCD-1234" placeholderTextColor={C.muted} autoCapitalize="characters" autoCorrect={false} returnKeyType="go"
+        onSubmitEditing={()=>{if(clean.length===8)add();}}/>
+      {err&&<Text style={{color:C.red,fontSize:14,marginTop:10,lineHeight:20}}>{err}</Text>}
+      <TouchableOpacity style={[s.btnPrimary,{marginTop:14,opacity:(busy||clean.length!==8)?0.5:1}]} disabled={busy||clean.length!==8} onPress={add}>
+        {busy?<ActivityIndicator color={C.bg}/>:<Text style={[s.btnPrimaryTxt,{fontSize:17}]}>Add camera</Text>}
+      </TouchableOpacity>
+      {onSkip&&<TouchableOpacity onPress={onSkip} style={{alignItems:'center',paddingTop:16}}>
+        <Text style={{color:C.sub,fontSize:15}}>I will do this later</Text></TouchableOpacity>}
+    </View>
+  );
+}
+
+// ACCOUNTS_V1: the signed-in person's details and alert emails (Settings > Account).
+function AccountSection({cfg}:{cfg:CloudCfg}){
+  const [user,setUser]=useState<any>(null);
+  const [name,setName]=useState('');
+  const [phone,setPhone]=useState('');
+  const [msg,setMsg]=useState<string|null>(null);
+  const [busy,setBusy]=useState(false);
+  const h={timeout:12000,headers:{'X-VIGIL-Key':cfg.token}};
+  useEffect(()=>{
+    axios.get(`${cfg.gateway}/auth/profile`,h).then(r=>{const u=r.data?.user;setUser(u);setName(u?.name||'');setPhone(u?.phone||'');}).catch(()=>{});
+  },[cfg.token]);
+  const save=async(patch:any,okMsg:string)=>{
+    setBusy(true);setMsg(null);
+    try{const r=await axios.post(`${cfg.gateway}/auth/profile`,patch,h);setUser(r.data?.user);setMsg(okMsg);}
+    catch(e:any){setMsg(e?.response?.data?.reason||'Could not save. Check the internet connection.');}
+    finally{setBusy(false);}
+  };
+  const testEmail=async()=>{
+    setBusy(true);setMsg(null);
+    try{const r=await axios.post(`${cfg.gateway}/auth/test-email`,{},h);setMsg(r.data?.status==='ok'?`Test email sent to ${cfg.email}. Check your inbox (and spam).`:(r.data?.reason||'The email could not be sent.'));}
+    catch(e:any){setMsg(e?.response?.data?.reason||'The email could not be sent.');}
+    finally{setBusy(false);}
+  };
+  const inp={color:C.text,fontSize:16,paddingHorizontal:12,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:6};
+  if(!user)return null;
+  const changed=name.trim()!==(user.name||'')||phone.trim()!==(user.phone||'');
+  return(
+    <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
+      <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Your account</Text>
+      <Text style={{color:C.sub,fontSize:13,marginTop:4}}>{cfg.email}{user.role?` · ${user.role==='owner'?'Owner':'Caregiver'}`:''}</Text>
+      <Text style={{color:C.sub,fontSize:13,marginTop:14}}>Name</Text>
+      <TextInput style={inp} value={name} onChangeText={setName} autoCapitalize="words" placeholder="Your name" placeholderTextColor={C.muted}/>
+      <Text style={{color:C.sub,fontSize:13,marginTop:10}}>Mobile number</Text>
+      <TextInput style={inp} value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="Optional" placeholderTextColor={C.muted}/>
+      {changed&&<TouchableOpacity style={[s.btnPrimary,{marginTop:12,opacity:busy?0.5:1}]} disabled={busy}
+        onPress={()=>save({name:name.trim(),phone:phone.trim()},'Saved.')}>
+        <Text style={s.btnPrimaryTxt}>Save</Text></TouchableOpacity>}
+      <View style={{flexDirection:'row',alignItems:'center',marginTop:18,paddingTop:14,borderTopWidth:1,borderTopColor:C.hair}}>
+        <View style={{flex:1,paddingRight:10}}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'600'}}>Email me alerts</Text>
+          <Text style={{color:C.sub,fontSize:12,marginTop:2,lineHeight:17}}>Falls, time on the floor, and when a camera goes offline, sent to {cfg.email}.</Text>
+        </View>
+        <Switch value={!!user.email_alerts} disabled={busy} onValueChange={v=>save({email_alerts:v},v?'Alert emails are on.':'Alert emails are off.')}
+          trackColor={{false:C.fill,true:C.green}} thumbColor="#FFFFFF"/>
+      </View>
+      <TouchableOpacity onPress={testEmail} disabled={busy} style={{paddingTop:14}}>
+        <Text style={{color:C.blue,fontSize:15}}>Send me a test email</Text></TouchableOpacity>
+      {msg&&<Text style={{color:C.sub,fontSize:13,marginTop:10,lineHeight:18}}>{msg}</Text>}
     </View>
   );
 }
@@ -341,6 +479,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   const [weight,setWeight]         = useState('');
   const [age,setAge]               = useState('');
   const [cloudCfg,setCloudCfg]     = useState<CloudCfg|null>(null);
+  const [pendingCloud,setPendingCloud] = useState<CloudCfg|null>(null);   // ACCOUNTS_V1: signed in, no camera yet
   const [serverIp,setSI]           = useState(DEFAULT_IP);
   const [serverPort,setSP]         = useState(DEFAULT_PORT);
   const [testing,setTesting]       = useState(false);
@@ -630,7 +769,19 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
             </View>
             {mode==='cloud'?(
               <>
-                <CloudSignIn onSignedIn={cfg=>{setCloudCfg(cfg);setMode('local');setStep(1);}}/>
+                {pendingCloud?(
+                  <AddCameraCard cfg={pendingCloud}
+                    onAdded={(cfg,role)=>{setPendingCloud(null);
+                      // The first person to add a camera sets up who it watches; family who join later go straight in.
+                      if(role==='caregiver'){onCloud&&onCloud(cfg);return;}
+                      setCloudCfg(cfg);setMode('local');setStep(1);}}
+                    onSkip={()=>{const c=pendingCloud;setPendingCloud(null);onCloud&&onCloud(c);}}/>
+                ):(
+                  <CloudSignIn onSignedIn={cfg=>{
+                    if(!cfg.sites.length){setPendingCloud(cfg);return;}
+                    // Existing account that already has cameras: nothing to set up again.
+                    onCloud&&onCloud(cfg);}}/>
+                )}
                 <TouchableOpacity onPress={()=>setMode('choose')} style={{alignItems:'center',paddingVertical:16}}>
                   <Text style={{color:C.sub,fontSize:16}}>Back</Text>
                 </TouchableOpacity>
@@ -638,7 +789,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
             ):(
               <>
                 <TouchableOpacity style={[s.btnPrimary,{paddingVertical:18}]} onPress={()=>setMode('cloud')}>
-                  <Text style={[s.btnPrimaryTxt,{fontSize:18}]}>Sign in</Text>
+                  <Text style={[s.btnPrimaryTxt,{fontSize:18}]}>Get started</Text>
                 </TouchableOpacity>
                 <TouchableOpacity onPress={()=>{setMode('local');setStep(1);}}
                   style={{marginTop:14,paddingVertical:16,borderRadius:14,borderWidth:1,borderColor:C.border,alignItems:'center'}}>
@@ -2816,6 +2967,7 @@ export default function App() {
         )}
         {cloud&&cloud.sites.length===1&&<Text style={{color:C.muted,fontSize:13,marginTop:6}}>{cloud.sites[0].name}</Text>}
       </View>
+      {!!cloud&&!cloud.sites.length&&<AddCameraCard cfg={cloud} onAdded={cfg=>enterCloud(cfg)}/>}
 
       {setupStatus&&(setupStatus.camera_moved||setupStatus.needs_zones)&&!demoMode&&(
         <TouchableOpacity onPress={()=>setZoneEditor(true)}
@@ -3435,11 +3587,12 @@ export default function App() {
 
   const renderServerTab=()=>(
     <ScrollView automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
+      {cloud&&<AccountSection cfg={cloud}/>}
       {cloud?(
         <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
-          <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>VIGIL Cloud</Text>
+          <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Cameras</Text>
           <Text style={{color:C.sub,fontSize:13,marginTop:4}}>Signed in as {cloud.email}</Text>
-          <Text style={[s.secHeader,{marginHorizontal:0,marginTop:14}]}>Cameras</Text>
+          {!cloud.sites.length&&<Text style={{color:C.sub,fontSize:14,marginTop:8}}>No cameras yet. Add one with the code on its card.</Text>}
           {cloud.sites.map(site=>(
             <TouchableOpacity key={site.id} onPress={()=>switchSite(site.id)}
               style={{flexDirection:'row',alignItems:'center',paddingVertical:12,borderTopWidth:1,borderTopColor:C.hair}}>
@@ -3464,8 +3617,9 @@ export default function App() {
           </TouchableOpacity>
         </View>
       ):(
-        <CloudSignIn onSignedIn={cfg=>enterCloud(cfg)}/>
+        <CloudSignIn startMode="signin" onSignedIn={cfg=>enterCloud(cfg)}/>
       )}
+      {cloud&&<AddCameraCard cfg={cloud} onAdded={cfg=>enterCloud(cfg)}/>}
       {!cloud&&<Text style={[s.secHeader,{marginTop:20}]}>Local VIGIL server</Text>}
       {!cloud&&<>
       <View style={[s.card,{marginHorizontal:16,marginTop:16,alignItems:'center',paddingVertical:28}]}>

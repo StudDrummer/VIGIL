@@ -1,13 +1,14 @@
 # VIGIL Cloud
 
-Runs VIGIL for many homes without a Jetson in each one. Each camera sends its
-video straight to the cloud server, and the server runs the same pipeline the
-Jetson ran: pose, falls, identity, walking measures, alerts.
+Runs VIGIL for many homes without a Jetson in each one. In each room a Tapo
+camera and a small VIGIL relay box (a Raspberry Pi, see `relay/`) send the
+video to the cloud server, and the server runs the same pipeline the Jetson
+ran: pose, falls, identity, walking measures, alerts.
 
 ```
-camera (RTMP push) ──► mediamtx :1935 ──► site-home01 (Server.py + activity_monitor.py)
-                                     └──► site-home02 ...
-iPhone app ──HTTPS──► caddy :443 ──► gateway (accounts, access, proxy, offline alerts) ──► site-*
+Tapo camera ─RTSP─► relay box ─SRT, encrypted─► mediamtx :8890/udp ─► site-home01 (Server.py + activity_monitor.py)
+                              (RTMP :1935 if SRT is blocked)       └─► site-home02 ...
+iPhone app ──HTTPS──► caddy :443 ──► gateway (accounts, access, proxy, alert emails, offline alerts) ──► site-*
 ```
 
 * **One container per camera.** A crash, a full disk or a bad camera in one home
@@ -18,8 +19,12 @@ iPhone app ──HTTPS──► caddy :443 ──► gateway (accounts, access, 
 * **Video is not stored.** Frames are analysed in memory and dropped, as on the
   Jetson. MediaMTX recording is off.
 * **Monitoring offline is an alert.** If a camera stops sending data for 3
-  minutes, everyone on that camera gets an urgent push, every hour until it is
-  back, and a "restored" push when it returns.
+  minutes, everyone on that camera gets an urgent push and an email, every hour
+  until it is back, and a "restored" message when it returns.
+* **Families make their own accounts.** In the app they create an account
+  (email and password), then type the setup code printed on the camera's card.
+  The first account to add a camera becomes its owner; family who add the same
+  code later become caregivers. Each person can turn alert emails on or off.
 
 ## What it costs to run
 
@@ -42,8 +47,9 @@ New Google Cloud accounts get free credit. Turn on a budget alert.
    * Boot disk: Ubuntu 24.04 LTS, 100 GB.
    * Firewall: tick "Allow HTTP" and "Allow HTTPS".
    * Networking > External IP: reserve a **static** address.
-3. **Open the camera port.** VPC network > Firewall > Create rule: ingress,
-   targets "all instances", source `0.0.0.0/0`, TCP `1935`.
+3. **Open the camera ports.** VPC network > Firewall > Create rule: ingress,
+   targets "all instances", source `0.0.0.0/0`, **UDP `8890`** (SRT, the
+   encrypted video from relay boxes) and **TCP `1935`** (RTMP fallback).
 4. **Point your domain at it.** Where vigilhealth.me's DNS is managed, add an
    `A` record: name `api`, value = the static IP. (The website is unaffected.)
 5. **Install.** Click "SSH" next to the VM, then:
@@ -54,6 +60,20 @@ New Google Cloud accounts get free credit. Turn on a budget alert.
    ```
    It prints your admin password. Log out of SSH and back in once (Docker group).
 6. **Check:** `curl https://api.vigilhealth.me/health` shows `"status":"ok"`.
+7. **Email.** Edit `config/email.env` (made by the install) with the SMTP
+   account of the VIGIL email:
+   ```
+   VIGIL_SMTP_HOST=smtp.gmail.com        # or your provider's SMTP server
+   VIGIL_SMTP_PORT=587                   # 465 also works (SSL)
+   VIGIL_SMTP_USER=alerts@vigilhealth.me
+   VIGIL_SMTP_PASSWORD=<an app password, not the normal password>
+   VIGIL_SMTP_FROM=VIGIL <alerts@vigilhealth.me>
+   ```
+   For Gmail or Google Workspace, turn on 2-step verification for that account
+   and create an "App password" (myaccount.google.com > Security). Then
+   `python3 vigilctl.py apply`, sign in to the app and tap Settings > Account >
+   **Send me a test email**. Without this file filled in, accounts still work,
+   but there are no welcome, password-reset or alert emails.
 
 ## Adding a camera
 
@@ -61,15 +81,19 @@ New Google Cloud accounts get free credit. Turn on a budget alert.
 python3 vigilctl.py add-camera --name "Mohan home - living room" --home "Mohan home" \
     --room "Living room" --tz America/Los_Angeles
 ```
-It prints two things:
+It prints:
 
-* **The RTMP address** to paste into the camera. On an Amcrest or Dahua camera:
-  open its web page (its IP address in a browser on the same Wi-Fi), log in,
-  Setup > Network > RTMP: Enable, Address Type **Custom**, paste the address, Save.
-  Use the sub-stream or main stream at 1280x720, H.264, 10 to 15 fps, about
-  1 Mbps. The camera starts sending within a minute.
-* **The ntfy topic.** Every caregiver installs the free **ntfy** app and
-  subscribes to that topic to get fall alerts on their lock screen.
+* **The setup code** (like `K7Q2-M9XD`). Print it on the card that goes in the
+  box. The family types it in the app after making an account; nothing else
+  links them to the camera. `camera-url home01` shows it again.
+* **The relay settings file**, `config/relay_home01.env`. Copy it to the Mac and
+  use it when preparing that camera's relay box (`relay/README.md`). It holds the
+  camera's private stream password and encryption key: never put it on GitHub.
+* **The ntfy topic.** Optional lock-screen pushes: a caregiver installs the
+  free **ntfy** app and subscribes to that topic. Alert emails need nothing.
+
+A camera that can push RTMP by itself (Amcrest, Dahua): `camera-url home01`
+also prints the RTMP address to paste in its Setup > Network > RTMP page.
 
 For a hospital bed, add `--hospital` (bed-exit alerts at any hour, not only at
 night). The on-the-floor alert is on by default after 60 s; change it with
@@ -88,8 +112,18 @@ python3 vigilctl.py reset-password --email mom@example.com
 python3 vigilctl.py users
 python3 vigilctl.py cameras
 ```
-In the app: Settings > Server > **Sign in to VIGIL Cloud**. A person granted
-several cameras switches between them from the Today screen.
+Normally nobody needs these: people sign up in the app and add a camera with
+its setup code. `add-user` and `grant` are for adding someone by hand. A person
+with several cameras switches between them from the Today screen (chips under
+the date) or Settings > Account.
+
+### Several cameras in one home
+
+Each camera is its own site with its own people memory, bed and couch areas,
+and alerts. Add one per room with the same `--home` name, and give the family
+each card's code (or add them all to one account). Teach each person once on
+each camera: a name taught on the living-room camera is not yet known to the
+bedroom camera.
 
 ## Day to day
 
@@ -103,8 +137,13 @@ several cameras switches between them from the Today screen.
 
 * Written consent from the patient or resident (and roommates), and the
   facility's approval of where video is processed.
-* The RTMP link from camera to server is not encrypted. The stream key is long
-  and random, but tell the facility, and prefer a camera with RTMPS or SRT if
-  they require encryption in transit.
+* Video from a relay box to the server is encrypted (SRT, AES-128, a separate
+  key per camera). If the network blocks UDP, the box falls back to RTMP, which
+  is not encrypted, and tries SRT again every hour; the relay log says which is
+  in use. If the facility requires encryption at all times, set
+  `VIGIL_RTMP_FALLBACK=` (empty) in the box's `/etc/vigil-relay.env`.
+* Hospital Wi-Fi often has a sign-in page ("captive portal") that a relay box
+  cannot click through. Ask IT to allow the box by its MAC address, or bring a
+  mobile hotspot (for example a Jio 4G router) for the camera and box.
 * VIGIL adds to staff checks; it never replaces them. Run the full fall test
   (20 staged falls, 20 everyday movements) on the installed camera first.

@@ -90,7 +90,15 @@ def init_db():
         user_id INTEGER, site_id TEXT, action TEXT, ip TEXT);
     CREATE TABLE IF NOT EXISTS login_fail (
         key TEXT, at REAL);
+    CREATE TABLE IF NOT EXISTS reset_codes (
+        email TEXT PRIMARY KEY, code_hash TEXT, expires REAL, tries INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS site_state (
+        site_id TEXT PRIMARY KEY, last_alert_id INTEGER);
     """)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(users)")}
+    for col, typ in (("phone", "TEXT"), ("email_alerts", "INTEGER DEFAULT 1")):   # ACCOUNTS_V1
+        if col not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN %s %s" % (col, typ))
     c.commit()
     c.close()
 
@@ -197,7 +205,207 @@ def login():
     db().commit()
     audit("login", user_id=u["id"])
     return jsonify({"status": "ok", "token": tok,
-                    "user": {"email": u["email"], "name": u["name"], "is_admin": bool(u["is_admin"])},
+                    "user": _user_json(u),
+                    "sites": [public_site(s) for s in user_sites(u["id"], bool(u["is_admin"]))]})
+
+
+# ---------------------------------------------------------------- ACCOUNTS_V1
+# Families create their own account in the app, then add a camera with the
+# setup code printed on its card. Passwords are stored only as salted hashes.
+import re as _re
+import smtplib
+from email.message import EmailMessage
+
+SMTP = {k: os.environ.get("VIGIL_SMTP_" + k.upper(), "") for k in ("host", "port", "user", "password", "from")}
+EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def email_enabled():
+    return bool(SMTP["host"] and SMTP["from"])
+
+
+def send_email(to, subject, body, wait=False):
+    """Plain-text email through the configured SMTP account. Never raises."""
+    if not email_enabled() or not to:
+        return False
+
+    def _go():
+        try:
+            m = EmailMessage()
+            m["From"], m["To"], m["Subject"] = SMTP["from"], to, subject
+            m.set_content(body)
+            port = int(SMTP["port"] or 587)
+            if port == 465:
+                srv = smtplib.SMTP_SSL(SMTP["host"], port, timeout=20)
+            else:
+                srv = smtplib.SMTP(SMTP["host"], port, timeout=20)
+                srv.ehlo()
+                try:
+                    srv.starttls()
+                    srv.ehlo()
+                except smtplib.SMTPNotSupportedError:
+                    pass
+            if SMTP["user"]:
+                srv.login(SMTP["user"], SMTP["password"])
+            srv.send_message(m)
+            srv.quit()
+            return True
+        except Exception as e:
+            print("[EMAIL] failed to %s: %s" % (to, e), flush=True)
+            return False
+    if wait:
+        return _go()
+    threading.Thread(target=_go, daemon=True).start()
+    return True
+
+
+def _new_token(user_id, device=""):
+    tok = secrets.token_urlsafe(32)
+    now = time.time()
+    db().execute("INSERT INTO tokens VALUES (?,?,?,?,?)", (_h(tok), user_id, now, now + TOKEN_DAYS * 86400,
+                                                          (device or "")[:80]))
+    db().commit()
+    return tok
+
+
+def _user_json(u):
+    return {"email": u["email"], "name": u["name"], "phone": u["phone"] if "phone" in u.keys() else None,
+            "email_alerts": bool(u["email_alerts"]) if "email_alerts" in u.keys() else True,
+            "is_admin": bool(u["is_admin"])}
+
+
+@app.route("/auth/signup", methods=["POST"])
+def signup():
+    body = request.get_json(silent=True) or {}
+    email = (body.get("email") or "").strip().lower()
+    pw = body.get("password") or ""
+    name = (body.get("name") or "").strip()[:60]
+    phone = (body.get("phone") or "").strip()[:30]
+    ip = (request.headers.get("X-Forwarded-For", request.remote_addr) or "").split(",")[0]
+    if _too_many_fails("signup|" + ip):
+        return jsonify({"status": "error", "reason": "too many attempts, wait 15 minutes"}), 429
+    if not EMAIL_RE.match(email):
+        return jsonify({"status": "error", "reason": "please enter a valid email address"}), 400
+    if len(pw) < 8:
+        return jsonify({"status": "error", "reason": "use a password of at least 8 characters"}), 400
+    if not name:
+        return jsonify({"status": "error", "reason": "please enter your name"}), 400
+    if db().execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+        db().execute("INSERT INTO login_fail VALUES (?,?)", ("signup|" + ip, time.time()))
+        db().commit()
+        return jsonify({"status": "error", "reason": "an account with this email already exists; sign in instead"}), 409
+    db().execute("INSERT INTO users (email, name, pw_hash, phone) VALUES (?,?,?,?)",
+                 (email, name, generate_password_hash(pw), phone))
+    db().commit()
+    u = db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    audit("signup", user_id=u["id"])
+    send_email(email, "Welcome to VIGIL",
+               "Hi %s,\n\nYour VIGIL account is ready. To see a camera, open the app and tap "
+               "\"Add a camera\", then type the setup code from the card that came with it.\n\n"
+               "VIGIL will email you here if it sees a possible fall or if a camera stops working.\n\n- VIGIL" % name)
+    return jsonify({"status": "ok", "token": _new_token(u["id"], body.get("device")),
+                    "user": _user_json(u), "sites": []})
+
+
+def _normalise_code(code):
+    return _re.sub(r"[^A-Z0-9]", "", (code or "").upper())
+
+
+@app.route("/auth/claim", methods=["POST"])
+@require_user
+def claim_camera():
+    """Add a camera to this account with the setup code from its card."""
+    body = request.get_json(silent=True) or {}
+    code = _normalise_code(body.get("code"))
+    key = "claim|%s" % g.user_id
+    if _too_many_fails(key):
+        return jsonify({"status": "error", "reason": "too many wrong codes, wait 15 minutes"}), 429
+    site = next((s for s in sites().values() if code and _normalise_code(s.get("setup_code")) == code), None)
+    if not site:
+        db().execute("INSERT INTO login_fail VALUES (?,?)", (key, time.time()))
+        db().commit()
+        return jsonify({"status": "error", "reason": "that code was not recognised; check the card and try again"}), 404
+    has_owner = db().execute("SELECT 1 FROM grants WHERE site_id=? AND role='owner'", (site["id"],)).fetchone()
+    db().execute("INSERT OR IGNORE INTO grants VALUES (?,?,?)",
+                 (g.user_id, site["id"], "caregiver" if has_owner else "owner"))
+    db().commit()
+    audit("claim", site_id=site["id"])
+    role = db().execute("SELECT role FROM grants WHERE user_id=? AND site_id=?", (g.user_id, site["id"])).fetchone()
+    return jsonify({"status": "ok", "site": public_site(site), "role": role[0] if role else "caregiver",
+                    "sites": [public_site(s) for s in user_sites(g.user_id, g.is_admin)]})
+
+
+@app.route("/auth/profile", methods=["GET", "POST"])
+@require_user
+def profile():
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        if "name" in body:
+            db().execute("UPDATE users SET name=? WHERE id=?", ((body.get("name") or "").strip()[:60], g.user_id))
+        if "phone" in body:
+            db().execute("UPDATE users SET phone=? WHERE id=?", ((body.get("phone") or "").strip()[:30], g.user_id))
+        if "email_alerts" in body:
+            db().execute("UPDATE users SET email_alerts=? WHERE id=?", (1 if body.get("email_alerts") else 0, g.user_id))
+        db().commit()
+    u = db().execute("SELECT * FROM users WHERE id=?", (g.user_id,)).fetchone()
+    return jsonify({"status": "ok", "user": _user_json(u)})
+
+
+@app.route("/auth/test-email", methods=["POST"])
+@require_user
+def test_email():
+    u = db().execute("SELECT * FROM users WHERE id=?", (g.user_id,)).fetchone()
+    if not email_enabled():
+        return jsonify({"status": "error", "reason": "email is not set up on this VIGIL server yet"}), 503
+    ok = send_email(u["email"], "VIGIL test email",
+                    "This is a test. Real VIGIL alerts will arrive at this address.\n\n- VIGIL", wait=True)
+    return jsonify({"status": "ok" if ok else "error",
+                    "reason": None if ok else "the email could not be sent; check the server's email settings"})
+
+
+@app.route("/auth/forgot", methods=["POST"])
+def forgot_password():
+    body = request.get_json(silent=True) or {}
+    email = (body.get("email") or "").strip().lower()
+    ip = (request.headers.get("X-Forwarded-For", request.remote_addr) or "").split(",")[0]
+    if _too_many_fails("forgot|" + ip):
+        return jsonify({"status": "error", "reason": "too many attempts, wait 15 minutes"}), 429
+    db().execute("INSERT INTO login_fail VALUES (?,?)", ("forgot|" + ip, time.time()))
+    db().commit()
+    u = db().execute("SELECT * FROM users WHERE email=? AND disabled=0", (email,)).fetchone()
+    if u:
+        code = "%06d" % secrets.randbelow(1000000)
+        db().execute("INSERT OR REPLACE INTO reset_codes VALUES (?,?,?,0)", (email, _h(code), time.time() + 1800))
+        db().commit()
+        send_email(email, "Your VIGIL code: %s" % code,
+                   "Your VIGIL password reset code is %s\n\nIt works for 30 minutes. If you did not ask for it, "
+                   "you can ignore this email.\n\n- VIGIL" % code)
+    # Same answer whether or not the account exists, so emails cannot be probed.
+    return jsonify({"status": "ok", "email_enabled": email_enabled()})
+
+
+@app.route("/auth/reset", methods=["POST"])
+def reset_password():
+    body = request.get_json(silent=True) or {}
+    email = (body.get("email") or "").strip().lower()
+    code = (body.get("code") or "").strip()
+    new = body.get("new_password") or ""
+    if len(new) < 8:
+        return jsonify({"status": "error", "reason": "use a password of at least 8 characters"}), 400
+    r = db().execute("SELECT * FROM reset_codes WHERE email=?", (email,)).fetchone()
+    if not r or r["expires"] < time.time() or r["tries"] >= 5:
+        return jsonify({"status": "error", "reason": "that code has expired; ask for a new one"}), 400
+    if not secrets.compare_digest(r["code_hash"], _h(code)):
+        db().execute("UPDATE reset_codes SET tries=tries+1 WHERE email=?", (email,))
+        db().commit()
+        return jsonify({"status": "error", "reason": "that code is not right"}), 400
+    db().execute("UPDATE users SET pw_hash=? WHERE email=?", (generate_password_hash(new), email))
+    db().execute("DELETE FROM reset_codes WHERE email=?", (email,))
+    u = db().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    db().execute("DELETE FROM tokens WHERE user_id=?", (u["id"],))
+    db().commit()
+    audit("password_reset", user_id=u["id"])
+    return jsonify({"status": "ok", "token": _new_token(u["id"], body.get("device")), "user": _user_json(u),
                     "sites": [public_site(s) for s in user_sites(u["id"], bool(u["is_admin"]))]})
 
 
@@ -212,8 +420,8 @@ def logout():
 @app.route("/auth/me")
 @require_user
 def me():
-    u = db().execute("SELECT email, name, is_admin FROM users WHERE id=?", (g.user_id,)).fetchone()
-    return jsonify({"status": "ok", "user": dict(u),
+    u = db().execute("SELECT * FROM users WHERE id=?", (g.user_id,)).fetchone()
+    return jsonify({"status": "ok", "user": _user_json(u),
                     "sites": [public_site(s) for s in user_sites(g.user_id, g.is_admin)]})
 
 
@@ -222,8 +430,8 @@ def me():
 def change_password():
     body = request.get_json(silent=True) or {}
     new = body.get("new_password") or ""
-    if len(new) < 10:
-        return jsonify({"status": "error", "reason": "use at least 10 characters"}), 400
+    if len(new) < 8:
+        return jsonify({"status": "error", "reason": "use at least 8 characters"}), 400
     u = db().execute("SELECT pw_hash FROM users WHERE id=?", (g.user_id,)).fetchone()
     if not check_password_hash(u["pw_hash"], body.get("old_password") or ""):
         return jsonify({"status": "error", "reason": "current password is wrong"}), 401
@@ -276,6 +484,81 @@ def _push(topic, title, message, priority="high"):
         pass
 
 
+def _site_emails(site_id):
+    """Everyone granted this camera who wants email alerts (admins included)."""
+    try:
+        c = sqlite3.connect(DB_PATH, timeout=10)
+        rows = c.execute("""SELECT DISTINCT u.email FROM users u
+                            LEFT JOIN grants g ON g.user_id=u.id AND g.site_id=?
+                            WHERE u.disabled=0 AND COALESCE(u.email_alerts,1)=1 AND g.site_id IS NOT NULL""",
+                         (site_id,)).fetchall()
+        c.close()
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+
+def _email_site(s, subject, body):
+    for to in _site_emails(s["id"]):
+        send_email(to, subject, body)
+
+
+# ALERT_EMAIL_V1: every new alert on a camera is emailed to its caregivers.
+_ALERT_TEXT = {
+    "fall": ("Possible fall", "VIGIL saw a possible fall. Please check on them now, and tap \"I'm checking\" in the app."),
+    "stillness": ("No movement", "VIGIL has seen no movement for an unusually long time. Please check on them."),
+    "bed_exit": ("Up during the night", "VIGIL saw them get up from bed during the night."),
+    "bed_sitting": ("Sitting up in bed", "VIGIL saw them sit up in bed during the night; they may be about to get up."),
+    "health_signal": ("Change noted", "VIGIL noticed a change from their usual pattern. Open the app to see it."),
+}
+
+
+def _alert_email_once():
+    c = sqlite3.connect(DB_PATH, timeout=10)
+    for s in list(sites().values()):
+        try:
+            r = requests.get(s["internal_url"].rstrip("/") + "/alerts/all",
+                             headers={"X-VIGIL-Key": s["api_key"]}, timeout=10)
+            alerts = r.json() if r.ok else []
+        except Exception:
+            continue
+        if not isinstance(alerts, list):
+            continue
+        ids = [int(a.get("id") or 0) for a in alerts]
+        top = max(ids) if ids else 0
+        row = c.execute("SELECT last_alert_id FROM site_state WHERE site_id=?", (s["id"],)).fetchone()
+        if row is None or top < (row[0] or 0):
+            c.execute("INSERT OR REPLACE INTO site_state VALUES (?,?)", (s["id"], top))   # start fresh, no backlog
+            c.commit()
+            continue
+        last = row[0] or 0
+        for a in sorted((a for a in alerts if int(a.get("id") or 0) > last), key=lambda a: int(a["id"])):
+            kind = a.get("alert_type")
+            payload = a.get("payload") or {}
+            if "TEST" in str(payload).upper() or kind not in _ALERT_TEXT:
+                continue
+            title, text = _ALERT_TEXT[kind]
+            if kind == "fall" and "floor" in str(payload).lower():
+                title, text = "Person on the floor", "Someone has been on the floor for over a minute. Please check on them now."
+            when = str(a.get("detected_at") or "")[:16].replace("T", " ")
+            _email_site(s, "VIGIL: %s (%s)" % (title, s.get("name", s["id"])),
+                        "%s\n\nCamera: %s\nTime: %s (camera's local time)\n\nOpen the VIGIL app to see details "
+                        "and the stick-figure replay.\n\n- VIGIL" % (text, s.get("name", s["id"]), when))
+        c.execute("INSERT OR REPLACE INTO site_state VALUES (?,?)", (s["id"], top))
+        c.commit()
+    c.close()
+
+
+def alert_email_loop():
+    while True:
+        if email_enabled():
+            try:
+                _alert_email_once()
+            except Exception as e:
+                print("[EMAIL] alert loop error: %s" % e, flush=True)
+        time.sleep(15)
+
+
 def _check_site(s):
     """A site is online when its camera pipeline sent a heartbeat recently."""
     try:
@@ -322,6 +605,11 @@ def watchdog_loop():
                 _push(s.get("ntfy_topic"), "VIGIL: monitoring offline",
                       "The camera '%s' stopped sending data. Falls will not be detected until it is back. "
                       "Check its power and Wi-Fi." % name, priority="urgent")
+                _email_site(s, "VIGIL: camera offline (%s)" % name,
+                            "The camera '%s' stopped sending data, so falls cannot be detected right now.\n\n"
+                            "Please check that the camera and the small VIGIL box next to it are plugged in, and that "
+                            "the Wi-Fi is working. Unplugging both for 10 seconds and plugging them back in fixes most "
+                            "problems.\n\n- VIGIL" % name)
             elif not online and prev.get("online") is False:
                 st["offline_since"] = prev.get("offline_since", now)
                 st["last_push"] = prev.get("last_push", now)
@@ -345,6 +633,8 @@ def watchdog_loop():
             elif online and prev.get("online") is False:
                 _push(s.get("ntfy_topic"), "VIGIL: monitoring restored",
                       "The camera '%s' is back online." % name, priority="default")
+                _email_site(s, "VIGIL: camera back online (%s)" % name,
+                            "The camera '%s' is working again.\n\n- VIGIL" % name)
             _STATUS[s["id"]] = st
         time.sleep(60)
 
@@ -358,6 +648,7 @@ def sites_status():
 init_db()
 if os.environ.get("VIGIL_WATCHDOG", "1") == "1":
     threading.Thread(target=watchdog_loop, daemon=True, name="watchdog").start()
+    threading.Thread(target=alert_email_loop, daemon=True, name="alert-email").start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, threaded=True)
