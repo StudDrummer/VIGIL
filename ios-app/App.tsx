@@ -2433,7 +2433,7 @@ export default function App() {
     }catch(_e){}
   },[]);
   // IN_VIEW_LIVE_V1: exactly who is in the camera picture right now.
-  const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number}[]>([]);
+  const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number;label?:string}[]>([]);
   const [identifying,setIdentifying]=useState(0);
   // IDENTITY_V6_APP
   const [inViewOthers,setInViewOthers]=useState<{label:string;track:number|null}[]>([]);
@@ -3216,7 +3216,7 @@ export default function App() {
                     style={{flexDirection:'row',alignItems:'center',gap:8,paddingLeft:5,paddingRight:14,paddingVertical:5,borderRadius:30,
                     backgroundColor:p.name?C.green+'18':C.card,borderWidth:1.5,borderColor:p.name?C.green+'66':C.border}}>
                     <PersonAvatar personId={p.id} name={p.name} serverUrl={urlRef.current} size={30} isResident={!!p.is_resident}/>
-                    <Text style={{color:C.text,fontWeight:'700',fontSize:14}}>{p.name??'New person'}</Text>
+                    <Text style={{color:C.text,fontWeight:'700',fontSize:14}}>{p.name??(inViewList.find(v=>v.id===p.id)?.label||'New person')}</Text>
                   </TouchableOpacity>
                 ))}
                 {(inViewOthers.length?inViewOthers:Array.from({length:identifying},()=>({label:'Identifying...',track:null}))).map((o,i)=>(
@@ -3233,9 +3233,9 @@ export default function App() {
                         {text:'Cancel',style:'cancel' as const},
                       ]);
                     }}
-                    style={{flexDirection:'row',alignItems:'center',gap:8,paddingHorizontal:14,paddingVertical:10,borderRadius:30,backgroundColor:C.card,borderWidth:1.5,borderColor:o.label==='Visitor'?C.blue+'66':C.border}}>
-                    {o.label==='Identifying...'&&<ActivityIndicator size="small" color={C.sub}/>}
-                    <Text style={{color:o.label==='Visitor'?C.blue:C.sub,fontWeight:'700',fontSize:14}}>{o.label}</Text>
+                    style={{flexDirection:'row',alignItems:'center',gap:8,paddingHorizontal:14,paddingVertical:10,borderRadius:30,backgroundColor:C.card,borderWidth:1.5,borderColor:o.label.startsWith('Visitor')?C.blue+'66':C.border}}>
+                    {o.label.startsWith('Identifying')&&<ActivityIndicator size="small" color={C.sub}/>}
+                    <Text style={{color:o.label.startsWith('Visitor')?C.blue:C.sub,fontWeight:'700',fontSize:14}}>{o.label}</Text>
                   </TouchableOpacity>
                 ))}
               </View>}

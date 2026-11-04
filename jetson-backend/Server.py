@@ -2865,6 +2865,11 @@ def persons_in_view():
     conn.close()
     labels = d.get("labels") or []
     tids = d.get("tids") or []
+    for i, p in enumerate(ids):                 # LABEL_NUMBERS_V1: "New person 2" etc.
+        if p and i < len(labels) and labels[i]:
+            for e in people:
+                if e["id"] == p and not e["name"]:
+                    e["label"] = labels[i]
     others = [{"label": (labels[i] if i < len(labels) and labels[i] else "Identifying..."),
                "track": (tids[i] if i < len(tids) else None)}
               for i, p in enumerate(ids) if not p]

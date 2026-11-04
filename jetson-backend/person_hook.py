@@ -1545,6 +1545,120 @@ def _v8_face_vetoes(tids, cur, new):
     return False
 
 
+# ---------------------------------------------------------------------------
+# ONE_NAME_V1: a name appears on at most one person in the picture.
+#
+# If two people in the same frame end up with the same name, the one with the
+# stronger claim keeps it (already holding it, face, clothing fingerprint) and
+# the other is shown as "Not sure" for a caregiver to fix with one tap.
+#
+# LABEL_NUMBERS_V1: when two or more people share an unnamed label ("Not sure",
+# "Identifying...", "Visitor", "New person"), they are numbered: "Not sure 1",
+# "Not sure 2". A number stays with the same person while they are in view,
+# and the camera picture and "In view now" in the app show the same numbers.
+# _DISPLAY is what the camera overlay draws: track id -> (person id, label).
+# ---------------------------------------------------------------------------
+_DISPLAY = {}
+_LBL_NUM = {}            # base label -> {key: number}
+
+
+def _claim(i, pid, tids):
+    t = tids[i] if (tids and i < len(tids)) else None
+    s = 0.0
+    if t is None:
+        return s
+    if _track_to_pid.get(t) == pid:
+        s += 1.0
+    try:
+        if _VI is not None:
+            own, q = _VI.MODEL.own_scores(t, [pid], since=time.time() - 6.0)
+            f = own.get(pid, {}).get("face")
+            if f is not None:
+                s += q.get("face", 0.0) * _VI.MODEL.cal["face"].vote(f)
+        if _VR is not None and _trk_fp.get(t) and len(_VR.GALLERY.vecs.get(pid, ())):
+            a = _VR.GALLERY.score(np.array(_trk_fp[t][-6:]), pid)
+            if a is not None:
+                s += 5.0 * float(a)
+    except Exception:
+        pass
+    return s
+
+
+def _one_name_each(assignments, tids):
+    out = list(assignments)
+    where = {}
+    for i, (pid, _h) in enumerate(out):
+        if pid is not None:
+            where.setdefault(pid, []).append(i)
+    for pid, idx in where.items():
+        if len(idx) < 2:
+            continue
+        keep = max(idx, key=lambda i: (_claim(i, pid, tids), -i))
+        for i in idx:
+            if i == keep:
+                continue
+            t = tids[i] if (tids and i < len(tids)) else None
+            if t is not None:
+                if _track_to_pid.get(t) == pid:
+                    _track_to_pid.pop(t, None)
+                _trk_status[t] = "Not sure"
+            out[i] = (None, out[i][1])
+            print("[ONE_NAME] %s was on two people; kept track %s, track %s is now Not sure" % (
+                pid, tids[keep] if tids and keep < len(tids) else None, t), flush=True)
+    # The lasting track map must agree with what is shown, so nothing can draw
+    # a name on a track that does not hold it this frame.
+    for i, (pid, _h) in enumerate(out):
+        t = tids[i] if (tids and i < len(tids)) else None
+        if t is not None and pid is None and t in _track_to_pid and _track_to_pid[t] in {p for p, _ in out if p}:
+            _track_to_pid.pop(t, None)
+    return out
+
+
+def _labels(assignments, tids, named):
+    """Display label for every entry (a name is resolved later from the
+    person id; this is the fallback text), with numbers on repeats."""
+    base, keys = [], []
+    for i, (pid, _h) in enumerate(assignments):
+        t = tids[i] if (tids and i < len(tids)) else None
+        if pid is not None and pid in named:
+            base.append(None); keys.append(None)
+        elif pid is not None:
+            base.append("New person"); keys.append(("p", pid))
+        else:
+            base.append(_trk_status.get(t) or "Identifying..."); keys.append(("t", t if t is not None else "i%d" % i))
+    counts = {}
+    for b in base:
+        if b:
+            counts[b] = counts.get(b, 0) + 1
+    # forget numbers of people no longer shown under that label, first, so a
+    # freed number can be given to the next person
+    for b in list(_LBL_NUM):
+        live = {k for bb, k in zip(base, keys) if bb == b}
+        if counts.get(b, 0) < 2:
+            _LBL_NUM.pop(b, None)
+        else:
+            for k in list(_LBL_NUM[b]):
+                if k not in live:
+                    _LBL_NUM[b].pop(k, None)
+    labels = []
+    for b, k in zip(base, keys):
+        if b is None:
+            labels.append(None)
+            continue
+        if counts[b] < 2:
+            labels.append(b)
+            continue
+        m = _LBL_NUM.setdefault(b, {})
+        if k not in m:
+            used = set(m.values())
+            n = 1
+            while n in used:
+                n += 1
+            m[k] = n
+        labels.append("%s %d" % (b, m[k]))
+    return labels
+
+
 def _v8_learn(tid, dst, wrong=None):
     """A caregiver confirmed or corrected this track: every signal learns.
     Call BEFORE the track's looks are added to dst's memories."""
@@ -1708,6 +1822,7 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             _current_frame = frame
         if not all_persons:
             _last_main_id[0] = None
+            _DISPLAY.clear()
             _write_in_view([])
             return None
 
@@ -1926,12 +2041,23 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             frame_assignments = _v8_verify(frame_assignments, track_ids)
         except Exception as _e8:
             print("[IDENTITY8] verify error: %s" % _e8, flush=True)
+        try:                                                     # ONE_NAME_V1
+            frame_assignments = _one_name_each(frame_assignments, track_ids)
+        except Exception as _e9:
+            print("[ONE_NAME] error: %s" % _e9, flush=True)
+        try:                                                     # LABEL_NUMBERS_V1
+            _lbls = _labels(frame_assignments, track_ids, _named_ids())
+        except Exception:
+            _lbls = [None if p else ((_trk_status.get(track_ids[_j]) if (track_ids and _j < len(track_ids)) else None)
+                                     or "Identifying...") for _j, (p, _h) in enumerate(frame_assignments)]
+        _DISPLAY.clear()
+        for _j, (_p, _h) in enumerate(frame_assignments):
+            if track_ids and _j < len(track_ids) and track_ids[_j] is not None:
+                _DISPLAY[track_ids[_j]] = (_p, _lbls[_j])
 
         # all_persons[0] is the largest = the resident being measured for gait
         main_id = frame_assignments[0][0] if frame_assignments else None
-        _write_in_view([a[0] for a in frame_assignments],
-                       [(_trk_status.get(track_ids[_j]) if (track_ids and _j < len(track_ids)) else None)
-                        for _j in range(len(frame_assignments))],
+        _write_in_view([a[0] for a in frame_assignments], _lbls,
                        [(track_ids[_j] if (track_ids and _j < len(track_ids)) else None)
                         for _j in range(len(frame_assignments))])
         _last_main_id[0] = main_id
