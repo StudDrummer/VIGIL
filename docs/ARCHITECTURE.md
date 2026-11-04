@@ -47,4 +47,5 @@ this home earns a bigger vote; one that does not is turned down or off.
 
 Face recognition is per camera: `POST /identity/face {"on": false}` (or the
 switch in the app's Settings) turns it off and deletes every stored face
-signature. No face images are kept by the identity model, only the numbers.
+signature. The identity model keeps no face images, only the numbers (the
+small per-person photo shown in the app is separate and existed before).

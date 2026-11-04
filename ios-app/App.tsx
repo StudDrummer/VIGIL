@@ -3878,7 +3878,7 @@ export default function App() {
           trackColor={{true:C.green,false:C.border}}/>
       </View>
       <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginTop:8,lineHeight:18}}>
-        When someone faces the camera, VIGIL uses their face to tell family members apart, even in new clothes. Only numbers are kept, never face pictures. Every confirm or correct teaches it.
+        When someone faces the camera, VIGIL uses their face to tell family members apart, even in new clothes. Face measurements are kept as numbers only. Every confirm or correct teaches it.
       </Text>
       <Text style={s.secHeader}>Setup Guide</Text>
       {[
