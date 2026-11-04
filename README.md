@@ -97,14 +97,33 @@ height is stable, so the two signals cover each other.
 **Identity, v6.** In daily family use that still failed: VIGIL labelled
 the developer as his mother, and once asked "who is this?" 23 times in a
 day. A wrong name corrupts two people's baselines, so it is not cosmetic.
-Face recognition was rejected (biometric templates of vulnerable adults).
-Instead, Meta's DINOv2 turns each body crop into a 384-number appearance
+Face recognition was rejected at first (biometric templates of vulnerable
+adults). Instead, Meta's DINOv2 turns each body crop into a 384-number appearance
 fingerprint; each person keeps a memory of up to 80, and every caregiver
 confirmation or correction is pinned permanently. The pass mark is learned
 from how alike different named people are. When two people fit, VIGIL
 shows "Not sure" instead of guessing, and only strong matches or taps
 teach it a new look, so one wrong guess cannot snowball. See
 `jetson-backend/vigil_reid.py`.
+
+**Identity, v8.** Appearance alone still mixed up family members in
+similar clothes, so identity is now one decision from five cues: the
+appearance fingerprint, face (OpenCV YuNet + SFace, used only when a face
+is clearly visible), body proportions, true height, and walking pattern.
+Each cue's score is turned into evidence using distributions learned in
+that house: every caregiver correction, confirmation or naming adds
+"same" examples for that person and "different" examples against everyone
+else, and a cue that does not separate the people in that house is
+weighted down. On LFW photos shrunk to room-distance face sizes (32 px
+wide), the face cue kept 99% of true matches and let through 1.3% of
+different people (`tests/calibrate_face.py`); real rooms will be harder,
+so the starting values are deliberately cautious. Face matching was a
+deliberate change from v6: templates are numbers, stay with that camera,
+are deleted with the person, and face matching can be turned off per
+camera (`vigilctl.py edit-camera homeXX --face off`, or `VIGIL_FACE_ID=0`
+on a Jetson). One name is never shown on two people; several unidentified
+people are shown as "Not sure 1", "Not sure 2" on both the video and the
+In view now list. See `jetson-backend/vigil_identity.py`.
 
 **Frame rate.** Profiling showed inference at 36 ms and 211 ms spent
 flushing stale RTSP frames. A threaded reader that keeps only the newest
@@ -140,12 +159,14 @@ methodology cannot be validated should not ship.
 
 ## Privacy
 
-Video is processed on the device and never recorded or sent to the cloud.
-The app's live view shows a stick figure by default; a caregiver can open
-the camera view over a private encrypted network (Tailscale). Only
-computed metrics are kept, in a local database. Identity uses appearance
-fingerprints (numbers, no images), never facial recognition. The camera is fixed and
-does not follow anyone.
+Video is analysed as it arrives, on the device in the room or, with a
+relay box, on the VIGIL cloud server over an encrypted link, and is never
+recorded. The app's live view shows a stick figure by default; a caregiver
+can open the camera view over an encrypted connection. Only computed
+metrics are kept, plus identity templates (numbers, no images): appearance,
+body proportions, height, walking pattern and, where it is on, face. They
+stay with that camera and are deleted with the person. The camera is fixed
+and does not follow anyone.
 
 ---
 

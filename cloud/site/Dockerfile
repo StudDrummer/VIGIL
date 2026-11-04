@@ -12,12 +12,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision \
- && pip install "ultralytics>=8.0" "opencv-python-headless>=4.6" "numpy>=1.24,<2" \
+ && pip install "ultralytics>=8.0" "numpy>=1.24,<2" \
         "flask>=3.0" "requests>=2.31" "scipy>=1.11" "scikit-learn>=1.3" "twilio>=9.0" "lap>=0.5.12" \
- && pip uninstall -y opencv-python || true
+ && pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true \
+ && pip install "opencv-python-headless>=4.8,<4.12" "numpy>=1.24,<2" \
+ && python -c "import cv2; assert hasattr(cv2, 'FaceDetectorYN'); print('OpenCV', cv2.__version__)"
 
 WORKDIR /opt/vigil-code
 COPY jetson-backend/*.py jetson-backend/vigil_bytetrack.yaml ./
+
+# IDENTITY_V8 face matching models (OpenCV Zoo: YuNet MIT, SFace Apache-2.0).
+# Turned off per camera with: vigilctl.py edit-camera homeXX --face off
+RUN mkdir -p models && cd models \
+ && Z=https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models \
+ && curl -fsSL -o face_detection_yunet_2023mar.onnx $Z/face_detection_yunet/face_detection_yunet_2023mar.onnx \
+ && curl -fsSL -o face_recognition_sface_2021dec.onnx $Z/face_recognition_sface/face_recognition_sface_2021dec.onnx \
+ && echo "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4  face_detection_yunet_2023mar.onnx" | sha256sum -c - \
+ && echo "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  face_recognition_sface_2021dec.onnx" | sha256sum -c -
 COPY cloud/site/site_entry.sh cloud/site/site_jobs.py ./
 
 # Bake the models into the image so a site starts without downloading anything.

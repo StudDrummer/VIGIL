@@ -1092,9 +1092,17 @@ def person_detect():
 def identify_person(person_id):
     data = request.get_json() or {}
     conn = get_db()
+    was = conn.execute("SELECT name FROM persons WHERE id=?", (person_id,)).fetchone()
     conn.execute("""UPDATE persons SET name=?, is_resident=?,
         identified_at=datetime('now') WHERE id=?""",
         (data.get("name"), 1 if data.get("is_resident") else 0, person_id))
+    # IDENTITY_V8: naming someone who is in view right now teaches every cue,
+    # the same way a "Yes, this is ..." confirmation does.
+    if (data.get("name") or "").strip() and not (was and (was["name"] or "").strip()):
+        conn.execute("""CREATE TABLE IF NOT EXISTS person_corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
+            created_at TEXT DEFAULT (datetime('now')), applied INTEGER DEFAULT 0)""")
+        conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, ?)", (person_id, person_id))
     conn.commit(); conn.close()
     return jsonify({"status":"ok"})
 
@@ -2865,10 +2873,11 @@ def persons_in_view():
     conn.close()
     labels = d.get("labels") or []
     tids = d.get("tids") or []
+    dup = lambda i: i < len(labels) and labels[i] == "__dup__"      # IDENTITY_V8: one body drawn twice
     others = [{"label": (labels[i] if i < len(labels) and labels[i] else "Identifying..."),
                "track": (tids[i] if i < len(tids) else None)}
-              for i, p in enumerate(ids) if not p]
-    return jsonify({"people": people, "identifying": sum(1 for p in ids if not p),
+              for i, p in enumerate(ids) if not p and not dup(i)]
+    return jsonify({"people": people, "identifying": len(others),
                     "others": others, "fresh": True})
 
 
@@ -3071,12 +3080,18 @@ def set_person_photo(person_id):
 @app.route("/identity/learning", methods=["GET"])
 @require_api_key
 def identity_learning():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "identity_model.json")
-    try:
-        with open(path) as f:
-            return jsonify({"status": "ok", "model": json.load(f)})
+    here = os.path.dirname(os.path.abspath(__file__))
+    v8 = None
+    try:                                     # IDENTITY_V8: what each cue has learned in this house
+        with open(os.path.join(here, "identity_v8.json")) as f:
+            v8 = json.load(f).get("report")
     except (OSError, ValueError):
-        return jsonify({"status": "ok", "model": None,
+        pass
+    try:
+        with open(os.path.join(here, "identity_model.json")) as f:
+            return jsonify({"status": "ok", "model": json.load(f), "cues": v8})
+    except (OSError, ValueError):
+        return jsonify({"status": "ok", "model": None, "cues": v8,
                         "note": "Learning starts once two named people have 6 confirmed or corrected looks each."})
 
 

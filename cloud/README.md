@@ -95,6 +95,11 @@ It prints:
 A camera that can push RTMP by itself (Amcrest, Dahua): `camera-url home01`
 also prints the RTMP address to paste in its Setup > Network > RTMP page.
 
+Face matching (one of five cues for telling people apart, see the main
+README) is on by default. Tell the family or facility; turn it off for a
+camera with `--no-face` when adding it, or later with
+`python3 vigilctl.py edit-camera home01 --face off`.
+
 For a hospital bed, add `--hospital` (bed-exit alerts at any hour, not only at
 night). The on-the-floor alert is on by default after 60 s; change it with
 `--floor-alert-s 90`, or `0` to turn it off.

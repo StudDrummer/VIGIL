@@ -1,6 +1,6 @@
 #!/bin/bash
-# Turns a Raspberry Pi (Zero 2 W or better, Raspberry Pi OS Lite, Bookworm or
-# later) into a VIGIL relay box. Run on the Pi:
+# Turns a Raspberry Pi (Pi 3 Model B, Zero 2 W or newer, Raspberry Pi OS Lite,
+# Bookworm or later) into a VIGIL relay box. Run on the Pi:
 #
 #   sudo bash install.sh relay_home01.env
 #
@@ -23,7 +23,7 @@ WIFI_PASS=""
 
 echo "== Installing ffmpeg"
 apt-get update -qq
-apt-get install -y -qq ffmpeg python3 network-manager >/dev/null
+apt-get install -y -qq ffmpeg python3 network-manager dnsmasq-base >/dev/null
 
 echo "== Installing VIGIL relay"
 install -d /opt/vigil-relay /var/lib/vigil-relay
@@ -64,8 +64,24 @@ printf "[connection]\nwifi.powersave=2\n" > /etc/NetworkManager/conf.d/vigil-wif
 # Logs in memory only: saves the SD card.
 mkdir -p /etc/systemd/journald.conf.d
 printf "[Journal]\nStorage=volatile\nRuntimeMaxUse=20M\n" > /etc/systemd/journald.conf.d/vigil.conf
-# A weekly fresh start, Sunday 4:00 local time.
-echo "0 4 * * 0 root /sbin/shutdown -r now" > /etc/cron.d/vigil-weekly-reboot
+# A weekly fresh start, Sunday 4:00 local time (a systemd timer: newer
+# Raspberry Pi OS Lite images do not always include cron).
+cat > /etc/systemd/system/vigil-weekly-reboot.service <<'EOF2'
+[Unit]
+Description=VIGIL weekly fresh start
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reboot
+EOF2
+cat > /etc/systemd/system/vigil-weekly-reboot.timer <<'EOF2'
+[Unit]
+Description=VIGIL weekly fresh start, Sunday 4:00
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=false
+[Install]
+WantedBy=timers.target
+EOF2
 
 if [ -n "$WIFI_SSID" ]; then
   echo "== Saving Wi-Fi '$WIFI_SSID' for when it arrives"
@@ -82,7 +98,7 @@ if [ -n "$TS_KEY" ]; then
 fi
 
 systemctl daemon-reload
-systemctl enable --now vigil-relay.service vigil-wifi-setup.service
+systemctl enable --now vigil-relay.service vigil-wifi-setup.service vigil-weekly-reboot.timer
 echo
 echo "Done. Within a minute the green light should go steady (sending video)."
 echo "Check:  journalctl -u vigil-relay -n 20     and     cat /var/lib/vigil-relay/status.json"

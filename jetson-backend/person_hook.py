@@ -475,6 +475,11 @@ def _apply_corrections():
                     _VR.GALLERY.save(force=True)
                 _PROP.pop(src, None)
                 _PROP_VER.pop(src, None)
+                if _V8 is not None:                                   # IDENTITY_V8
+                    _V8.drop(src)
+                    for _k, _v in list(_V8_VER.items()):
+                        if _v == src:
+                            _V8_VER.pop(_k, None)
                 c.execute("UPDATE person_corrections SET applied=1 WHERE id=?", (cid,))
                 print("[CORRECTION] deleted %s" % src, flush=True)
                 continue
@@ -493,6 +498,7 @@ def _apply_corrections():
                         _VR.GALLERY.add(dst, np.array(_trk_fp[_t][-8:]), pin=True)
                         _VR.GALLERY.save(force=True)
                     _prop_learn(_t, dst)                          # LEARN_V2
+                    _v8_learn_track(_t, dst, _named_ids() | {dst}, "named")   # IDENTITY_V8
                     print("[CORRECTION] track %s -> %s" % (_t, dst), flush=True)
                 except Exception as _e:
                     print("[CORRECTION] track error: %s" % _e, flush=True)
@@ -518,10 +524,17 @@ def _apply_corrections():
                         _body_add(dst, _b)
                 d.last_seen = now
                 d.last_detected = now
+            if _V8 is not None and src != dst:                    # IDENTITY_V8: merge what was learned
+                for _gal in (_V8.face_gal, _V8.walk_gal):
+                    if src in _gal:
+                        _gal.setdefault(dst, []).extend(_gal.pop(src))
+                _V8.dirty = True
             for k, v in list(_track_to_pid.items()):
                 if v == src:
                     _track_to_pid[k] = dst
                     _prop_learn(k, dst, wrong=(src if src != dst else None))   # LEARN_V2
+                    _v8_learn_track(k, dst, _named_ids() | {dst},
+                                    "confirmed" if src == dst else "corrected from %s" % src)
                     _fpk = _trk_fp.get(k)
                     if _VR is not None and _fpk:
                         if src != dst:
@@ -1116,6 +1129,10 @@ def _v7_verify(assignments, tids):
             _track_to_pid[t] = new
             out[i] = (new, out[i][1])
             _TRACK_BAD.pop(t, None)
+            try:
+                _V8_VER.pop(t, None)                 # IDENTITY_V8: no longer what the caregiver confirmed
+            except Exception:
+                pass
     print("[REID7] SWAP %s (gain %.3f%s)" % (
         ", ".join("track %s: %s -> %s" % (t, old, best_perm[k]) for k, (_i, t, old) in enumerate(cand)
                   if best_perm[k] != old), best - cur, ", after crossing" if crossed else ""), flush=True)
@@ -1270,6 +1287,363 @@ def _reid6_early(tid, ev, used):
     return False
 
 
+# ---------------------------------------------------------------------------
+# IDENTITY_V8: one decision from every cue (vigil_identity.py), learned from
+# every correction, one name per person in view, numbered "Not sure" labels.
+# ---------------------------------------------------------------------------
+try:
+    import vigil_identity as _VI
+    _V8 = _VI.Fusion()
+    _V8_FACE = _VI.FaceID()
+    _V8_WALK = _VI.WalkTracker()
+    print("[V8] identity fusion ready; face matching %s" % (
+        "on" if _V8_FACE.ok else "off (%s)" % _V8_FACE.why), flush=True)
+except Exception as _e_v8:
+    _V8 = _V8_FACE = _V8_WALK = None
+    print("[V8] not available: %s" % _e_v8, flush=True)
+
+_V8_TF = {}        # track -> recent (face vector, quality)
+_V8_TH = {}        # track -> recent standing-height ratios
+_V8_VER = {}       # track -> person the caregiver said this track is (until a crossing)
+_V8_ST = {"last_check": 0.0, "votes": {}, "against": {}, "learned": {}, "frame": 0}
+V8_NAME = 4.0      # evidence needed to give a name on fused evidence alone
+V8_MARGIN = 3.0    # ... and how far ahead of the next person it must be
+V8_SWAP = 3.0      # gain needed to swap names between people in view
+V8_AGAINST = -3.5  # evidence against a name that releases it
+_FRAME_LABELS = {"t": 0.0, "by_tid": {}}
+_NS_NUM = {}       # track -> its number among several "Not sure" people
+
+
+def _v8_observe(all_persons, track_ids, boxes, frame):
+    """Collect face, height and walk measurements for each track this frame."""
+    if _V8 is None or not track_ids:
+        return
+    _V8_ST["frame"] += 1
+    if _VR is not None and _VR.EMBEDDER.kind:
+        try:
+            _V8.appearance_acc = float(_VR.GALLERY.thresholds(_VR.EMBEDDER.kind)[0])
+        except Exception:
+            pass
+    now = time.time()
+    fh = frame.shape[0] if frame is not None else None
+    faces_left = 2          # about 25 ms each on a CPU; at most two a frame
+    for i, kp in enumerate(all_persons):
+        t = track_ids[i] if i < len(track_ids) else None
+        if t is None or _is_occluded(i, boxes) or _v7_hold(t):
+            continue
+        try:
+            _V8_WALK.observe(t, kp, now)
+            bs = _stand_height(kp, fh)
+            if bs is not None:
+                r = _ratio(bs)
+                if r is not None:
+                    q = _V8_TH.setdefault(t, deque(maxlen=40))
+                    q.append(r)
+            if _V8_FACE.ok and faces_left > 0 and (_V8_ST["frame"] + i) % 4 == 0:
+                faces_left -= 1
+                fe = _V8_FACE.embed(frame, kp)
+                if fe is not None:
+                    _V8_TF.setdefault(t, deque(maxlen=12)).append(fe)
+        except Exception:
+            pass
+    if len(_V8_TF) > 300 or len(_V8_TH) > 300:
+        live = set(t for t in track_ids if t is not None)
+        for d in (_V8_TF, _V8_TH):
+            for t in list(d):
+                if t not in live:
+                    d.pop(t, None)
+
+
+def _v8_raw(tid, pid):
+    """Raw score of each cue for 'track tid is person pid' (None = no data)."""
+    raw = {}
+    try:
+        fps = _trk_fp.get(tid, [])
+        if _VR is not None and _VR.EMBEDDER.kind and len(fps) >= 3 and len(_VR.GALLERY.vecs.get(pid, ())) > 0:
+            raw["appearance"] = _VR.GALLERY.score(np.array(fps[-6:]), pid)
+    except Exception:
+        pass
+    try:
+        raw["face"] = _V8.face_sim(list(_V8_TF.get(tid, ())), pid)
+    except Exception:
+        pass
+    try:
+        tq = _PROP_TRK.get(tid)
+        if tq and len(tq) >= 10:
+            ref = _prop_ref(pid, verified_only=True) or _prop_ref(pid)
+            if ref is not None:
+                d = _prop_dist(np.nanmedian(np.array(tq), axis=0), ref)
+                raw["body"] = None if d is None else -d
+    except Exception:
+        pass
+    try:
+        th = _V8_TH.get(tid)
+        pr = _body_ratio(pid)
+        if th and len(th) >= 8 and pr:
+            raw["height"] = -abs(float(np.median(th)) - pr) / pr
+    except Exception:
+        pass
+    try:
+        raw["walk"] = _V8.walk_sim(_V8_WALK.signature(tid), pid)
+    except Exception:
+        pass
+    return {k: v for k, v in raw.items() if v is not None}
+
+
+def _v8_rank(tid, cands):
+    out = []
+    for p in cands:
+        tot, ev = _V8.evidence(_v8_raw(tid, p))
+        if ev:
+            out.append((tot, p, ev))
+    out.sort(key=lambda x: -x[0])
+    return out
+
+
+def _v8_txt(rk, n=2):
+    return "; ".join("%s %+.1f (%s)" % (p, t, " ".join("%s%+.1f" % (k[:4], v) for k, v in sorted(e.items())))
+                     for t, p, e in rk[:n])
+
+
+def _v8_decide_new(tid, matched, why, used):
+    """Second opinion on a track nobody has claimed yet."""
+    if _V8 is None or tid is None:
+        return matched, why
+    m = _read_mode()
+    named = [p for p in _named_ids() if p in _signatures and p not in used]
+    if m["mode"] == "resident" and m["resident"]:
+        named = [p for p in named if p == m["resident"]]
+    if not named:
+        return matched, why
+    rk = _v8_rank(tid, named)
+    if not rk:
+        return matched, why
+    best_t, best_p, best_e = rk[0]
+    second = rk[1][0] if len(rk) > 1 else 0.0
+    txt = _v8_txt(rk)
+    strong = best_e.get("face", 0) >= 1.5 or best_e.get("appearance", 0) >= 1.5
+    if matched not in (None, "?"):
+        mine = next((t for t, p, _e in rk if p == matched), None)
+        if mine is None:
+            return matched, why
+        if best_p != matched and best_t >= 2.0 and best_t - mine >= V8_MARGIN:
+            if best_e.get("face", 0) >= 2.0 and best_t - mine >= V8_MARGIN + 1:
+                return best_p, "V8 overrides %s | %s" % (matched, txt)
+            return "?", why + " | V8 doubts: " + txt
+        if mine <= V8_AGAINST:
+            return "?", why + " | V8 against: " + txt
+        return matched, why
+    if best_t >= V8_NAME and best_t - second >= V8_MARGIN and len(best_e) >= 2 and strong:
+        return best_p, "V8 " + txt
+    return matched, why
+
+
+def _v8_learn_track(tid, pid, others, tag):
+    """A caregiver said track tid is pid: every cue learns from it."""
+    if _V8 is None or tid is None or pid is None:
+        return
+    try:
+        raw_same = _v8_raw(tid, pid)
+        for s_, x in raw_same.items():
+            _V8.add_example(s_, x, True)
+        nd = 0
+        for q in others:
+            if q == pid:
+                continue
+            for s_, x in _v8_raw(tid, q).items():
+                _V8.add_example(s_, x, False)
+                nd += 1
+        nf = _V8.learn_face(pid, list(_V8_TF.get(tid, ())))
+        nw = _V8.learn_walk(pid, _V8_WALK.signature(tid))
+        _V8_VER[tid] = pid
+        _V8.save(force=True)
+        print("[LEARN] V8 %s: track %s is %s | cues %s | %d comparisons with others | +%d face views%s"
+              % (tag, tid, pid, ",".join(sorted(raw_same)) or "none yet", nd, nf, " +walk" if nw else ""),
+              flush=True)
+    except Exception as e:
+        print("[LEARN] V8 error: %s" % e, flush=True)
+
+
+def _v8_check(assignments, tids):
+    """Every 2 s: re-check the names on everyone in view with all cues, keep
+    learning from people the caregiver confirmed, and release a name the
+    evidence clearly contradicts."""
+    if _V8 is None or not tids:
+        return assignments
+    now = time.time()
+    if now - _V8_ST["last_check"] < 2.0:
+        return assignments
+    _V8_ST["last_check"] = now
+    vis = [(i, tids[i], pid) for i, (pid, _h) in enumerate(assignments)
+           if pid is not None and i < len(tids) and tids[i] is not None and not _v7_hold(tids[i])]
+    if not vis:
+        return assignments
+    named_all = [p for p in _named_ids() if p in _signatures]
+    out = list(assignments)
+    # 1) learning from caregiver-confirmed tracks, every 30 s each
+    for _i, t, p in vis:
+        if _V8_VER.get(t) == p and now - _V8_ST["learned"].get(t, 0) > 30:
+            _V8_ST["learned"][t] = now
+            for s_, x in _v8_raw(t, p).items():
+                _V8.add_example(s_, x, True)
+            for q in named_all:
+                if q != p:
+                    for s_, x in _v8_raw(t, q).items():
+                        _V8.add_example(s_, x, False)
+            _V8.learn_face(p, list(_V8_TF.get(t, ())))
+            _V8.learn_walk(p, _V8_WALK.signature(t))
+    _V8.save()
+    if _SINGLE_MODE[0]:
+        return out
+    # 2) joint check of the names in view
+    names = [p for _i, _t, p in vis]
+    sc = {}
+    for _i, t, _p in vis:
+        for p in set(names):
+            tot, ev = _V8.evidence(_v8_raw(t, p))
+            sc[(t, p)] = (tot, ev)
+    if len(vis) >= 2 and len(vis) <= 5:
+        import itertools
+        cur = sum(sc[(t, p)][0] for _i, t, p in vis)
+        best, best_perm = cur, None
+        for perm in itertools.permutations(names):
+            tot = sum(sc[(t, perm[k])][0] for k, (_i, t, _p) in enumerate(vis))
+            if tot > best + 1e-9:
+                best, best_perm = tot, perm
+        if best_perm is not None and best - cur >= V8_SWAP:
+            key = tuple(best_perm)
+            _V8_ST["votes"][key] = _V8_ST["votes"].get(key, 0) + 1
+            if _V8_ST["votes"][key] >= 2:
+                _V8_ST["votes"].clear()
+                moved = []
+                for k, (i, t, old) in enumerate(vis):
+                    new = best_perm[k]
+                    if new != old:
+                        _track_to_pid[t] = new
+                        out[i] = (new, out[i][1])
+                        _V8_VER.pop(t, None)
+                        moved.append("track %s: %s -> %s" % (t, old, new))
+                print("[V8] SWAP %s (gain %.1f)" % (", ".join(moved), best - cur), flush=True)
+                return out
+        else:
+            _V8_ST["votes"].clear()
+    # 3) a name the evidence clearly contradicts is released for re-identification
+    for i, t, p in vis:
+        tot, ev = sc[(t, p)]
+        verified = _V8_VER.get(t) == p
+        against = tot <= V8_AGAINST and (not verified or ev.get("face", 0) <= -2.5)
+        if against:
+            _V8_ST["against"][t] = _V8_ST["against"].get(t, 0) + 1
+        else:
+            _V8_ST["against"].pop(t, None)
+        if _V8_ST["against"].get(t, 0) >= 2:
+            _V8_ST["against"].pop(t, None)
+            _track_to_pid.pop(t, None)
+            _V8_VER.pop(t, None)
+            _trk_status[t] = "Not sure"
+            _evidence.pop(t, None)
+            out[i] = (None, out[i][1])
+            print("[V8] track %s released from %s: evidence %+.1f (%s)" % (
+                t, p, tot, " ".join("%s%+.1f" % (k[:4], v) for k, v in sorted(ev.items()))), flush=True)
+    if len(_V8_ST["learned"]) > 300:
+        _V8_ST["learned"].clear()
+    return out
+
+
+def _same_body(a, b):
+    """Two skeletons drawn on one person (the detector doubled them)."""
+    try:
+        a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+        m = (a[:, 2] >= 0.3) & (b[:, 2] >= 0.3)
+        if m.sum() < 6:
+            return False
+        ta = _kp_box(a)
+        if ta is None:
+            return False
+        size = max(ta[2] - ta[0], ta[3] - ta[1], 1.0)
+        d = np.linalg.norm(a[m, :2] - b[m, :2], axis=1)
+        return float(np.median(d)) < 0.06 * size
+    except Exception:
+        return False
+
+
+def _v8_finalize(assignments, tids, all_persons):
+    """One name per person in view. Doubled skeletons are hidden; if two people
+    still carry one name, the better-supported one keeps it and the other
+    becomes "Not sure" for the caregiver to fix. Several "Not sure" people are
+    numbered, the same way on the video and in the In view now list."""
+    out = list(assignments)
+    n = len(out)
+    hidden = set()
+    for i in range(n):
+        for j in range(i + 1, n):
+            if j not in hidden and i not in hidden and _same_body(all_persons[i], all_persons[j]):
+                hidden.add(j)
+                out[j] = (None, None)
+    owner = {}
+    for i, (pid, _h) in enumerate(out):
+        if pid is None or i in hidden:
+            continue
+        if pid not in owner:
+            owner[pid] = i
+            continue
+        j = owner[pid]
+        ti = tids[i] if tids and i < len(tids) else None
+        tj = tids[j] if tids and j < len(tids) else None
+
+        def support(k, t):
+            if _V8_VER.get(t) == pid:
+                return 99.0
+            if _V8 is not None and t is not None:
+                return _V8.evidence(_v8_raw(t, pid))[0]
+            return 0.0
+        keep, lose = (i, j) if support(i, ti) > support(j, tj) else (j, i)
+        tl = tids[lose] if tids and lose < len(tids) else None
+        out[lose] = (None, out[lose][1])
+        owner[pid] = keep
+        if tl is not None:
+            if _track_to_pid.get(tl) == pid:
+                _track_to_pid.pop(tl, None)
+            _trk_status[tl] = "Not sure"
+            _evidence.pop(tl, None)
+        print("[V8] %s was on two people; kept on track %s, track %s is now Not sure" % (
+            pid, tids[keep] if tids and keep < len(tids) else "?", tl), flush=True)
+    labels = []
+    unsure = []
+    for i, (pid, _h) in enumerate(out):
+        t = tids[i] if tids and i < len(tids) else None
+        if i in hidden:
+            labels.append("__dup__")
+            continue
+        if pid is not None:
+            labels.append(None)
+            continue
+        st = _trk_status.get(t) if t is not None else None
+        labels.append(st)
+        if st == "Not sure":
+            unsure.append((i, t))
+    if len(unsure) >= 2:
+        taken = {_NS_NUM[t] for _i, t in unsure if t in _NS_NUM}
+        for i, t in unsure:
+            if t not in _NS_NUM or list(_NS_NUM[x] for _j, x in unsure).count(_NS_NUM[t]) > 1:
+                k = 1
+                while k in taken:
+                    k += 1
+                _NS_NUM[t] = k
+                taken.add(k)
+            labels[i] = "Not sure %d" % _NS_NUM[t]
+    else:
+        _NS_NUM.clear()
+    by_tid = {}
+    for i, (pid, _h) in enumerate(out):
+        t = tids[i] if tids and i < len(tids) else None
+        if t is not None:
+            by_tid[t] = (pid, labels[i])
+    _FRAME_LABELS["t"] = time.time()
+    _FRAME_LABELS["by_tid"] = by_tid
+    return out, labels
+
+
 def reload_known_persons() -> None:
     """Load named persons from DB at startup so IDs persist across restarts."""
     import sqlite3
@@ -1413,6 +1787,8 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             _current_frame = frame
         if not all_persons:
             _last_main_id[0] = None
+            _FRAME_LABELS["t"] = time.time()
+            _FRAME_LABELS["by_tid"] = {}
             _write_in_view([])
             return None
 
@@ -1441,6 +1817,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                     _want.append((_t, _k))
             if _want:
                 _fps = _fp_for(_want[:4], _current_frame)
+        try:                                                     # IDENTITY_V8
+            _v8_observe(all_persons, track_ids, _boxes, _current_frame)
+        except Exception as _e8o:
+            print("[V8] observe error: %s" % _e8o, flush=True)
         for _idx, kp in enumerate(all_persons):
             height_px = _estimate_height(kp)
             shape_r = _estimate_shape(kp)
@@ -1533,6 +1913,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                         matched, _why = "?", _why + " | " + _vw
                 except Exception:
                     pass
+            try:                                                 # IDENTITY_V8
+                matched, _why = _v8_decide_new(tid, matched, _why, _used_this_frame)
+            except Exception as _e8d:
+                print("[V8] decide error: %s" % _e8d, flush=True)
             if matched == "?":
                 _trk_status[tid] = "Not sure"
                 ev["n"] = min(ev["n"], _REID_GIVE_UP - 1)
@@ -1618,12 +2002,20 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             frame_assignments = _v7_verify(frame_assignments, track_ids)
         except Exception as _e7:
             print("[REID7] verify error: %s" % _e7, flush=True)
+        try:                                                     # IDENTITY_V8
+            frame_assignments = _v8_check(frame_assignments, track_ids)
+        except Exception as _e8c:
+            print("[V8] check error: %s" % _e8c, flush=True)
+        try:
+            frame_assignments, _labels8 = _v8_finalize(frame_assignments, track_ids, all_persons)
+        except Exception as _e8f:
+            print("[V8] finalize error: %s" % _e8f, flush=True)
+            _labels8 = [(_trk_status.get(track_ids[_j]) if (track_ids and _j < len(track_ids)) else None)
+                        for _j in range(len(frame_assignments))]
 
         # all_persons[0] is the largest = the resident being measured for gait
         main_id = frame_assignments[0][0] if frame_assignments else None
-        _write_in_view([a[0] for a in frame_assignments],
-                       [(_trk_status.get(track_ids[_j]) if (track_ids and _j < len(track_ids)) else None)
-                        for _j in range(len(frame_assignments))],
+        _write_in_view([a[0] for a in frame_assignments], _labels8,
                        [(track_ids[_j] if (track_ids and _j < len(track_ids)) else None)
                         for _j in range(len(frame_assignments))])
         _last_main_id[0] = main_id

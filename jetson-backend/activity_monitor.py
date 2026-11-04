@@ -629,11 +629,23 @@ def _vigil_annotate(results, frame):
             t2p = {}
             st = {}
         names = _vigil_names()
+        try:                                  # IDENTITY_V8: the same labels as In view now
+            _fl = getattr(_ph, "_FRAME_LABELS", None) or {}
+            fl = _fl.get("by_tid", {}) if time.time() - float(_fl.get("t", 0)) < 1.5 else {}
+        except Exception:
+            fl = {}
         for i, b in enumerate(xyxy):
             tid = ids[i] if ids is not None and i < len(ids) else None
-            pid = t2p.get(tid) if tid is not None else None
-            name = names.get(pid) if pid else None
-            label = name or ((st.get(tid) or "Identifying...") if pid is None else "New person")
+            if tid is not None and tid in fl:
+                pid, lab = fl[tid]
+                if lab == "__dup__":
+                    continue                  # one body drawn twice: label it once
+                name = names.get(pid) if pid else None
+                label = name or (lab or "Identifying...") if pid is None else (name or "New person")
+            else:
+                pid = t2p.get(tid) if tid is not None else None
+                name = names.get(pid) if pid else None
+                label = name or ((st.get(tid) or "Identifying...") if pid is None else "New person")
             known = bool(name)
             x1, y1 = int(b[0]), int(b[1])
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)

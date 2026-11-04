@@ -53,3 +53,9 @@ test_videos/
 *.avi
 *.mov
 jetson-backend/proportions_check.json
+
+# Identity templates (biometric data): stay on the device
+jetson-backend/identity_v8*
+jetson-backend/identity_model.json
+jetson-backend/proportions_model.json
+jetson-backend/body_model.json
