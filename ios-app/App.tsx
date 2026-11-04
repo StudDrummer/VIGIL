@@ -3216,7 +3216,7 @@ export default function App() {
                       if(o.track==null)return;
                       const named=persons.filter(x=>!!x.name);
                       if(!named.length)return;
-                      Alert.alert('Who is this?','VIGIL will name them now and remember this look.',[
+                      Alert.alert(o.label&&o.label.startsWith('Not sure ')?`Who is ${o.label}?`:'Who is this?','VIGIL will name them now and learn their face, build, height and walk.',[
                         ...named.slice(0,6).map(x=>({text:`This is ${x.name}`,onPress:()=>{
                           AX.post(`${urlRef.current||FALLBACK_URL}/tracks/${o.track}/assign`,{target_person_id:x.id},{timeout:8000})
                             .catch(()=>Alert.alert('Could not send','Check the connection to the camera unit.'));
