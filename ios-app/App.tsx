@@ -2433,7 +2433,7 @@ export default function App() {
     }catch(_e){}
   },[]);
   // IN_VIEW_LIVE_V1: exactly who is in the camera picture right now.
-  const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number}[]>([]);
+  const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number;label?:string}[]>([]);
   const [identifying,setIdentifying]=useState(0);
   // IDENTITY_V6_APP
   const [inViewOthers,setInViewOthers]=useState<{label:string;track:number|null}[]>([]);
@@ -2449,6 +2449,15 @@ export default function App() {
       await AX.post(`${urlRef.current||FALLBACK_URL}/identity/mode`,{mode,resident_person_id:residentId},{timeout:6000});
       setIdMode(mode);
     }catch(_e){ Alert.alert('Could not change the setting','Check the connection to the camera unit.'); }
+  },[]);
+  // IDENTITY_V8_APP: face recognition on or off for this camera.
+  const [faceOn,setFaceOn]=useState<boolean|null>(null);
+  const loadFaceOn=useCallback(async()=>{
+    try{ const r=await AX.get(`${urlRef.current||FALLBACK_URL}/identity/face`,{timeout:5000}); setFaceOn(!!r.data?.face_recognition); }catch(_e){}
+  },[]);
+  const saveFaceOn=useCallback(async(on:boolean)=>{
+    try{ await AX.post(`${urlRef.current||FALLBACK_URL}/identity/face`,{on},{timeout:6000}); setFaceOn(on); }
+    catch(_e){ Alert.alert('Could not change the setting','Check the connection to the camera unit.'); }
   },[]);
   const [fullscreen,setFullscreen]     = useState(false);
   const [expandedAlert,setExpandedAlert]= useState<number|null>(null);
@@ -3207,7 +3216,7 @@ export default function App() {
                     style={{flexDirection:'row',alignItems:'center',gap:8,paddingLeft:5,paddingRight:14,paddingVertical:5,borderRadius:30,
                     backgroundColor:p.name?C.green+'18':C.card,borderWidth:1.5,borderColor:p.name?C.green+'66':C.border}}>
                     <PersonAvatar personId={p.id} name={p.name} serverUrl={urlRef.current} size={30} isResident={!!p.is_resident}/>
-                    <Text style={{color:C.text,fontWeight:'700',fontSize:14}}>{p.name??'New person'}</Text>
+                    <Text style={{color:C.text,fontWeight:'700',fontSize:14}}>{p.name??(inViewList.find(v=>v.id===p.id)?.label||'New person')}</Text>
                   </TouchableOpacity>
                 ))}
                 {(inViewOthers.length?inViewOthers:Array.from({length:identifying},()=>({label:'Identifying...',track:null}))).map((o,i)=>(
@@ -3224,9 +3233,9 @@ export default function App() {
                         {text:'Cancel',style:'cancel' as const},
                       ]);
                     }}
-                    style={{flexDirection:'row',alignItems:'center',gap:8,paddingHorizontal:14,paddingVertical:10,borderRadius:30,backgroundColor:C.card,borderWidth:1.5,borderColor:o.label==='Visitor'?C.blue+'66':C.border}}>
-                    {o.label==='Identifying...'&&<ActivityIndicator size="small" color={C.sub}/>}
-                    <Text style={{color:o.label==='Visitor'?C.blue:C.sub,fontWeight:'700',fontSize:14}}>{o.label}</Text>
+                    style={{flexDirection:'row',alignItems:'center',gap:8,paddingHorizontal:14,paddingVertical:10,borderRadius:30,backgroundColor:C.card,borderWidth:1.5,borderColor:o.label.startsWith('Visitor')?C.blue+'66':C.border}}>
+                    {o.label.startsWith('Identifying')&&<ActivityIndicator size="small" color={C.sub}/>}
+                    <Text style={{color:o.label.startsWith('Visitor')?C.blue:C.sub,fontWeight:'700',fontSize:14}}>{o.label}</Text>
                   </TouchableOpacity>
                 ))}
               </View>}
@@ -3854,6 +3863,22 @@ export default function App() {
         {idMode==='resident'
           ?'Only the resident is named and their health measured. Staff, family and visitors appear as Visitor, with no prompts.'
           :'Everyone in the home is named. Tap a name under In view now to confirm or correct it; VIGIL remembers each look.'}
+      </Text>
+      <View onLayout={()=>{if(faceOn===null&&!demoMode)loadFaceOn();}}
+        style={{flexDirection:'row',alignItems:'center',marginHorizontal:16,marginTop:12,backgroundColor:C.card,borderRadius:14,paddingVertical:10,paddingHorizontal:14,borderWidth:1,borderColor:C.border}}>
+        <Text style={{flex:1,color:C.text,fontSize:15,fontWeight:'600'}}>Recognise faces</Text>
+        <Switch disabled={demoMode||faceOn===null} value={!!faceOn}
+          onValueChange={(on)=>{
+            if(on){saveFaceOn(true);return;}
+            Alert.alert('Turn off face recognition?','VIGIL will tell people apart by body shape, walking and clothing only. Stored face measurements for this camera are deleted.',[
+              {text:'Cancel',style:'cancel' as const},
+              {text:'Turn off',style:'destructive' as const,onPress:()=>saveFaceOn(false)},
+            ]);
+          }}
+          trackColor={{true:C.green,false:C.border}}/>
+      </View>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginTop:8,lineHeight:18}}>
+        When someone faces the camera, VIGIL uses their face to tell family members apart, even in new clothes. Face measurements are kept as numbers only. Every confirm or correct teaches it.
       </Text>
       <Text style={s.secHeader}>Setup Guide</Text>
       {[

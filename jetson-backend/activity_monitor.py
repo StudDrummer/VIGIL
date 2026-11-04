@@ -625,15 +625,26 @@ def _vigil_annotate(results, frame):
             import person_hook as _ph
             t2p = dict(getattr(_ph, "_track_to_pid", {}) or {})
             st = dict(getattr(_ph, "_trk_status", {}) or {})
+            disp = dict(getattr(_ph, "_DISPLAY", {}) or {})       # ONE_NAME_V1: this frame's decision
         except Exception:
             t2p = {}
             st = {}
+            disp = {}
         names = _vigil_names()
+        shown = set()
         for i, b in enumerate(xyxy):
             tid = ids[i] if ids is not None and i < len(ids) else None
-            pid = t2p.get(tid) if tid is not None else None
+            if tid is not None and tid in disp:
+                pid, fallback = disp[tid]
+            else:
+                pid = t2p.get(tid) if tid is not None else None
+                fallback = (st.get(tid) or "Identifying...") if pid is None else "New person"
+            if pid is not None and pid in shown:
+                pid, fallback = None, "Not sure"              # never the same name on two people
+            if pid is not None:
+                shown.add(pid)
             name = names.get(pid) if pid else None
-            label = name or ((st.get(tid) or "Identifying...") if pid is None else "New person")
+            label = name or fallback or "Identifying..."
             known = bool(name)
             x1, y1 = int(b[0]), int(b[1])
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)

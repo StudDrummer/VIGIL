@@ -333,6 +333,7 @@ Username: <span class="mono">%(tapo_user)s</span> &nbsp;&nbsp; Password: <span c
 <p>Power cuts are fine: everything starts again by itself. Do not unplug the box or the camera.</p>
 <p><b>Help:</b> %(help)s</p>
 <p class="small">VIGIL is a safety and wellness tool, not a medical device. It does not replace checks by family or staff. No video is stored.</p>
+<p class="small"><b>Recognizing people:</b> to tell family members apart, VIGIL measures body shape, walking and, when someone faces the camera, their face. It keeps these as numbers only, and only for this home; the one picture kept is the small photo of each person shown in the app. Please tell everyone who lives here or visits often. Face recognition can be turned off at any time (ask the person who gave you VIGIL); turning it off deletes the stored face measurements.</p>
 </body></html>"""
 
 
