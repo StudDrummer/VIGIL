@@ -340,6 +340,8 @@ def _apply_merges():
         s = _signatures.pop(src)
         if _VR is not None:
             _VR.GALLERY.merge(src, dst)
+        if _VI is not None:
+            _VI.MODEL.merge(src, dst)                             # IDENTITY_V8
         d = _signatures.get(dst)
         if d is None:
             d = _PersonSignature(dst)
@@ -475,6 +477,8 @@ def _apply_corrections():
                     _VR.GALLERY.save(force=True)
                 _PROP.pop(src, None)
                 _PROP_VER.pop(src, None)
+                if _VI is not None:
+                    _VI.MODEL.drop(src)                           # IDENTITY_V8
                 c.execute("UPDATE person_corrections SET applied=1 WHERE id=?", (cid,))
                 print("[CORRECTION] deleted %s" % src, flush=True)
                 continue
@@ -489,6 +493,7 @@ def _apply_corrections():
                         _nd.reported = True
                         _nd.photo_reported = True
                         _signatures[dst] = _nd
+                    _v8_learn(_t, dst)                            # IDENTITY_V8 (before memories change)
                     if _VR is not None and _trk_fp.get(_t):
                         _VR.GALLERY.add(dst, np.array(_trk_fp[_t][-8:]), pin=True)
                         _VR.GALLERY.save(force=True)
@@ -521,6 +526,7 @@ def _apply_corrections():
             for k, v in list(_track_to_pid.items()):
                 if v == src:
                     _track_to_pid[k] = dst
+                    _v8_learn(k, dst, wrong=(src if src != dst else None))     # IDENTITY_V8
                     _prop_learn(k, dst, wrong=(src if src != dst else None))   # LEARN_V2
                     _fpk = _trk_fp.get(k)
                     if _VR is not None and _fpk:
@@ -984,6 +990,9 @@ def _write_in_view(ids, labels=None, tids=None):
     _body_save()
     if _VR is not None:
         _VR.GALLERY.save()
+    if _VI is not None:                                           # IDENTITY_V8
+        _VI.MODEL.save()
+        _VI.MODEL.report()
     try:
         import json as _js
         with open("/dev/shm/.vigil_in_view.tmp", "w") as f:
@@ -1100,6 +1109,9 @@ def _v7_verify(assignments, tids):
     for _i, t, _p in cand:
         _V7["pending"].pop(t, None)            # checked with clean fingerprints
     if best_perm is None or best - cur < V7_SWAP_MARGIN:
+        _V7["votes"].clear()
+        return assignments
+    if _v8_face_vetoes([t for _i, t, _p in cand], names, list(best_perm)):   # IDENTITY_V8
         _V7["votes"].clear()
         return assignments
     key = tuple((t, best_perm[k]) for k, (_i, t, _p) in enumerate(cand))
@@ -1268,6 +1280,289 @@ def _reid6_early(tid, ev, used):
         ev["early"] = r
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# IDENTITY_V8: face, appearance, body proportions, true height and gait vote
+# together (vigil_identity.py). How much each one counts is learned in each
+# home from every confirmation and correction in the app.
+#
+#   * An unnamed track is named when the combined evidence is clearly in
+#     favour of one person. A clear face can name someone within a second,
+#     even in clothes VIGIL has never seen; that new outfit is then learned.
+#   * A name the old logic would give is held back when the other signals
+#     clearly say it is someone else.
+#   * Named tracks are re-checked every 2 s: a face that clearly belongs to
+#     someone else (twice in a row) moves the name.
+#   * A face that clearly matches a known person stops a duplicate "new
+#     person" from being created.
+# ---------------------------------------------------------------------------
+try:
+    import vigil_identity as _VI
+except Exception as _e_vi:
+    _VI = None
+    print("[IDENTITY8] module not available: %s" % _e_vi, flush=True)
+_V8 = {"frame": 0, "check": {}, "votes": {}, "bs": {}, "p": {}}
+V8_FACE_EVERY = 4      # frames between face looks for a track already named
+V8_FACE_MAX = 2        # face looks per frame, at most (about 12 ms each on one CPU core)
+
+
+def _v8_observe(all_persons, track_ids, boxes, frame):
+    """Feed every visible track's pose (and sometimes its face) to the model."""
+    if _VI is None or not track_ids:
+        return
+    _V8["frame"] += 1
+    budget = V8_FACE_MAX
+    fh = frame.shape[0] if frame is not None else None
+    order = sorted(range(len(all_persons)),
+                   key=lambda i: 0 if (i < len(track_ids) and track_ids[i] not in _track_to_pid) else 1)
+    for i in order:
+        t = track_ids[i] if i < len(track_ids) else None
+        if t is None or _is_occluded(i, boxes) or _v7_hold(t):
+            continue                     # never learn from two people overlapping
+        kp = all_persons[i]
+        want = budget > 0 and (t not in _track_to_pid or (_V8["frame"] + int(t)) % V8_FACE_EVERY == 0)
+        if want:
+            budget -= 1
+        _VI.MODEL.observe(t, kp, frame, want_face=want)
+        bs = _stand_height(kp, fh)
+        if bs is not None:
+            _V8["bs"].setdefault(t, deque(maxlen=30)).append(bs)
+    if len(_V8["bs"]) > 300:
+        for k in list(_V8["bs"])[:150]:
+            _V8["bs"].pop(k, None)
+
+
+def _v8_scores(tid, cands, since=None):
+    """Every signal's score for this track against each candidate."""
+    sc, qual = _VI.MODEL.own_scores(tid, cands, since)
+    fps = None
+    if _VR is not None and _VR.EMBEDDER.kind and _trk_fp.get(tid):
+        fps = _v7_fps_since(tid, since, n=10) if since else np.array(_trk_fp[tid][-10:])
+        if fps is not None and len(fps) < 3:
+            fps = None
+    tq = _PROP_TRK.get(tid)
+    tv = np.nanmedian(np.array(tq), axis=0) if (tq and len(tq) >= 8) else None
+    rs = [r for r in (_ratio(s) for s in _V8["bs"].get(tid, ())) if r is not None]
+    r_t = float(np.median(rs)) if len(rs) >= 5 else None
+    for p in cands:
+        d = sc.setdefault(p, {})
+        try:
+            if fps is not None and len(_VR.GALLERY.vecs.get(p, ())):
+                s = _VR.GALLERY.score(fps, p)
+                if s is not None:
+                    d["appearance"] = float(s)
+            if tv is not None:
+                ref = _prop_ref(p)
+                if ref is not None:
+                    dist = _prop_dist(tv, ref)
+                    if dist is not None:
+                        d["proportions"] = -dist
+            if r_t:
+                r_s = _body_ratio(p)
+                if r_s:
+                    d["height"] = -abs(r_t / r_s - 1.0) * 100.0
+        except Exception:
+            pass
+    qual["proportions"] = min(1.0, len(tq) / 15.0) if tv is not None else 0.0
+    return sc, qual
+
+
+def _v8_fuse(tid, cands, since=None, resident=False):
+    sc, q = _v8_scores(tid, cands, since)
+    sc = {p: d for p, d in sc.items() if d}
+    if not sc:
+        return None
+    acc = None
+    try:
+        if _VR is not None and _VR.EMBEDDER.kind:
+            acc = _VR.GALLERY.thresholds(_VR.EMBEDDER.kind)[0]
+    except Exception:
+        pass
+    return _VI.MODEL.fuse(sc, q, new_weight=(0.2 if resident else 0.5), appearance_accept=acc)
+
+
+def _v8_cands(used):
+    m = _read_mode()
+    resident = m["resident"] if m["mode"] == "resident" else None
+    cands = [p for p in _signatures if p not in used]
+    if resident:
+        cands = [p for p in cands if p == resident]
+    return cands, bool(resident)
+
+
+def _v8_decide(tid, used, base):
+    """Combine the existing decision `base` = (person or None or "?", why)
+    with the fused evidence."""
+    if _VI is None:
+        return base
+    try:
+        cands, resident = _v8_cands(used)
+        if not cands:
+            return base
+        r = _v8_fuse(tid, cands, resident=resident)
+        if r is None:
+            return base
+        txt = _VI.MODEL.describe(r)
+        b, bw = base
+        best = r["best"]
+        face_backed = "face" in r["parts"].get(best, {})
+        _V8["p"][tid] = r["p"] if r["ok"] else 0.0
+        if r["ok"]:
+            if b == best:
+                return b, "%s | %s" % (bw, txt)
+            if b in (None, "?"):
+                _VI.MODEL.stats["named_by_fusion"] += 1
+                return best, ("fusion strong " if (face_backed and r["p"] >= 0.97) else "fusion ") + txt
+            if face_backed or r["p"] >= 0.97:
+                _VI.MODEL.stats["overruled"] += 1
+                return best, "fusion strong overrules %s | %s" % (b, txt)
+        if b not in (None, "?") and (r["votes"].get(b, 0.0) <= -2.0 or (best != b and r["p"] >= 0.8)):
+            _VI.MODEL.stats["held_back"] += 1
+            return "?", "held back %s | %s" % (b, txt)
+        return b, "%s | %s" % (bw, txt)
+    except Exception as e:
+        print("[IDENTITY8] decide error: %s" % e, flush=True)
+        return base
+
+
+def _v8_early(tid, ev, used):
+    """A clear face (two looks agreeing) can name someone before the
+    clothing evidence is complete."""
+    if _VI is None or not _VI.MODEL.face_on():
+        return False
+    try:
+        F, _q = _VI.MODEL.track_faces(tid)
+        if F is None or len(F) < 2:
+            return False
+        cands, resident = _v8_cands(used)
+        r = _v8_fuse(tid, cands, resident=resident)
+        if r and r["ok"] and r["p"] >= 0.97 and r["parts"].get(r["best"], {}).get("face", 0) >= 3.0:
+            _V8["p"][tid] = r["p"]
+            _VI.MODEL.stats["named_by_fusion"] += 1
+            ev["early"] = (r["best"], "fusion strong face " + _VI.MODEL.describe(r))
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _v8_new_ok(tid):
+    """May this track become a NEW person? Not while a face clearly matches
+    someone VIGIL already knows."""
+    if _VI is None:
+        return True
+    try:
+        cands = [p for p in _signatures if p in _VI.MODEL.fvec]
+        if not cands:
+            return True
+        own, q = _VI.MODEL.own_scores(tid, cands)
+        for p, d in own.items():
+            if "face" in d and q.get("face", 0) * _VI.MODEL.cal["face"].vote(d["face"]) >= 3.0:
+                _VI.MODEL.stats["new_blocked"] += 1
+                print("[IDENTITY8] track %s is not new: face matches %s" % (tid, p), flush=True)
+                return False
+    except Exception:
+        pass
+    return True
+
+
+def _v8_verify(assignments, tids):
+    """Every 2 s per named track: keep learning when the evidence agrees, and
+    move a name when a face clearly says it belongs to someone else."""
+    if _VI is None or not tids:
+        return assignments
+    now = time.time()
+    out = list(assignments)
+    visible = {pid: i for i, (pid, _h) in enumerate(out) if pid}
+    for i, (pid, h) in enumerate(list(out)):
+        t = tids[i] if i < len(tids) else None
+        if pid is None or t is None or _v7_hold(t) or now - _V8["check"].get(t, 0.0) < 2.0:
+            continue
+        _V8["check"][t] = now
+        try:
+            cands = list(set(_named_ids()) | {pid})
+            r = _v8_fuse(t, cands, since=now - 6.0)
+            if r is None:
+                continue
+            if r["best"] == pid and r["ok"]:
+                _VI.MODEL.auto_learn(t, pid, r["p"])
+                _V8["votes"].pop(t, None)
+                continue
+            fv = {p: r["parts"].get(p, {}).get("face") for p in cands}
+            others = [p for p in cands if p != pid and fv.get(p) is not None]
+            if not others:
+                continue
+            other = max(others, key=lambda p: fv[p])
+            mine = fv.get(pid)
+            if fv[other] >= 4.0 and (mine is None or mine <= -2.0) and r["best"] == other and r["p"] >= 0.95:
+                n = _V8["votes"].get(t, (None, 0))
+                n = (other, n[1] + 1 if n[0] == other else 1)
+                _V8["votes"][t] = n
+                if n[1] < 2:
+                    continue
+                _V8["votes"].pop(t, None)
+                j = visible.get(other)
+                if j is not None and j != i and j < len(tids) and tids[j] is not None:
+                    _track_to_pid.pop(tids[j], None)          # the other one is re-identified from scratch
+                    out[j] = (None, out[j][1])
+                _track_to_pid[t] = other
+                _TRACK_BAD.pop(t, None)
+                out[i] = (other, h)
+                visible[other] = i
+                _VI.MODEL.stats["face_swaps"] += 1
+                print("[IDENTITY8] track %s: %s -> %s (face) | %s" % (t, pid, other, _VI.MODEL.describe(r)), flush=True)
+            else:
+                _V8["votes"].pop(t, None)
+        except Exception as e:
+            print("[IDENTITY8] verify error: %s" % e, flush=True)
+    return out
+
+
+def _v8_face_vetoes(tids, cur, new):
+    """True if the faces seen in the last 6 s clearly fit the CURRENT names
+    better than a clothing-based swap would."""
+    if _VI is None or not _VI.MODEL.face_on():
+        return False
+    try:
+        names = list(set(cur) | set(new))
+        tot_cur = tot_new = 0.0
+        seen = False
+        for t, a, b in zip(tids, cur, new):
+            own, q = _VI.MODEL.own_scores(t, names, since=time.time() - 6.0)
+            w = q.get("face", 0.0)
+            fa, fb = own.get(a, {}).get("face"), own.get(b, {}).get("face")
+            if fa is None or fb is None:
+                continue
+            seen = True
+            tot_cur += w * _VI.MODEL.cal["face"].vote(fa)
+            tot_new += w * _VI.MODEL.cal["face"].vote(fb)
+        if seen and tot_cur >= tot_new + 2.0:
+            print("[IDENTITY8] clothing swap vetoed by faces (%.1f vs %.1f)" % (tot_cur, tot_new), flush=True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _v8_learn(tid, dst, wrong=None):
+    """A caregiver confirmed or corrected this track: every signal learns.
+    Call BEFORE the track's looks are added to dst's memories."""
+    if _VI is None or dst is None:
+        return
+    try:
+        now = time.time()
+        recent = [x for x in (_trk_fp_t.get(tid, [])[-1:] +
+                              [q[-1][0] for q in [_VI.MODEL.trk_face.get(tid)] if q] +
+                              [g[0] for g in [_VI.MODEL.trk_gait.get(tid)] if g]) if now - x < 120]
+        if not recent:
+            return                       # an old track id: nothing current to learn from
+        others = [p for p in _named_ids() if p != dst]
+        sc, _q = _v8_scores(tid, [dst] + others)
+        mine = {p: {k: v for k, v in d.items() if k not in ("face", "gait")} for p, d in sc.items()}
+        _VI.MODEL.learn(tid, dst, others, mine, wrong=wrong)
+    except Exception as e:
+        print("[IDENTITY8] learn error: %s" % e, flush=True)
 
 
 def reload_known_persons() -> None:
@@ -1441,6 +1736,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                     _want.append((_t, _k))
             if _want:
                 _fps = _fp_for(_want[:4], _current_frame)
+        try:                                                     # IDENTITY_V8
+            _v8_observe(all_persons, track_ids, _boxes, _current_frame)
+        except Exception:
+            pass
         for _idx, kp in enumerate(all_persons):
             height_px = _estimate_height(kp)
             shape_r = _estimate_shape(kp)
@@ -1521,11 +1820,14 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             if len(_evidence) > 200:
                 _evidence.clear()
             if len(ev["c"]) < _REID_MIN_SAMPLES and ev["n"] < _REID_GIVE_UP \
-                    and not _reid6_early(tid, ev, _used_this_frame):
+                    and not _reid6_early(tid, ev, _used_this_frame) \
+                    and not _v8_early(tid, ev, _used_this_frame):
                 frame_assignments.append((None, None))     # "Identifying..."
                 continue
             matched, _why = ev.pop("early", None) or _reid6_decide(tid, ev, _used_this_frame)
-            if matched not in (None, "?") and not str(_why).startswith("fingerprint strong"):
+            if not str(_why).startswith("fusion strong face"):           # IDENTITY_V8
+                matched, _why = _v8_decide(tid, _used_this_frame, (matched, _why))
+            if matched not in (None, "?") and not str(_why).startswith(("fingerprint strong", "fusion strong")):
                 try:                                              # LEARN_V2
                     _vt, _vw = _prop_veto(tid, matched, _named_ids())
                     if _vt:
@@ -1550,8 +1852,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                     _body_add(matched, _b)
                 if _VR is not None and _trk_fp.get(tid):
                     # REID_V63: only a strong match (or a tap) teaches a look
-                    if _why.startswith("fingerprint strong") or len(_VR.GALLERY.vecs.get(matched, ())) < 5:
+                    if _why.startswith(("fingerprint strong", "fusion strong")) or len(_VR.GALLERY.vecs.get(matched, ())) < 5:
                         _VR.GALLERY.add(matched, _VR.GALLERY.exclusive_rows(np.array(_trk_fp[tid][-6:]), matched))
+                if _VI is not None:                                   # IDENTITY_V8
+                    _VI.MODEL.auto_learn(tid, matched, _V8["p"].pop(tid, 0.0))
                 _trk_status.pop(tid, None)
                 _evidence.pop(tid, None)
                 _pending_new.pop(tid, None)
@@ -1561,7 +1865,7 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                 if _occl or ev["n"] < _REID_GIVE_UP:
                     frame_assignments.append((None, None))  # still unclear
                     continue
-                if _read_mode()["mode"] != "resident" and not _reid6_new_ok(tid, ev):
+                if _read_mode()["mode"] != "resident" and (not _reid6_new_ok(tid, ev) or not _v8_new_ok(tid)):
                     if ev.get("unsure", 0) > ev.get("nobody", 0):
                         _trk_status[tid] = "Not sure"
                     ev["n"] = _REID_GIVE_UP - 10      # look again in about a second
@@ -1618,6 +1922,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             frame_assignments = _v7_verify(frame_assignments, track_ids)
         except Exception as _e7:
             print("[REID7] verify error: %s" % _e7, flush=True)
+        try:                                                     # IDENTITY_V8
+            frame_assignments = _v8_verify(frame_assignments, track_ids)
+        except Exception as _e8:
+            print("[IDENTITY8] verify error: %s" % _e8, flush=True)
 
         # all_persons[0] is the largest = the resident being measured for gait
         main_id = frame_assignments[0][0] if frame_assignments else None

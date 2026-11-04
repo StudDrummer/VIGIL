@@ -3080,6 +3080,49 @@ def identity_learning():
                         "note": "Learning starts once two named people have 6 confirmed or corrected looks each."})
 
 
+# IDENTITY_V8: how each identity signal is doing in this home.
+@app.route("/identity/report", methods=["GET"])
+@require_api_key
+def identity_report():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "identity_report.json")
+    try:
+        with open(path) as f:
+            return jsonify({"status": "ok", "report": json.load(f)})
+    except (OSError, ValueError):
+        return jsonify({"status": "ok", "report": None,
+                        "note": "The report appears a minute after the camera starts seeing people."})
+
+
+# IDENTITY_V8: face recognition on or off for this camera. Off also erases
+# every stored face signature (the camera pipeline does that within 10 s).
+@app.route("/identity/face", methods=["GET", "POST"])
+@require_api_key
+def identity_face():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "identity_settings.json")
+    if request.method == "POST":
+        on = (request.get_json() or {}).get("on")
+        if not isinstance(on, bool):
+            return jsonify({"status": "error", "reason": "on must be true or false"}), 400
+        try:
+            with open(path) as f:
+                cur = json.load(f)
+        except (OSError, ValueError):
+            cur = {}
+        cur["face"] = on
+        with open(path + ".tmp", "w") as f:
+            json.dump(cur, f)
+        os.replace(path + ".tmp", path)
+    on = os.environ.get("VIGIL_FACE_ID", "1").strip().lower() not in ("0", "off", "false", "no")
+    try:
+        with open(path) as f:
+            v = json.load(f).get("face")
+        if v is not None:
+            on = bool(v)
+    except (OSError, ValueError):
+        pass
+    return jsonify({"status": "ok", "face_recognition": on})
+
+
 @app.route("/persons/<person_id>/photo/clear", methods=["POST"])
 @require_api_key
 def clear_person_photo(person_id):

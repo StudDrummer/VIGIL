@@ -26,3 +26,25 @@
 - Only computed metrics leave the edge device
 - Tailscale VPN: all traffic encrypted, no public internet exposure
 - No cloud storage of any health data
+
+## Telling people apart (IDENTITY_V8, `vigil_identity.py`)
+Five signals each give a vote for every known person; the votes are added
+and a name is given only when one person is clearly ahead.
+
+| Signal | What it measures | Notes |
+| --- | --- | --- |
+| Face | 128-number signature (OpenCV YuNet + SFace) | Only when the face is turned to the camera and big enough. Strongest signal. |
+| Appearance | Body-crop fingerprint (DINOv2, `vigil_reid.py`) | Mostly clothing. Can strongly say "same", only mildly "different". |
+| Proportions | Shoulder, hip, arm, thigh, shin relative to torso | From upright poses only. |
+| Height | True height, distance from the camera removed | |
+| Gait | Steps per second, stride, arm swing, bounce | Only while walking. |
+
+Every confirm and correct in the app is a verified example: each signal's
+score for the right person and for everyone else is recorded, and a small
+calibration model per signal is refit. A signal that tells people apart in
+this home earns a bigger vote; one that does not is turned down or off.
+`GET /identity/report` shows each signal's learned weight and accuracy.
+
+Face recognition is per camera: `POST /identity/face {"on": false}` (or the
+switch in the app's Settings) turns it off and deletes every stored face
+signature. No face images are kept by the identity model, only the numbers.

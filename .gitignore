@@ -53,3 +53,13 @@ test_videos/
 *.avi
 *.mov
 jetson-backend/proportions_check.json
+
+# IDENTITY_V8: per-home identity memory (face signatures are biometric data) and models
+jetson-backend/identity_faces.npz
+jetson-backend/identity_v8.json
+jetson-backend/identity_report.json
+jetson-backend/identity_settings.json
+jetson-backend/identity_model.json
+jetson-backend/body_model.json
+jetson-backend/models/
+*.npz

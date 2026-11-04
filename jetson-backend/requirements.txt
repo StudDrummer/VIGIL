@@ -1,6 +1,6 @@
 flask>=3.0.0
 ultralytics>=8.0.0
-opencv-python>=4.6.0
+opencv-python>=4.8.0
 numpy>=1.24,<2
 scipy>=1.11.0
 twilio>=9.0.0

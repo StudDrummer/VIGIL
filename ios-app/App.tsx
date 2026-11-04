@@ -2450,6 +2450,15 @@ export default function App() {
       setIdMode(mode);
     }catch(_e){ Alert.alert('Could not change the setting','Check the connection to the camera unit.'); }
   },[]);
+  // IDENTITY_V8_APP: face recognition on or off for this camera.
+  const [faceOn,setFaceOn]=useState<boolean|null>(null);
+  const loadFaceOn=useCallback(async()=>{
+    try{ const r=await AX.get(`${urlRef.current||FALLBACK_URL}/identity/face`,{timeout:5000}); setFaceOn(!!r.data?.face_recognition); }catch(_e){}
+  },[]);
+  const saveFaceOn=useCallback(async(on:boolean)=>{
+    try{ await AX.post(`${urlRef.current||FALLBACK_URL}/identity/face`,{on},{timeout:6000}); setFaceOn(on); }
+    catch(_e){ Alert.alert('Could not change the setting','Check the connection to the camera unit.'); }
+  },[]);
   const [fullscreen,setFullscreen]     = useState(false);
   const [expandedAlert,setExpandedAlert]= useState<number|null>(null);
   const [replayFrames,setReplayFrames]  = useState<ReplayFrame[]|null>(null);
@@ -3854,6 +3863,22 @@ export default function App() {
         {idMode==='resident'
           ?'Only the resident is named and their health measured. Staff, family and visitors appear as Visitor, with no prompts.'
           :'Everyone in the home is named. Tap a name under In view now to confirm or correct it; VIGIL remembers each look.'}
+      </Text>
+      <View onLayout={()=>{if(faceOn===null&&!demoMode)loadFaceOn();}}
+        style={{flexDirection:'row',alignItems:'center',marginHorizontal:16,marginTop:12,backgroundColor:C.card,borderRadius:14,paddingVertical:10,paddingHorizontal:14,borderWidth:1,borderColor:C.border}}>
+        <Text style={{flex:1,color:C.text,fontSize:15,fontWeight:'600'}}>Recognise faces</Text>
+        <Switch disabled={demoMode||faceOn===null} value={!!faceOn}
+          onValueChange={(on)=>{
+            if(on){saveFaceOn(true);return;}
+            Alert.alert('Turn off face recognition?','VIGIL will tell people apart by body shape, walking and clothing only. Stored face measurements for this camera are deleted.',[
+              {text:'Cancel',style:'cancel' as const},
+              {text:'Turn off',style:'destructive' as const,onPress:()=>saveFaceOn(false)},
+            ]);
+          }}
+          trackColor={{true:C.green,false:C.border}}/>
+      </View>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginTop:8,lineHeight:18}}>
+        When someone faces the camera, VIGIL uses their face to tell family members apart, even in new clothes. Only numbers are kept, never face pictures. Every confirm or correct teaches it.
       </Text>
       <Text style={s.secHeader}>Setup Guide</Text>
       {[
