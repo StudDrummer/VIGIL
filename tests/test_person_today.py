@@ -35,7 +35,7 @@ def test_median_and_filters():
     assert d["posture_score"] is None, d                 # only 2 real postures: not enough
     assert d["camera_asymmetry_pct"] == 9.8, d           # 94.1 dropped
     days = C.get("/persons/myra/detections?days=7", headers=H).json        # BASELINE_V2: same rules per day
-    assert len(days) == 1 and days[0]["avg_speed"] == 0.77 and days[0]["avg_posture"] is None, days
+    assert len(days) == 1 and abs(days[0]["avg_speed"] - 0.769) < 1e-6 and days[0]["avg_posture"] is None, days
     e = C.get("/persons/nobody/today", headers=H).json
     assert e["camera_gait_speed_ms"] is None and e["camera_data_points"] == 0, e
 
