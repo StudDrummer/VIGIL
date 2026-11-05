@@ -1252,7 +1252,15 @@ def _reid6_decide(tid, ev, used):
                 top = [p for _s, p in _VR.GALLERY.last_top]
                 if len(top) == 2:
                     hd, hw = _reid_decide(ev, set(_signatures) - set(top))
-                    if hd in top and hw.startswith("by height"):
+                    # LEARN_V4: only when this house's own learning says height
+                    # really separates these people
+                    _hok = True
+                    try:
+                        if _V8 is not None and len(_V8.stats["height"]["same"]) >= 12:
+                            _hok = _V8._params("height")[4] >= 0.5
+                    except Exception:
+                        pass
+                    if hd in top and hw.startswith("by height") and _hok:
                         return hd, "fingerprint+height | " + txt + " | " + hw
                 if len(fps) >= 6:
                     ev["unsure"] = ev.get("unsure", 0) + 1
@@ -2028,6 +2036,19 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                 if _read_mode()["mode"] == "resident":
                     _trk_status[tid] = "Visitor"
                     ev["n"] = 0
+                    frame_assignments.append((None, None))
+                    continue
+                try:                                             # LEARN_V4: no duplicate of family
+                    _fam = [p for p in _named_ids() if p in _signatures and p not in _used_this_frame]
+                    _rk = _v8_rank(tid, _fam) if (_V8 is not None and _fam) else []
+                except Exception:
+                    _rk = []
+                if _rk and _rk[0][0] > -1.0:
+                    _trk_status[tid] = "Not sure"
+                    ev["n"] = _REID_GIVE_UP - 10
+                    if not ev.get("nn"):
+                        ev["nn"] = 1
+                        print("[REID] track %s -> NOT SURE yet | not a new person: %s" % (tid, _v8_txt(_rk)), flush=True)
                     frame_assignments.append((None, None))
                     continue
                 print("[REID] track %s -> NEW person | %s" % (tid, _why), flush=True)

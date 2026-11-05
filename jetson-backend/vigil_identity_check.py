@@ -85,7 +85,9 @@ for i, l in enumerate(lines):
     elif "[TRACK_VERIFY]" in l:
         counts["re-identified (stopped matching)"] += 1
 
-print("VIGIL who-is-who report, last %.0f h (log: %s, %d lines)" % (HOURS, src, len(lines)))
+print("VIGIL who-is-who report (log: %s, %d lines)" % (src, len(lines)))
+if src == "log files":
+    print("Note: the log file has no times, so Decisions cover the whole file. Corrections cover the last %.0f h." % HOURS)
 print("\nDecisions:")
 for k, v in counts.most_common():
     print("  %-40s %d" % (k, v))
@@ -132,11 +134,12 @@ if caused:
 try:
     with open(os.path.join(HERE, "identity_v8.json")) as f:
         rep = json.load(f).get("report", {})
-    print("\nWhat each cue has learned (examples: same person / different people, weight 0-1):")
+    print("\nWhat each cue has learned (examples same / different, typical score same vs different, weight 0-1):")
     for c in ("appearance", "face", "body", "height", "walk"):
         r = rep.get(c)
         if r:
-            print("  %-11s %4d / %-4d weight %.2f" % (c, r["same_examples"], r["different_examples"], r["weight"]))
+            print("  %-11s %4d / %-4d  %7.3f vs %-7.3f weight %.2f" % (c, r["same_examples"], r["different_examples"],
+                  r["same_mean"], r["different_mean"], r["weight"]))
     print("  face views kept:", {names.get(p, p): n for p, n in (rep.get("faces_known") or {}).items()})
     print("  walks kept:     ", {names.get(p, p): n for p, n in (rep.get("walks_known") or {}).items()})
 except Exception:
