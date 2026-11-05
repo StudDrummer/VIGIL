@@ -214,6 +214,8 @@ def init_db():
     # (cloud) database must have them too, or identity cannot load people.
     if 'colour_hist' not in persons_existing:
         conn.execute("ALTER TABLE persons ADD COLUMN colour_hist TEXT")
+    if 'height_cm' not in persons_existing:                      # HEIGHT_PER_PERSON_V1
+        conn.execute("ALTER TABLE persons ADD COLUMN height_cm REAL")
     cfg_existing = {row[1] for row in conn.execute("PRAGMA table_info(config)")}
     if 'resident_person_id' not in cfg_existing:
         conn.execute("ALTER TABLE config ADD COLUMN resident_person_id TEXT")
@@ -1105,6 +1107,59 @@ def identify_person(person_id):
         conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, ?)", (person_id, person_id))
     conn.commit(); conn.close()
     return jsonify({"status":"ok"})
+
+# HEIGHT_PER_PERSON_V1: each person's real height makes their walking speed a
+# measurement for them, not a guess scaled from someone else's height.
+@app.route("/persons/<person_id>/height", methods=["POST"])
+@require_api_key
+def set_person_height(person_id):
+    data = request.get_json() or {}
+    try:
+        h = float(data.get("height_cm"))
+    except (TypeError, ValueError):
+        h = None
+    if h is not None and not 50 <= h <= 230:
+        return jsonify({"status": "error", "reason": "height must be between 50 and 230 cm"}), 400
+    conn = get_db()
+    conn.execute("UPDATE persons SET height_cm=? WHERE id=?", (h, person_id))
+    cfg = get_config(conn)
+    if h and cfg.get("resident_person_id") == person_id:
+        conn.execute("UPDATE config SET resident_height_cm=? WHERE id=1", (h,))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "height_cm": h})
+
+
+# TEACH_V1: "Introduce everyone": name someone the camera does not know yet,
+# straight from the person standing in view. Every cue learns from it.
+@app.route("/tracks/<int:track_id>/new", methods=["POST"])
+@require_api_key
+def new_person_from_track(track_id):
+    import uuid
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()[:40]
+    if not name:
+        return jsonify({"status": "error", "reason": "type a name"}), 400
+    try:
+        h = float(data.get("height_cm")) if data.get("height_cm") not in (None, "") else None
+    except (TypeError, ValueError):
+        h = None
+    if h is not None and not 50 <= h <= 230:
+        h = None
+    pid = "named_" + uuid.uuid4().hex[:10]
+    now = datetime.now().isoformat()
+    conn = get_db()
+    conn.execute("INSERT INTO persons (id, name, is_resident, height_cm, room_id, first_seen_at, last_seen_at, identified_at) "
+                 "VALUES (?,?,?,?,?,?,?,datetime('now'))",
+                 (pid, name, 1 if data.get("is_resident") else 0, h, data.get("room_id") or "room_1", now, now))
+    conn.execute("""CREATE TABLE IF NOT EXISTS person_corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT, dst TEXT,
+        created_at TEXT DEFAULT (datetime('now')), applied INTEGER DEFAULT 0)""")
+    conn.execute("INSERT INTO person_corrections (src, dst) VALUES (?, ?)", ("track:%d" % track_id, pid))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "person_id": pid})
+
 
 @app.route("/persons/alerts", methods=["GET"])
 @require_api_key

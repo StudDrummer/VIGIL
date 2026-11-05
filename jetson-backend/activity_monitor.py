@@ -159,7 +159,24 @@ class ServerClient:
         except Exception:
             pass
 
+    def refresh_heights(self):
+        """HEIGHT_PER_PERSON_V1: each named person's real height, if set in the app."""
+        now = time.time()
+        if now - getattr(self, "_last_heights", 0.0) < 60:
+            return
+        self._last_heights = now
+        try:
+            r = self.session.get(f"{self.base}/persons", timeout=5)
+            if r.status_code == 200:
+                rows = r.json()
+                rows = rows.get("persons", rows) if isinstance(rows, dict) else rows
+                self.person_heights = {p["id"]: float(p["height_cm"]) for p in rows
+                                       if isinstance(p, dict) and p.get("height_cm")}
+        except Exception:
+            pass
+
     def refresh_config(self):
+        self.refresh_heights()
         now = time.time()
         if now - self._last_config < 300: return
         self._last_config = now
@@ -1691,7 +1708,11 @@ def main():
 
                         if main_pid and payload.get('cadence_spm') and not _mixed and main_pid in _win:
                             _gs = payload.get('gait_speed_ms')
-                            if _gs and _rp and main_pid != _rp:
+                            _hp = (getattr(client, 'person_heights', None) or {}).get(main_pid)
+                            if _gs and _hp and client.resident_height_cm:
+                                # HEIGHT_PER_PERSON_V1: their own height, not a scaled guess
+                                _gs = round(_gs * _hp / client.resident_height_cm, 3)
+                            elif _gs and _rp and main_pid != _rp:
                                 try:
                                     import person_hook as _ph2
                                     _a, _b = _ph2._body_ratio(main_pid), _ph2._body_ratio(_rp)

@@ -167,6 +167,7 @@ interface Person {
   id:string; name:string|null; room_id:string; is_resident:number;
   height_px:number|null; confidence:number; frames_seen:number;
   first_seen_at:string|null; last_seen_at:string|null;
+  height_cm?:number|null;                                  // HEIGHT_PER_PERSON_V1
 }
 interface PersonAlert {
   id:number; alert_type:string; room_id:string;
@@ -557,7 +558,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   const canNext = () => {
     if(step===0)return agreed;
     if(step===3)return serverOk===true;
-    if(step===1){const a=parseInt(age,10);return residentName.trim().length>0 && heightCm()!==null && weightKg()!==null && a>=1 && a<=120;}
+    if(step===1){return residentName.trim().length>0 && heightCm()!==null;}
     if(step===2)return emergencyPhone.trim().length>=10;
     return true;
   };
@@ -606,11 +607,11 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
         <View style={{flex:1}}>
           <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Who is VIGIL watching over?</Text>
           <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
-            A few basics. Height lets VIGIL measure walking speed accurately.
+            Their height lets VIGIL measure their walking speed. Everyone else in the home is added after setup.
           </Text>
           <OBField label="First name" value={residentName} onChange={setRN} placeholder="e.g. Margaret"/>
           <View style={{flexDirection:'row',backgroundColor:C.card,borderRadius:12,padding:4,marginBottom:20,borderWidth:1,borderColor:C.border}}>
-            {([['us','Feet and pounds'],['metric','Centimetres and kilograms']] as const).map(([k,lbl])=>(
+            {([['us','Feet and inches'],['metric','Centimetres']] as const).map(([k,lbl])=>(
               <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:12,borderRadius:9,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
                 <Text style={{color:units===k?'#000':C.sub,fontSize:14,fontWeight:'700'}}>{lbl}</Text>
               </TouchableOpacity>
@@ -624,10 +625,6 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
           ):(
             <OBField label="Height (cm)" value={residentHeight} onChange={setRH} placeholder="170" keyboard="number-pad"/>
           )}
-          <View style={{flexDirection:'row',gap:12}}>
-            <View style={{flex:1}}><OBField label={units==='us'?'Weight (lb)':'Weight (kg)'} value={weight} onChange={setWeight} placeholder={units==='us'?'150':'68'} keyboard="number-pad"/></View>
-            <View style={{flex:1}}><OBField label="Age" value={age} onChange={setAge} placeholder="78" keyboard="number-pad"/></View>
-          </View>
         </View>
       );
       case 2: return (
@@ -940,6 +937,146 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
         </View>
       </View>
     </View>
+  );
+}
+
+// HEIGHT_PER_PERSON_V1: "5'6", "5 6", "66 in", "168", "1.68" -> centimetres.
+function parseHeightCm(t:string):number|null{
+  const x=(t||'').trim().toLowerCase();
+  if(!x)return null;
+  const ftin=x.match(/^(\d)\s*(?:'|ft|feet|\s)\s*(\d{1,2})?\s*(?:"|in|inches)?$/);
+  if(ftin){const v=(parseInt(ftin[1],10)*12+(ftin[2]?parseInt(ftin[2],10):0))*2.54;return v>=50&&v<=230?Math.round(v):null;}
+  const n=parseFloat(x);
+  if(!isFinite(n))return null;
+  let cm=n;
+  if(x.endsWith('in'))cm=n*2.54; else if(n<3)cm=n*100; else if(n<=8)cm=n*30.48; else if(n<90&&!x.endsWith('cm'))cm=n*2.54;
+  return cm>=50&&cm<=230?Math.round(cm):null;
+}
+const fmtHeight=(cm:number|null|undefined,units:'us'|'metric')=>{
+  if(!cm)return'';
+  if(units==='metric')return `${Math.round(cm)} cm`;
+  const ti=Math.round(cm/2.54);return `${Math.floor(ti/12)}'${ti%12}"`;
+};
+
+// TEACH_V1: "Introduce everyone". One person at a time stands in front of the
+// camera; the caregiver names them (or confirms the name VIGIL shows). Each tap
+// teaches every identity cue: face, build, height, walk and clothing. Offered
+// once after setup, and any time from Settings, Camera.
+function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'metric';onClose:()=>void}){
+  const [named,setNamed]=useState<{id:string;name:string|null}[]>([]);
+  const [others,setOthers]=useState<{label:string;track:number|null}[]>([]);
+  const [everyone,setEveryone]=useState<{id:string;name:string|null;height_cm?:number|null}[]>([]);
+  const [done,setDone]=useState<string[]>([]);
+  const [editing,setEditing]=useState<number|null>(null);
+  const [newName,setNewName]=useState('');
+  const [newHeight,setNewHeight]=useState('');
+  const [isRes,setIsRes]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const [msg,setMsg]=useState<string|null>(null);
+  useEffect(()=>{
+    let alive=true;
+    const tick=async()=>{
+      try{
+        const r=await AX.get(`${serverUrl}/persons/in-view`,{timeout:3000});
+        if(!alive)return;
+        setNamed((r.data?.people||[]).filter((p:any)=>!!p.name));
+        setOthers((r.data?.others||[]).filter((o:any)=>o.track!=null));
+      }catch(_e){}
+    };
+    const loadAll=async()=>{try{const r=await AX.get(`${serverUrl}/persons`,{timeout:5000});if(alive&&Array.isArray(r.data))setEveryone(r.data.filter((p:any)=>!!p.name));}catch(_e){}};
+    tick();loadAll();
+    const a=setInterval(tick,1500),b=setInterval(loadAll,8000);
+    return()=>{alive=false;clearInterval(a);clearInterval(b);};
+  },[serverUrl]);
+  const learned=(n:string)=>{setDone(d=>d.includes(n)?d:[...d,n]);setMsg(`Learned ${n}. Next person, or Done.`);};
+  const confirm=async(p:{id:string;name:string|null})=>{
+    setBusy(true);
+    try{await AX.post(`${serverUrl}/persons/${p.id}/confirm`,{},{timeout:8000});learned(p.name||'them');}
+    catch(_e){setMsg('Could not reach the camera. Try again.');}
+    finally{setBusy(false);}
+  };
+  const assign=async(track:number,p:{id:string;name:string|null})=>{
+    setBusy(true);
+    try{await AX.post(`${serverUrl}/tracks/${track}/assign`,{target_person_id:p.id},{timeout:8000});setEditing(null);learned(p.name||'them');}
+    catch(_e){setMsg('Could not reach the camera. Try again.');}
+    finally{setBusy(false);}
+  };
+  const createNew=async(track:number)=>{
+    const n=newName.trim();if(!n)return;
+    const h=newHeight.trim()?parseHeightCm(newHeight):null;
+    if(newHeight.trim()&&h==null){setMsg(units==='us'?'Height like 5\'6" or 66 in.':'Height like 168 cm.');return;}
+    setBusy(true);
+    try{
+      await AX.post(`${serverUrl}/tracks/${track}/new`,{name:n,height_cm:h,is_resident:isRes},{timeout:8000});
+      setEditing(null);setNewName('');setNewHeight('');setIsRes(false);learned(n);
+    }catch(e:any){setMsg(e?.response?.data?.reason||'Could not reach the camera. Try again.');}
+    finally{setBusy(false);}
+  };
+  const chip=(label:string,onPress:()=>void,primary=false)=>(
+    <TouchableOpacity key={label} disabled={busy} onPress={onPress}
+      style={{paddingHorizontal:14,paddingVertical:10,borderRadius:20,marginRight:8,marginTop:8,
+        backgroundColor:primary?C.green:C.fill,opacity:busy?0.5:1}}>
+      <Text style={{color:primary?'#000':C.text,fontWeight:'700',fontSize:14}}>{label}</Text>
+    </TouchableOpacity>);
+  const inp={color:C.text,fontSize:16,paddingHorizontal:12,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
+  return(
+    <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
+      <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
+      <ScrollView contentContainerStyle={{padding:20,paddingBottom:60}} keyboardShouldPersistTaps="handled">
+        <Text style={{color:C.text,fontSize:26,fontWeight:'800'}}>Introduce everyone</Text>
+        <Text style={{color:C.sub,fontSize:15,marginTop:8,lineHeight:22}}>
+          About 2 minutes. Recommended: VIGIL then tells your family apart by face, build, height, walk and clothing, and keeps learning every time you name someone.
+        </Text>
+        <View style={[s.card,{marginTop:16}]}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>For each person, one at a time</Text>
+          <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:21}}>
+            1. Stand 2 to 3 metres from the camera, facing it, in good light.{'\n'}
+            2. Stay still for about 10 seconds until they appear below.{'\n'}
+            3. Tap their name. Then the next person.
+          </Text>
+        </View>
+        {!!msg&&<Text style={{color:C.green,fontSize:14,marginTop:14}}>{msg}</Text>}
+        <Text style={[s.secHeader,{marginHorizontal:0,marginTop:18}]}>In view now</Text>
+        {named.length===0&&others.length===0&&(
+          <Text style={{color:C.muted,fontSize:14,lineHeight:20}}>Nobody in view yet. Stand in front of the camera.</Text>)}
+        {named.map(p=>(
+          <View key={p.id} style={[s.card,{marginTop:8}]}>
+            <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>VIGIL thinks this is {p.name}</Text>
+            <View style={{flexDirection:'row',flexWrap:'wrap'}}>
+              {chip(`Yes, ${p.name}`,()=>confirm(p),true)}
+              {chip('No, someone else',()=>setMsg(`Tap ${p.name} in the In view now list on Today, choose who it is.`))}
+            </View>
+          </View>))}
+        {others.map((o,i)=>(
+          <View key={'o'+i} style={[s.card,{marginTop:8}]}>
+            <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>{o.label==='Identifying...'?'Someone new':o.label}: who is this?</Text>
+            <View style={{flexDirection:'row',flexWrap:'wrap'}}>
+              {everyone.slice(0,8).map(p=>chip(p.name||'?',()=>assign(o.track as number,p)))}
+              {chip('A new person',()=>{setEditing(o.track);setNewName('');setNewHeight('');},true)}
+            </View>
+            {editing===o.track&&(
+              <View style={{marginTop:6}}>
+                <TextInput style={inp} value={newName} onChangeText={setNewName} placeholder="Name" placeholderTextColor={C.muted} autoCapitalize="words"/>
+                <TextInput style={inp} value={newHeight} onChangeText={setNewHeight}
+                  placeholder={units==='us'?'Height, e.g. 5\'6" (optional)':'Height in cm (optional)'} placeholderTextColor={C.muted}/>
+                <View style={{flexDirection:'row',alignItems:'center',marginTop:12}}>
+                  <Switch value={isRes} onValueChange={setIsRes} trackColor={{false:C.fill,true:C.green}} thumbColor="#FFF"/>
+                  <Text style={{color:C.sub,fontSize:14,marginLeft:10,flex:1}}>This is a person VIGIL looks after (a resident)</Text>
+                </View>
+                <TouchableOpacity disabled={busy||!newName.trim()} onPress={()=>createNew(o.track as number)}
+                  style={[s.btnPrimary,{marginTop:12,opacity:(busy||!newName.trim())?0.5:1}]}>
+                  <Text style={s.btnPrimaryTxt}>Save {newName.trim()||'this person'}</Text>
+                </TouchableOpacity>
+              </View>)}
+          </View>))}
+        {done.length>0&&<Text style={{color:C.sub,fontSize:14,marginTop:16}}>Learned so far: {done.join(', ')}</Text>}
+        <TouchableOpacity onPress={onClose} style={[s.btnPrimary,{marginTop:24}]}>
+          <Text style={s.btnPrimaryTxt}>{done.length?'Done':'Skip for now'}</Text>
+        </TouchableOpacity>
+        <Text style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:10}}>You can do this any time: Settings, Camera, Introduce everyone.</Text>
+      </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -2467,6 +2604,8 @@ export default function App() {
   const [homePid,setHomePid]           = useState<string|null>(null);
   const [personToday,setPersonToday]   = useState<any>(null);
   const [watchOwner,setWatchOwnerS]    = useState<string|null>(null);   // HOME_PEOPLE_V2
+  const [showTeach,setShowTeach]       = useState(false);                // TEACH_V1
+  const teachOffered=useRef(false);
   useEffect(()=>{AsyncStorage.getItem(SK_WATCH_OWNER).then(v=>{if(v)setWatchOwnerS(v);}).catch(()=>{});},[]);
   const setWatchOwner=(pid:string)=>{setWatchOwnerS(pid);AsyncStorage.setItem(SK_WATCH_OWNER,pid).catch(()=>{});};
   const [history,setHistory]           = useState<DailySummary[]>([]);
@@ -2827,6 +2966,14 @@ export default function App() {
         {text:'Cancel',style:'cancel'},
         {text:'Save',onPress:(v?:string)=>{const n=(v||'').trim();if(n)savePersonEdit(p,n,!!p.is_resident);}},
       ],'plain-text',p.name??'')},
+      {text:p.height_cm?`Height (${fmtHeight(p.height_cm,pUnits)})`:'Set height',onPress:()=>Alert.prompt(`${p.name}'s height`,
+        pUnits==='us'?'For example 5\'6" or 66 in. Sets their walking speed.':'In centimetres, for example 168. Sets their walking speed.',[
+        {text:'Cancel',style:'cancel'},
+        {text:'Save',onPress:async(v?:string)=>{const h=parseHeightCm(v||'');
+          if(h==null){Alert.alert('Check the height',pUnits==='us'?'Use feet and inches, like 5\'6".':'Use centimetres, like 168.');return;}
+          try{await AX.post(`${url()}/persons/${p.id}/height`,{height_cm:h},{timeout:8000});fetchPersons();}
+          catch(_e){Alert.alert('Could not save','Check the connection to the camera.');}}},
+      ],'plain-text',p.height_cm?fmtHeight(p.height_cm,pUnits):'')},
       {text:'Choose photo',onPress:()=>choosePhoto(p)},
       {text:'Use initials instead of photo',onPress:()=>setInitials(p)},
       {text:p.is_resident?'Mark as visitor':'Mark as resident',onPress:()=>savePersonEdit(p,p.name??'Person',!p.is_resident)},
@@ -2837,7 +2984,7 @@ export default function App() {
       {text:'Delete',style:'destructive',onPress:()=>deletePerson(p)},
       {text:'Cancel',style:'cancel'},
     ]);
-  },[persons,savePersonEdit,mergePerson,deletePerson,choosePhoto,setInitials]);
+  },[persons,savePersonEdit,mergePerson,deletePerson,choosePhoto,setInitials,pUnits,fetchPersons]);
 
   const identifyPerson=useCallback(async(personId:string,name:string,isRes:boolean,alertId?:number)=>{
     try{
@@ -3021,11 +3168,9 @@ export default function App() {
   // SAVE PROFILE
   // ─────────────────────────────────────────────
   const saveProfile=async()=>{
-    const cm=editorCm(),kg=editorKg(),ag=parseInt(pAge,10);
+    const cm=editorCm(),kg=null as number|null;
     if(!residentName.trim()){Alert.alert('Name needed','Type the name of the person being watched.');return;}
     if(cm==null){Alert.alert('Check the height',pUnits==='us'?'Use feet and inches, for example 5 ft 6 in.':'Use centimetres, for example 168.');return;}
-    if(wTxt.trim()&&kg==null){Alert.alert('Check the weight',pUnits==='us'?'Use pounds, for example 140.':'Use kilograms, for example 64.');return;}
-    if(pAge.trim()&&!(ag>=1&&ag<=120)){Alert.alert('Check the age','Type the age in years.');return;}
     setSavingProfile(true);
     try{
       await AX.post(`${url()}/config`,{
@@ -3033,7 +3178,7 @@ export default function App() {
         emergency_phone:emergencyPhone||null,
         emergency_email:emergencyEmail||null,
         resident_height_cm:Math.round(cm),
-        resident_weight_kg:kg, resident_age:ag>0?ag:null, units:pUnits, has_apple_watch:watchEnabled?1:0,
+        units:pUnits, has_apple_watch:watchEnabled?1:0,
       });
       setResidentHeight(String(Math.round(cm)));
       const profile:SavedProfile={residentName:residentName.trim(),residentHeight:String(Math.round(cm)),emergencyPhone,emergencyEmail,watchEnabled,
@@ -3043,6 +3188,14 @@ export default function App() {
     }catch(e:any){Alert.alert('Save failed',`Could not reach VIGIL: ${e?.message}`);}
     finally{setSavingProfile(false);}
   };
+
+  // TEACH_V1: offer "Introduce everyone" once, the first time a camera is reachable.
+  useEffect(()=>{
+    if(!jetsonOk||demoMode||teachOffered.current)return;
+    teachOffered.current=true;
+    const key='vigil_teach_offered_'+(cloud?.siteId||'local');
+    AsyncStorage.getItem(key).then(v=>{if(!v){AsyncStorage.setItem(key,'1').catch(()=>{});setTimeout(()=>setShowTeach(true),1500);}}).catch(()=>{});
+  },[jetsonOk,demoMode,cloud?.siteId]);
 
   // CLOUD_V1: switch the whole app to another camera, or in and out of the cloud.
   const resetSiteData=()=>{
@@ -3730,8 +3883,7 @@ export default function App() {
             <View style={{flex:1}}><OField label="in" value={hIn} onChange={setHIn} placeholder="6" keyboard="number-pad"/></View>
           </View>
         ):<OField label="Height (cm)" value={hCm} onChange={setHCm} placeholder="168" keyboard="number-pad"/>}
-        <OField label={pUnits==='us'?'Weight (lb)':'Weight (kg)'} value={wTxt} onChange={setWTxt} placeholder="Optional" keyboard="decimal-pad"/>
-        <OField label="Age" value={pAge} onChange={setPAge} placeholder="Optional" keyboard="number-pad" note="Height is used to estimate walking speed."/>
+        <Text style={{color:C.muted,fontSize:11,marginHorizontal:16,marginVertical:8,lineHeight:16}}>Height sets their walking speed. Everyone else's height: Settings, Camera, Monitored People, Edit.</Text>
       </View>
 
       <Text style={s.secHeader}>Alerts</Text>
@@ -3925,8 +4077,16 @@ export default function App() {
       {persons.length>0&&(
         <>
           <Text style={s.secHeader}>Monitored People</Text>
+          <TouchableOpacity onPress={()=>setShowTeach(true)}
+            style={[s.card,{marginHorizontal:16,marginBottom:10,flexDirection:'row',alignItems:'center',borderWidth:1,borderColor:C.green+'55'}]}>
+            <View style={{flex:1}}>
+              <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Introduce everyone</Text>
+              <Text style={{color:C.sub,fontSize:12,marginTop:3,lineHeight:17}}>Teach VIGIL who is who, one person at a time. Do it again whenever names are often wrong.</Text>
+            </View>
+            <Text style={{color:C.green,fontSize:15,fontWeight:'700'}}>Start</Text>
+          </TouchableOpacity>
           <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginBottom:8,lineHeight:17}}>
-            Everyone VIGIL has recognised. Tap Edit to rename, mark as a visitor, merge a duplicate or delete. Press and hold anyone to delete them.
+            Everyone VIGIL has recognised. Tap Edit to rename, set their height, mark as a visitor, merge a duplicate or delete. Press and hold anyone to delete them.
           </Text>
           {persons.map(p=>(
             <TouchableOpacity
@@ -3940,7 +4100,7 @@ export default function App() {
                 <View style={{flex:1,minWidth:0}}>
                   <Text style={{color:C.text,fontSize:14,fontWeight:'600'}} numberOfLines={1} ellipsizeMode="tail">{p.name??'Unidentified Person'}</Text>
                   <Text style={{color:C.sub,fontSize:11,marginTop:2}} numberOfLines={1} ellipsizeMode="tail">
-                    {p.is_resident?'Resident':'Visitor'}{` · ${Math.round(p.confidence*100)}%`}{p.name?' · Tap for trends':''}
+                    {p.is_resident?'Resident':'Visitor'}{p.height_cm?` · ${fmtHeight(p.height_cm,pUnits)}`:''}{p.name?' · Tap for trends':''}
                   </Text>
                 </View>
               </View>
@@ -4224,6 +4384,9 @@ export default function App() {
       </Modal>
 
       {/* Person detail screen */}
+      <Modal visible={showTeach} animationType="slide" presentationStyle="fullScreen" onRequestClose={()=>setShowTeach(false)}>
+        {showTeach&&<TeachWhoScreen serverUrl={urlRef.current||FALLBACK_URL} units={pUnits} onClose={()=>{setShowTeach(false);fetchPersons();}}/>}
+      </Modal>
       <Modal visible={!!selectedPerson} animationType="slide" presentationStyle="fullScreen">
         {selectedPerson&&(
           <PersonDetailScreen demoMode={demoMode}
