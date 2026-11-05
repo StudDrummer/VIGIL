@@ -486,6 +486,21 @@ def _apply_corrections():
             if str(src).startswith("track:"):
                 try:
                     _t = int(str(src).split(":", 1)[1])
+                    _prev = _track_to_pid.get(_t)
+                    if _prev and _prev != dst:                      # LEARN_V3: undo what was learned under the wrong name
+                        if _VR is not None and _trk_fp.get(_t):
+                            _VR.GALLERY.remove_recent(_prev, np.array(_trk_fp[_t]))
+                        try:
+                            _prop_learn(_t, dst, wrong=_prev)
+                        except Exception:
+                            pass
+                        if _V8 is not None:
+                            for _gal in (_V8.face_gal,):
+                                _g = _gal.get(_prev)
+                                _mine = [e[0] for e in _V8_TF.get(_t, ())]
+                                if _g and _mine:
+                                    _gal[_prev] = [v for v in _g if max(float(v @ m) for m in _mine) < 0.97]
+                        print("[LEARN] track %s was wrongly %s: its views were taken back" % (_t, _prev), flush=True)
                     _track_to_pid[_t] = dst
                     _trk_status.pop(_t, None)
                     _evidence.pop(_t, None)
@@ -497,7 +512,8 @@ def _apply_corrections():
                     if _VR is not None and _trk_fp.get(_t):
                         _VR.GALLERY.add(dst, np.array(_trk_fp[_t][-8:]), pin=True)
                         _VR.GALLERY.save(force=True)
-                    _prop_learn(_t, dst)                          # LEARN_V2
+                    if not (_prev and _prev != dst):
+                        _prop_learn(_t, dst)                      # LEARN_V2
                     _v8_learn_track(_t, dst, _named_ids() | {dst}, "named")   # IDENTITY_V8
                     print("[CORRECTION] track %s -> %s" % (_t, dst), flush=True)
                 except Exception as _e:
@@ -1427,7 +1443,9 @@ def _v8_decide_new(tid, matched, why, used):
         if mine is None:
             return matched, why
         if best_p != matched and best_t >= 2.0 and best_t - mine >= V8_MARGIN:
-            if best_e.get("face", 0) >= 2.0 and best_t - mine >= V8_MARGIN + 1:
+            trained = all(len(_V8.stats["appearance"][c]) >= 30 for c in ("same", "diff"))
+            if (best_e.get("face", 0) >= 2.0 or (trained and len(best_e) >= 2)) \
+                    and best_t >= V8_NAME and best_t - mine >= V8_MARGIN + 1:
                 return best_p, "V8 overrides %s | %s" % (matched, txt)
             return "?", why + " | V8 doubts: " + txt
         if mine <= V8_AGAINST:
@@ -1548,6 +1566,48 @@ def _v8_check(assignments, tids):
     if len(_V8_ST["learned"]) > 300:
         _V8_ST["learned"].clear()
     return out
+
+
+_LAST_SEEN = {}    # named person -> (time, centre x, centre y, box height) when last on screen
+
+
+def _v8_relink(tid, idx, kp, boxes, used):
+    """RELINK_V1: the tracker lost someone for a moment (sat down, walked
+    behind someone) and they reappear as a new track in the same place. Keep
+    their name instead of identifying them from scratch: every fresh decision
+    is a chance to get it wrong."""
+    b = boxes[idx] if idx < len(boxes) else None
+    if b is None:
+        return None, ""
+    cx, cy, h = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2, max(b[3] - b[1], 1.0)
+    for j, o in enumerate(boxes):                 # born next to someone else: too risky
+        if j != idx and o is not None:
+            if abs((o[0] + o[2]) / 2 - cx) < 0.5 * h and abs((o[1] + o[3]) / 2 - cy) < 0.6 * h:
+                return None, ""
+    now = time.time()
+    named = _named_ids()
+    cands = []
+    for pid, (t, x, y, hh) in list(_LAST_SEEN.items()):
+        gap = now - t
+        if pid in used or pid not in named or gap > 3.0 or gap < 0.2:
+            continue
+        if pid in _track_to_pid.values() and any(
+                v == pid and k != tid and _V7["last_cross"].get(k, 0) > now - 1 for k, v in _track_to_pid.items()):
+            continue
+        d = ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5 / max(h, hh)
+        if d < 0.6 and 0.6 < h / max(hh, 1.0) < 1.6:
+            cands.append((d, gap, pid))
+    if not cands:
+        return None, ""
+    cands.sort()
+    if len(cands) >= 2 and cands[1][0] < 2.5 * cands[0][0]:
+        return None, ""
+    d, gap, pid = cands[0]
+    if _V8 is not None:
+        tot, _ev = _V8.evidence(_v8_raw(tid, pid))
+        if tot < -2.0:
+            return None, ""
+    return pid, "back after %.1f s, %.0f%% of a body height away" % (gap, 100 * d)
 
 
 def _same_body(a, b):
@@ -1886,6 +1946,20 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             if tid is None:
                 frame_assignments.append((None, None))
                 continue
+            if tid not in _evidence and not _occl:              # RELINK_V1
+                try:
+                    _rl, _rw = _v8_relink(tid, _idx, kp, _boxes, _used_this_frame)
+                except Exception:
+                    _rl, _rw = None, ""
+                if _rl is not None:
+                    print("[V8] RELINK track %s -> %s | %s" % (tid, _rl, _rw), flush=True)
+                    _track_to_pid[tid] = _rl
+                    _used_this_frame.add(_rl)
+                    if _rl in _signatures:
+                        _signatures[_rl].update(height_px, shape_r, colour_r)
+                    _trk_status.pop(tid, None)
+                    frame_assignments.append((_rl, height_px))
+                    continue
             ev = _evidence.setdefault(tid, {"c": [], "h": [], "n": 0})
             ev["n"] += 1
             if colour_r is not None:
@@ -2012,6 +2086,15 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             print("[V8] finalize error: %s" % _e8f, flush=True)
             _labels8 = [(_trk_status.get(track_ids[_j]) if (track_ids and _j < len(track_ids)) else None)
                         for _j in range(len(frame_assignments))]
+
+        try:                                                     # RELINK_V1
+            _nw = time.time()
+            for _j, (_p, _hh) in enumerate(frame_assignments):
+                _bb = _boxes[_j] if _j < len(_boxes) else None
+                if _p is not None and _bb is not None:
+                    _LAST_SEEN[_p] = (_nw, (_bb[0] + _bb[2]) / 2, (_bb[1] + _bb[3]) / 2, max(_bb[3] - _bb[1], 1.0))
+        except Exception:
+            pass
 
         # all_persons[0] is the largest = the resident being measured for gait
         main_id = frame_assignments[0][0] if frame_assignments else None

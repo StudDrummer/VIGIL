@@ -944,6 +944,137 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
 }
 
 // ─────────────────────────────────────────────
+// BASELINE_V2: "Is this normal for them?"
+// Baseline is VIGIL's memory of each person's own normal. Every measure gets
+// one plain verdict and one bar: the green zone is their usual range (from
+// the days before this week), the dot is this week's typical value. AI
+// Insights explains what a change might mean; this page shows the numbers it
+// stands on.
+// ─────────────────────────────────────────────
+type BLMeasure={key:string;label:string;unit:string;dec:number;higherWorse?:boolean;why:string;
+  series:{date:string;v:number|null}[]};
+const BL_MIN_DAYS=5;
+const blMedian=(a:number[])=>{const b=[...a].sort((x,y)=>x-y);const n=b.length;return n%2?b[(n-1)/2]:(b[n/2-1]+b[n/2])/2;};
+function blEvaluate(m:BLMeasure){
+  const today=new Date();const wk=new Date(today);wk.setDate(today.getDate()-6);
+  const cut=wk.toISOString().slice(0,10);
+  const pts=m.series.filter(x=>x.v!=null&&isFinite(x.v as number)) as {date:string;v:number}[];
+  const before=pts.filter(x=>x.date<cut).slice(-30).map(x=>x.v);
+  const week=pts.filter(x=>x.date>=cut).map(x=>x.v);
+  if(before.length<BL_MIN_DAYS)return{state:'learning' as const,daysBefore:before.length,weekVal:week.length?blMedian(week):null};
+  const med=blMedian(before);
+  const mad=blMedian(before.map(v=>Math.abs(v-med)));
+  const sd=Math.max(1.4826*mad,Math.abs(med)*0.03);
+  const lo=med-1.5*sd,hi=med+1.5*sd;
+  if(week.length<2)return{state:'noweek' as const,lo,hi,med,daysBefore:before.length,weekVal:week.length?week[0]:null};
+  const wv=blMedian(week);
+  const where=wv<lo?'low':wv>hi?'high':'normal';
+  const concern=where!=='normal'&&((where==='high')===!!m.higherWorse);
+  return{state:'ok' as const,lo,hi,med,wv,where,concern,daysBefore:before.length,daysWeek:week.length};
+}
+function BaselineMeasureCard({m}:{m:BLMeasure}){
+  const e:any=blEvaluate(m);
+  const f=(v:number)=>v.toFixed(m.dec);
+  const pill=(txt:string,col:string)=>(
+    <View style={{paddingHorizontal:10,paddingVertical:4,borderRadius:12,backgroundColor:col+'22'}}>
+      <Text style={{color:col,fontSize:12,fontWeight:'700'}}>{txt}</Text></View>);
+  let status=pill('Learning',C.sub), line='', bar=null as any;
+  if(e.state==='learning'){
+    line=`Learning their normal: ${e.daysBefore} of ${BL_MIN_DAYS} days recorded.`;
+  }else{
+    const verdict=e.state!=='ok'?pill('Not enough this week',C.sub)
+      :e.where==='normal'?pill('Normal for them',C.green)
+      :pill(e.where==='low'?'Lower than usual':'Higher than usual',e.concern?C.orange:C.blue);
+    status=verdict;
+    line=e.state==='ok'
+      ?`This week ${f(e.wv)} ${m.unit}. Usual ${f(e.lo)} to ${f(e.hi)} ${m.unit}.`
+      :`Usual ${f(e.lo)} to ${f(e.hi)} ${m.unit}. Not seen enough this week to compare.`;
+    // one bar: the usual range in green, this week as a dot
+    const v=e.state==='ok'?e.wv:null;
+    const span=(e.hi-e.lo)||1;
+    const left=Math.min(e.lo,v??e.lo)-span*0.6, right=Math.max(e.hi,v??e.hi)+span*0.6;
+    const pct=(x:number)=>`${Math.max(0,Math.min(100,((x-left)/(right-left))*100))}%`;
+    const dotCol=e.state!=='ok'?C.sub:e.where==='normal'?C.green:e.concern?C.orange:C.blue;
+    bar=(
+      <View style={{marginTop:14,marginBottom:4}}>
+        <View style={{height:10,borderRadius:5,backgroundColor:C.fill}}>
+          <View style={{position:'absolute',top:0,bottom:0,left:pct(e.lo) as any,
+            width:`${((e.hi-e.lo)/(right-left))*100}%` as any,backgroundColor:C.green+'55',borderRadius:5}}/>
+          {v!=null&&<View style={{position:'absolute',top:-5,left:pct(v) as any,marginLeft:-10,width:20,height:20,borderRadius:10,
+            backgroundColor:dotCol,borderWidth:3,borderColor:C.card}}/>}
+        </View>
+        <View style={{flexDirection:'row',justifyContent:'space-between',marginTop:8}}>
+          <Text style={{color:C.muted,fontSize:11}}>{m.higherWorse?'Better':'Lower'}</Text>
+          <Text style={{color:C.green,fontSize:11}}>Usual range</Text>
+          <Text style={{color:C.muted,fontSize:11}}>{m.higherWorse?'Worse':'Higher'}</Text>
+        </View>
+      </View>);
+  }
+  return(
+    <View style={{marginHorizontal:16,marginBottom:10,padding:16,backgroundColor:C.card,borderRadius:16}}>
+      <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
+        <Text style={{color:C.text,fontSize:15,fontWeight:'700',flex:1,paddingRight:8}}>{m.label}</Text>
+        {status}
+      </View>
+      <Text style={{color:C.sub,fontSize:13,marginTop:6,lineHeight:19}}>{line}</Text>
+      {bar}
+      <Text style={{color:C.muted,fontSize:12,marginTop:8,lineHeight:17}}>{m.why}</Text>
+    </View>
+  );
+}
+function BaselineView({name,measures,groups}:{name:string;measures:BLMeasure[];groups?:{title:string;keys:string[]}[]}){
+  const shown=measures.filter(m=>m.series.some(x=>x.v!=null));
+  const ev=shown.map(m=>({m,e:blEvaluate(m) as any}));
+  const ready=ev.filter(x=>x.e.state==='ok');
+  const off=ready.filter(x=>x.e.where!=='normal');
+  const days=Math.max(0,...ev.map(x=>x.e.daysBefore||0));
+  const learning=ev.length>0&&ev.every(x=>x.e.state==='learning');
+  const head=learning?`Learning ${name}'s normal`
+    :!ready.length?`${name}'s normal is set`
+    :off.length===0?`Everything is normal for ${name} this week`
+    :`${off.length} of ${ready.length} ${off.length===1?'measure is':'measures are'} outside ${name}'s normal`;
+  const sub=learning
+    ?`VIGIL needs ${BL_MIN_DAYS} days of ${name} walking in view before it can say what is normal for them. ${days} so far.`
+    :`Compared with ${name}'s own usual range from up to ${Math.min(30,days)} earlier days, never with other people. AI Insights explains what a change may mean.`;
+  const byKey:Record<string,BLMeasure>={};shown.forEach(m=>{byKey[m.key]=m;});
+  const sections=groups||[{title:'',keys:shown.map(m=>m.key)}];
+  return(
+    <View>
+      <View style={{marginHorizontal:16,marginBottom:14,padding:16,backgroundColor:C.card,borderRadius:16,
+        borderWidth:1,borderColor:(!learning&&off.some(x=>x.e.concern))?C.orange+'66':C.border}}>
+        <Text style={{color:C.text,fontSize:17,fontWeight:'800',lineHeight:23}}>{head}</Text>
+        <Text style={{color:C.sub,fontSize:13,marginTop:6,lineHeight:19}}>{sub}</Text>
+        {!learning&&off.length>0&&<Text style={{color:C.text,fontSize:13,marginTop:8,lineHeight:19}}>
+          {off.map(x=>`${x.m.label}: ${x.e.where==='low'?'lower':'higher'} than usual`).join('. ')+'.'}</Text>}
+      </View>
+      {shown.length===0&&<View style={s.empty}><Text style={s.emptyTxt}>No measurements yet</Text>
+        <Text style={s.emptySub}>Numbers appear after {name} is seen walking by the camera</Text></View>}
+      {sections.map(g=>{
+        const ms=g.keys.map(k=>byKey[k]).filter(Boolean);
+        if(!ms.length)return null;
+        return(<View key={g.title||'all'}>
+          {!!g.title&&<Text style={s.secHeader}>{g.title}</Text>}
+          {ms.map(m=><BaselineMeasureCard key={m.key} m={m}/>)}
+        </View>);
+      })}
+    </View>
+  );
+}
+const BL_WHY:Record<string,string>={
+  speed:'Walking more slowly over weeks is one of the best-studied early signs of falls and declining health.',
+  cadence:'Fewer steps per minute can come with tiredness, pain or weakness.',
+  posture:'Stooping more over time can come with back pain, weakness or fatigue.',
+  asym:'Favouring one leg can mean pain or a new problem on one side.',
+  stride:'Less regular steps are linked to a higher chance of falling.',
+  activity:'Moving much less than usual can be an early sign of illness or low mood.',
+  active:'Fewer active minutes than usual is worth noticing if it lasts.',
+  still:'Much longer still periods than usual are worth a check.',
+  rhr:'A resting heart rate above their usual can come with illness, pain or poor sleep.',
+  hrv:'Lower than their usual can mean stress, illness or poor recovery.',
+  sleep:'A lasting change in sleep is worth noticing.',
+};
+
+// ─────────────────────────────────────────────
 // AI INSIGHTS SCREEN
 // ─────────────────────────────────────────────
 function PersonDetailScreen({
@@ -965,7 +1096,7 @@ function PersonDetailScreen({
     const u = serverUrl||FALLBACK_URL;
     try{
       const [t,b,w] = await Promise.all([
-        AX.get(`${u}/persons/${personId}/detections?days=14`,{timeout:8000}),
+        AX.get(`${u}/persons/${personId}/detections?days=60`,{timeout:8000}),
         AX.get(`${u}/persons/${personId}/baseline-status`,{timeout:8000}),
         AX.get(`${u}/persons/${personId}/weekly-trend`,{timeout:8000}).catch(()=>({data:null})),
       ]);
@@ -1030,7 +1161,7 @@ function PersonDetailScreen({
     const latest=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>{const v=trends.map(t=>t[k]).filter(x=>x!=null) as number[];return v.length?v[v.length-1]:null;};
     return(
       <View>
-        <View style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:16,padding:16}}>
+        {view==='week'&&<View style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:16,padding:16}}>
           <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
             <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>{hasBaseline?`${personName}'s baseline is set`:`Learning ${personName}'s normal`}</Text>
             <Text style={{color:hasBaseline?C.green:C.orange,fontSize:13,fontWeight:'600'}}>{hasBaseline?'Active':`Day ${daysCollected} of ${daysNeeded}`}</Text>
@@ -1038,7 +1169,7 @@ function PersonDetailScreen({
           <View style={{height:6,backgroundColor:C.fill,borderRadius:3}}>
             <View style={{height:6,width:`${progressPct}%` as any,backgroundColor:C.green,borderRadius:3}}/>
           </View>
-        </View>
+        </View>}
         {view==='week'?(
           wk.length===0?(
             <View style={{alignItems:'center',paddingVertical:36}}>
@@ -1056,23 +1187,15 @@ function PersonDetailScreen({
           )
         ):(
           <>
-            <Text style={s.secHeader}>{personName}'s usual range</Text>
-            {rows.map(([lbl,k,unit,dec])=>{
-              const st=stat(k); const lv=latest(k);
-              return(
-                <View key={k} style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16}}>
-                  <Text style={{color:C.sub,fontSize:12.5,fontWeight:'600',marginBottom:4}}>{lbl}</Text>
-                  {st?(
-                    <>
-                      <Text style={{color:C.text,fontSize:20,fontWeight:'800'}}>{st.mean.toFixed(dec)} <Text style={{color:C.sub,fontSize:12}}>± {st.std.toFixed(dec)} {unit}</Text></Text>
-                      <Text style={{color:C.muted,fontSize:12,marginTop:4}}>
-                        {lv!=null?`Latest day: ${lv.toFixed(dec)} ${unit}. `:''}{st.src==='baseline'?'Personal baseline.':`So far, from ${trends.filter(t=>t[k]!=null).length} days; the baseline is set after ${daysNeeded}.`}
-                      </Text>
-                    </>
-                  ):<Text style={{color:C.muted,fontSize:13}}>Not enough days yet</Text>}
-                </View>
-              );
-            })}
+            {(()=>{
+              const ser=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>trends.map(t=>({date:t.date,v:t[k]}));
+              return <BaselineView name={personName} measures={[
+                {key:'speed',label:'Walking speed',unit:'m/s',dec:2,why:BL_WHY.speed,series:ser('avg_speed')},
+                {key:'cadence',label:'Steps per minute',unit:'steps/min',dec:0,why:BL_WHY.cadence,series:ser('avg_cadence')},
+                {key:'posture',label:'Posture',unit:'/100',dec:0,why:BL_WHY.posture,series:ser('avg_posture')},
+                {key:'asym',label:'Step evenness',unit:'% uneven',dec:1,higherWorse:true,why:BL_WHY.asym,series:ser('avg_asymmetry')},
+              ]}/>;
+            })()}
           </>
         )}
       </View>
@@ -3374,104 +3497,31 @@ export default function App() {
       );
     };
 
-    // Baseline view: each measure against the resident's own usual range,
-    // computed from the days BEFORE the latest week so the week being
-    // judged is never part of its own standard.
-    const BaselineCard=({k,label,unit,color,dec=0,higherWorse=false}:{k:keyof DailySummary;label:string;unit:string;color:string;dec?:number;higherWorse?:boolean})=>{
-      const POS_ONLY=['camera_gait_speed_ms','camera_cadence_spm','posture_score','resting_hr','hrv_sdnn','spo2_avg','sleep_hours','stride_variability'];
-      const num=(r:DailySummary):number|null=>{const v=r[k] as any;if(!(typeof v==='number'&&isFinite(v)))return null;if(v<=0&&POS_ONLY.includes(k as string))return null;return v;};
-      const asc=[...history].sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
-      const recent=asc.slice(-14).map(r=>({d:r.date,v:num(r)}));
-      if(recent.every(x=>x.v==null))return null;
-      const base=asc.slice(0,Math.max(0,asc.length-7)).slice(-30).map(num).filter((v):v is number=>v!=null);
-      if(base.length<5){
-        return(
-          <View style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16}}>
-            <Text style={{color:C.sub,fontSize:12.5,fontWeight:'600'}}>{label}</Text>
-            <Text style={{color:C.muted,fontSize:12,marginTop:6}}>
-              {`Learning their usual range: ${base.length} of 5 earlier days recorded.`}
-            </Text>
-          </View>
-        );
-      }
-      // Robust usual range: median +/- 1.5 x scaled median absolute deviation.
-      // A few odd days (no walking seen, a bad reading) can no longer stretch
-      // the band until nothing falls outside it.
-      const srt=[...base].sort((a,b)=>a-b);
-      const med=(a:number[])=>{const n=a.length;return n%2?a[(n-1)/2]:(a[n/2-1]+a[n/2])/2;};
-      const mean=med(srt);
-      const mad=med(srt.map(v=>Math.abs(v-mean)).sort((a,b)=>a-b));
-      const std=Math.max(1.4826*mad,Math.abs(mean)*0.02);
-      const lo=mean-1.5*std,hi=mean+1.5*std;
-      const vals=recent.filter(x=>x.v!=null).map(x=>x.v as number);
-      const top=Math.max(hi,...vals),bot=Math.min(lo,...vals);
-      const span=(top-bot)||1;const H=70;
-      const y=(v:number)=>((v-bot)/span)*H;
-      const last=[...recent].reverse().find(x=>x.v!=null);
-      const lv=last?(last.v as number):mean;
-      const where=lv<lo?'below':lv>hi?'above':'within';
-      const bad=where!=='within'&&((where==='above')===higherWorse);
-      const range=`${lo.toFixed(dec)} to ${hi.toFixed(dec)}`;
-      const msg=where==='within'
-        ?`Latest ${lv.toFixed(dec)} ${unit} is within their usual range (${range}).`
-        :`Latest ${lv.toFixed(dec)} ${unit} is ${where} their usual range (${range}).`;
-      return(
-        <View style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16}}>
-          <Text style={{color:C.sub,fontSize:12.5,fontWeight:'600'}}>{label}</Text>
-          <Text style={{color:bad?C.orange:C.text,fontSize:13,marginTop:4,lineHeight:19}}>{msg}</Text>
-          <View style={{height:H+8,marginTop:10}}>
-            <View style={{position:'absolute',left:0,right:0,bottom:y(lo),height:Math.max(2,y(hi)-y(lo)),
-                          backgroundColor:color+'22',borderRadius:4}}/>
-            <View style={{position:'absolute',left:0,right:0,top:0,bottom:0,flexDirection:'row',alignItems:'flex-end',gap:3}}>
-              {recent.map((x,i)=>{
-                if(x.v==null)return<View key={i} style={{flex:1,height:2,backgroundColor:C.muted+'30'}}/>;
-                const out=x.v<lo||x.v>hi;
-                return(
-                  <View key={i} style={{flex:1,height:Math.max(6,y(x.v)),justifyContent:'flex-start'}}>
-                    <View style={{height:6,width:'100%',borderRadius:3,backgroundColor:out?C.orange:color}}/>
-                  </View>
-                );
-              })}
-            </View>
-          </View>
-          <Text style={{color:C.muted,fontSize:10,marginTop:6}}>
-            {`Shaded band: their usual range from ${base.length} earlier days. Marks: the last ${recent.length} days.`}
-          </Text>
-        </View>
-      );
+    const renderBaseline=()=>{
+      const POS_ONLY=['camera_gait_speed_ms','camera_cadence_spm','posture_score','resting_hr','hrv_sdnn','sleep_hours','stride_variability'];
+      const ser=(k:keyof DailySummary)=>[...history].sort((a,b)=>a.date<b.date?-1:1).map(r=>{
+        const v=r[k] as any;const ok=typeof v==='number'&&isFinite(v)&&!(v<=0&&POS_ONLY.includes(k as string));
+        return{date:r.date,v:ok?v:null};});
+      const watch=history.some(r=>r.resting_hr!=null);
+      const ms:BLMeasure[]=[
+        {key:'speed',label:'Walking speed',unit:'m/s',dec:2,why:BL_WHY.speed,series:ser('camera_gait_speed_ms')},
+        {key:'cadence',label:'Steps per minute',unit:'steps/min',dec:0,why:BL_WHY.cadence,series:ser('camera_cadence_spm')},
+        {key:'posture',label:'Posture',unit:'/100',dec:0,why:BL_WHY.posture,series:ser('posture_score')},
+        {key:'asym',label:'Step evenness',unit:'% uneven',dec:1,higherWorse:true,why:BL_WHY.asym,series:ser('camera_asymmetry_pct')},
+        {key:'stride',label:'Walking steadiness',unit:'% step-time variation',dec:1,higherWorse:true,why:BL_WHY.stride,series:ser('stride_variability')},
+        {key:'activity',label:'Time moving',unit:'% of time in view',dec:0,why:BL_WHY.activity,series:ser('activity_level_pct')},
+        {key:'still',label:'Longest still period',unit:'min',dec:0,higherWorse:true,why:BL_WHY.still,series:ser('longest_stillness_min')},
+        ...(watch?[
+          {key:'rhr',label:'Resting heart rate',unit:'bpm',dec:0,higherWorse:true,why:BL_WHY.rhr,series:ser('resting_hr')},
+          {key:'hrv',label:'Heart rate variability',unit:'ms',dec:0,why:BL_WHY.hrv,series:ser('hrv_sdnn')},
+          {key:'sleep',label:'Sleep',unit:'h',dec:1,why:BL_WHY.sleep,series:ser('sleep_hours')},
+        ]:[]),
+      ];
+      return <BaselineView name={residentPerson?.name??(residentName||'the resident')} measures={ms}
+        groups={[{title:'Walking',keys:['speed','cadence','posture','asym','stride']},
+                 {title:'Activity',keys:['activity','still']},
+                 {title:'Apple Watch',keys:['rhr','hrv','sleep']}]}/>;
     };
-
-    const renderBaseline=()=>(
-      <>
-        <Text style={{color:C.sub,fontSize:13,lineHeight:19,marginHorizontal:20,marginBottom:12}}>
-          Each measure compared with this resident's own usual range. Orange means outside it.
-        </Text>
-        {history.length<6?(
-          <View style={s.empty}><Text style={s.emptyTxt}>Baseline needs about a week</Text><Text style={s.emptySub}>Usual ranges appear once enough days are recorded</Text></View>
-        ):(
-          <>
-            <Text style={s.secHeader}>Gait & Posture</Text>
-            <BaselineCard k="camera_gait_speed_ms" label="Walking Speed" unit="m/s" color={C.teal} dec={2}/>
-            <BaselineCard k="camera_cadence_spm" label="Steps per Minute" unit="steps/min" color={C.teal}/>
-            <BaselineCard k="posture_score" label="Posture" unit="/100" color={C.purple}/>
-            <BaselineCard k="camera_asymmetry_pct" label="Step Evenness (asymmetry)" unit="%" color={C.orange} dec={1} higherWorse/>
-            <BaselineCard k="stride_variability" label="Walking Steadiness (step-time variation)" unit="%" color={C.teal} dec={1} higherWorse/>
-            <Text style={s.secHeader}>Activity</Text>
-            <BaselineCard k="activity_level_pct" label="Activity Level" unit="%" color={C.green}/>
-            <BaselineCard k="active_minutes" label="Active Minutes" unit="min" color={C.green}/>
-            <BaselineCard k="longest_stillness_min" label="Longest Stillness" unit="min" color={C.orange} higherWorse/>
-            {history.some(r=>r.resting_hr!=null)&&(
-              <>
-                <Text style={s.secHeader}>Apple Watch</Text>
-                <BaselineCard k="resting_hr" label="Resting Heart Rate" unit="bpm" color={C.red} higherWorse/>
-                <BaselineCard k="hrv_sdnn" label="Heart Rate Variability" unit="ms" color={C.purple} dec={1}/>
-                <BaselineCard k="sleep_hours" label="Sleep" unit="h" color={C.blue} dec={1}/>
-              </>
-            )}
-          </>
-        )}
-      </>
-    );
 
     return(
       <ScrollView showsVerticalScrollIndicator={false} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">

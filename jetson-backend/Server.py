@@ -1175,23 +1175,37 @@ def person_baseline_status(person_id):
 @app.route("/persons/<person_id>/detections", methods=["GET"])
 @require_api_key
 def person_detections_history(person_id):
+    """BASELINE_V2: one row per day with that day's typical walking numbers:
+    the median of believable readings (same rules as /persons/<id>/today), so a
+    few frozen or impossible readings no longer move a day's value."""
     conn = get_db()
-    days = int(request.args.get("days", 14))
+    days = max(1, min(120, int(request.args.get("days", 14))))
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     rows = conn.execute("""
-        SELECT date(detected_at) as date,
-               AVG(NULLIF(gait_speed_ms,0)) as avg_speed,
-               AVG(NULLIF(cadence_spm,0))   as avg_cadence,
-               AVG(posture_score)            as avg_posture,
-               AVG(asymmetry_pct)            as avg_asymmetry,
-               COUNT(*) as samples
+        SELECT date(detected_at,'localtime') AS d, gait_speed_ms, cadence_spm, posture_score, asymmetry_pct
         FROM person_detections
-        WHERE person_id=? AND detected_at >= ?
-        GROUP BY date(detected_at)
-        ORDER BY date ASC
-    """, (person_id, cutoff)).fetchall()
+        WHERE person_id=? AND date(detected_at,'localtime') >= ?
+        ORDER BY detected_at ASC""", (person_id, cutoff)).fetchall()
     conn.close()
-    return jsonify([dict(r) for r in rows])
+    by = {}
+    for r in rows:
+        by.setdefault(r["d"], []).append(r)
+
+    def med(rs, col, lo, hi):
+        v = sorted(float(x[col]) for x in rs if x[col] is not None and lo <= float(x[col]) <= hi)
+        if len(v) < 3:
+            return None
+        m = len(v) // 2
+        return round(v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0, 3)
+
+    out = []
+    for d in sorted(by):
+        rs = by[d]
+        out.append({"date": d, "avg_speed": med(rs, "gait_speed_ms", 0.2, 2.0),
+                    "avg_cadence": med(rs, "cadence_spm", 60, 140),
+                    "avg_posture": med(rs, "posture_score", 0.1, 100),
+                    "avg_asymmetry": med(rs, "asymmetry_pct", 0, 40), "samples": len(rs)})
+    return jsonify(out)
 
 
 

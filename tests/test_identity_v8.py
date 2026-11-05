@@ -170,6 +170,40 @@ def test_face_cue_on_real_photos():
     print("  face cue picked the right person in %d of %d new photos" % (hits, total))
 
 
+
+
+def test_relink_after_a_short_loss():
+    _fresh_hook()
+    import time as _t
+    ph._named_cache[0] = 1e18
+    ph._named_cache[1] = {"mom", "dad"}
+    ph._v8_raw = lambda t, p: {}
+    now = _t.time()
+    k = body(500)
+    box = ph._kp_box(k)
+    h = box[3] - box[1]
+    # mom was last seen right there a second ago: the new track keeps her name
+    ph._LAST_SEEN.clear()
+    ph._LAST_SEEN["mom"] = (now - 1.0, (box[0] + box[2]) / 2 + 10, (box[1] + box[3]) / 2, h)
+    ph._LAST_SEEN["dad"] = (now - 1.0, 1500.0, 400.0, h)
+    pid, why = ph._v8_relink(9, 0, k, [box], set())
+    assert pid == "mom", (pid, why)
+    # both were there: ambiguous, decide the normal way
+    ph._LAST_SEEN["dad"] = (now - 1.0, (box[0] + box[2]) / 2 - 12, (box[1] + box[3]) / 2, h)
+    assert ph._v8_relink(9, 0, k, [box], set())[0] is None
+    # gone for 10 s: too long to assume
+    ph._LAST_SEEN.pop("dad")
+    ph._LAST_SEEN["mom"] = (now - 10.0, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, h)
+    assert ph._v8_relink(9, 0, k, [box], set())[0] is None
+    # born right next to someone else: too risky
+    ph._LAST_SEEN["mom"] = (now - 1.0, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, h)
+    other = ph._kp_box(body(560))
+    assert ph._v8_relink(9, 0, k, [box, other], set())[0] is None
+    # the evidence says it is not her: no re-link
+    ph._v8_raw = lambda t, p: {"face": 0.02}
+    assert ph._v8_relink(9, 0, k, [box], set())[0] is None
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

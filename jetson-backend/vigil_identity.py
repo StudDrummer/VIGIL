@@ -80,26 +80,38 @@ class FaceID:
         if not rec:
             self.why = "face models not found"
             return
-        if not (hasattr(cv2, "FaceDetectorYN") and hasattr(cv2, "FaceRecognizerSF")):
+        if not hasattr(cv2, "FaceRecognizerSF"):
             self.why = "this OpenCV (%s) has no face API" % cv2.__version__
             return
+        self.lock = threading.Lock()
         try:
-            self.det = cv2.FaceDetectorYN.create(det, "", (320, 320), self.MIN_SCORE, 0.3, 5)
             self.rec = cv2.FaceRecognizerSF.create(rec, "")
-            self.lock = threading.Lock()
-            # older OpenCV loads this detector but fails on the first frame
-            self.det.setInputSize((96, 96))
-            self.det.detect(np.zeros((96, 96, 3), dtype=np.uint8))
             self.rec.feature(np.zeros((112, 112, 3), dtype=np.uint8))
-            self.ok = True
         except Exception as e:
-            self.why = "could not load face models: %s" % e
+            self.why = "could not load the face matching model: %s" % e
+            return
+        # The face finder (YuNet) needs OpenCV 4.8+. Without it, the face is
+        # located from the eyes and nose the pose model already found
+        # (FACE_KP_V1), which works on older OpenCV such as a Jetson's 4.5.4.
+        self.mode = "keypoints"
+        if os.environ.get("VIGIL_FACE_FINDER", "") != "keypoints" and hasattr(cv2, "FaceDetectorYN"):
+            try:
+                self.det = cv2.FaceDetectorYN.create(det, "", (320, 320), self.MIN_SCORE, 0.3, 5)
+                self.det.setInputSize((96, 96))
+                self.det.detect(np.zeros((96, 96, 3), dtype=np.uint8))
+                self.mode = "yunet"
+            except Exception:
+                self.mode = "keypoints"
+        self.ok = True
+        self.why = "face finder: %s" % ("YuNet" if self.mode == "yunet" else "eyes and nose from the pose model")
 
     def embed(self, frame, kp):
         """(128-d unit vector, quality 0..1) for the face of the person with
         keypoints kp, or None when no clear face is visible."""
         if not self.ok or frame is None or kp is None:
             return None
+        if self.mode == "keypoints":
+            return self._embed_kp(frame, kp)
         try:
             k = np.asarray(kp, dtype=float)
             head = k[0:5]
@@ -137,6 +149,41 @@ class FaceID:
             if n < 1e-6:
                 return None
             q = min(1.0, w_orig / 70.0) * float(f[14])
+            return v / n, q
+        except Exception:
+            return None
+
+
+    def _embed_kp(self, frame, kp):
+        """FACE_KP_V1: align the face from the pose keypoints (eyes, nose) and
+        the standard face proportions, then compute the same face template."""
+        try:
+            k = np.asarray(kp, dtype=float)
+            if min(k[0][2], k[1][2], k[2][2]) < 0.6:
+                return None
+            re_, le_, nose = k[2][:2], k[1][:2], k[0][:2]       # image-left eye first
+            u = le_ - re_
+            d = float(np.linalg.norm(u))
+            if d < 9.0 or u[0] <= 0:
+                return None                                   # too small, or facing away
+            t = float(np.dot(nose - re_, u) / (d * d))
+            if not 0.25 <= t <= 0.75:
+                return None                                   # turned too far to the side
+            mid = (re_ + le_) / 2
+            mouth = mid + 2.03 * (nose - mid)
+            rm, lm = mouth - 0.415 * u, mouth + 0.415 * u
+            w = 2.4 * d
+            row = np.array([[mid[0] - w / 2, mid[1] - w * 0.45, w, w * 1.2,
+                             re_[0], re_[1], le_[0], le_[1], nose[0], nose[1],
+                             rm[0], rm[1], lm[0], lm[1], float(min(k[0][2], k[1][2], k[2][2]))]],
+                           dtype=np.float32)
+            with self.lock:
+                al = self.rec.alignCrop(frame, row)
+                v = self.rec.feature(al).reshape(-1).astype("float32")
+            n = float(np.linalg.norm(v))
+            if n < 1e-6:
+                return None
+            q = min(1.0, d / 28.0) * float(min(k[0][2], k[1][2], k[2][2]))
             return v / n, q
         except Exception:
             return None
