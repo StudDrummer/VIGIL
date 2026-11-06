@@ -30,7 +30,12 @@ def test_fusion_learns_which_cues_work():
     f = vi.Fusion(path=os.path.join(tempfile.mkdtemp(), "v8.json"))
     # before learning: a strong face match is strong evidence, a poor one is against
     assert f.evidence({"face": 0.6})[0] > 2.0
-    assert f.evidence({"face": 0.05})[0] < -2.0
+    # VALIDATED_V1: before this house has shown the face cue works, it cannot vote against
+    assert f.evidence({"face": 0.05})[0] == 0.0
+    for _ in range(30):
+        f.add_example("face", rng.normal(0.55, 0.1), True)
+        f.add_example("face", rng.normal(0.08, 0.08), False)
+    assert f.validated("face") and f.evidence({"face": 0.05})[0] < -2.0
     # this house: height does not separate people (everyone the same height) ...
     for _ in range(80):
         f.add_example("height", -abs(rng.normal(0, 0.03)), True)
@@ -199,9 +204,13 @@ def test_relink_after_a_short_loss():
     ph._LAST_SEEN["mom"] = (now - 1.0, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, h)
     other = ph._kp_box(body(560))
     assert ph._v8_relink(9, 0, k, [box, other], set())[0] is None
-    # the evidence says it is not her: no re-link
+    # the evidence says it is not her (face proven in this house): no re-link
+    for _ in range(30):
+        ph._V8.add_example("face", rng.normal(0.55, 0.1), True)
+        ph._V8.add_example("face", rng.normal(0.08, 0.08), False)
     ph._v8_raw = lambda t, p: {"face": 0.02}
     assert ph._v8_relink(9, 0, k, [box], set())[0] is None
+    ph._V8.stats["face"] = {"same": [], "diff": []}
 
 
 if __name__ == "__main__":

@@ -82,7 +82,22 @@ def test_rotated_view_flagged():
 
 def test_different_room_flagged():
     other = cv2.flip(BASE, -1)
-    assert checks(watch_with_ref(BASE), other)
+    assert checks(watch_with_ref(BASE), other, n=11)
+
+
+def test_evening_lamps_not_compared():
+    # CAM_MOVED_V2: much darker or brighter than the saved view is skipped, not judged
+    evening = cv2.flip(cv2.convertScaleAbs(BASE, alpha=0.5, beta=0), -1)
+    assert not checks(watch_with_ref(BASE), evening, n=12)
+
+
+def test_people_in_view_not_compared():
+    w = watch_with_ref(BASE)
+    other = cv2.flip(BASE, -1)
+    for _ in range(12):
+        T[0] += 31
+        w.update(other, True)
+    assert not os.path.exists(w.flag_path)
 
 
 def test_infrared_night_not_compared():
@@ -91,9 +106,18 @@ def test_infrared_night_not_compared():
 
 
 def test_needs_four_checks():
-    other = cv2.flip(BASE, -1)
+    M = np.float32([[1, 0, 160], [0, 1, 40]])
+    moved = cv2.warpAffine(BASE, M, (BASE.shape[1], BASE.shape[0]), borderMode=cv2.BORDER_REFLECT)
     w = watch_with_ref(BASE)
-    assert not checks(w, other, n=3)
+    assert not checks(w, moved, n=3)
+
+
+
+
+def test_person_in_front_not_flagged():
+    blocked = BASE.copy()
+    cv2.rectangle(blocked, (450, 80), (800, 720), (60, 50, 40), -1)   # a person a third of the frame wide
+    assert not checks(watch_with_ref(BASE), blocked)
 
 
 if __name__ == "__main__":
@@ -101,9 +125,3 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             f()
             print("ok", name)
-
-
-def test_person_in_front_not_flagged():
-    blocked = BASE.copy()
-    cv2.rectangle(blocked, (450, 80), (800, 720), (60, 50, 40), -1)   # a person a third of the frame wide
-    assert not checks(watch_with_ref(BASE), blocked)

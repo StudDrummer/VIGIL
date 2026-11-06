@@ -336,6 +336,9 @@ class Fusion:
             return None
         G = np.array(g)
         best = []
+        embs = [e for e in embs if e[1] >= 0.35] or []      # clear faces only
+        if not embs:
+            return None
         for v, _q in embs[-6:]:
             best.append(float(np.max(G @ v)))
         best.sort(reverse=True)
@@ -373,6 +376,15 @@ class Fusion:
     def _llr_raw(x, ms, ss, md, sd_):
         return _gauss_ll(x, ms, ss) - _gauss_ll(x, md, sd_)
 
+    def validated(self, s):
+        """VALIDATED_V1: a cue may count AGAINST a name only once this house's own
+        examples show it separates people (weight 0.5 or more). Before that it can
+        only support a name. Day 4 showed why: a face cue still on its starting
+        values voted against everyone's real name, so everyone became Not sure."""
+        st = self.stats[s]
+        return (len(st["same"]) >= MIN_EXAMPLES and len(st["diff"]) >= MIN_EXAMPLES
+                and self._params(s)[4] >= 0.5)
+
     def evidence(self, raw):
         """raw: {cue: score or None}. Returns (total, {cue: weighted evidence})."""
         out = {}
@@ -381,6 +393,8 @@ class Fusion:
                 continue
             ms, ss, md, sd_, w = self._params(s)
             e = float(np.clip(self._llr_raw(x, ms, ss, md, sd_), -LLR_CLIP, LLR_CLIP)) * w
+            if e < 0 and not self.validated(s):
+                e = 0.0
             out[s] = e
         return float(sum(out.values())), out
 

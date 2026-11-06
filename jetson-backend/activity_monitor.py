@@ -921,7 +921,8 @@ class CameraMoveWatch:
     they change how the room looks without the camera moving.
     """
     CHECK_S = 30.0
-    NEEDED = 4
+    NEEDED = 4          # clear shift or turn: 2 minutes in a row
+    NEEDED_LOST = 10    # "fixed features not found": 5 minutes in a row (CAM_MOVED_V2)
 
     def __init__(self):
         self.base = os.path.dirname(os.path.abspath(__file__))
@@ -984,10 +985,14 @@ class CameraMoveWatch:
                 self.ref_m = m
                 self.ref_kp, self.ref_des = self.orb.detectAndCompute(self.ref[0], None)
                 self.strikes = 0
+            if person_present:
+                return                                   # CAM_MOVED_V2: people hide and add features
             gray, colour, bright = self._prep(frame)
             rgray, rcolour, rbright = self.ref
             if bright < 35 or rbright < 35:
                 return                                   # too dark to judge
+            if abs(bright - rbright) > 0.25 * rbright:
+                return                                   # CAM_MOVED_V2: lamps on/off, daylight: not comparable
             if (colour < 4.0) != (rcolour < 4.0):
                 return                                   # infrared vs colour: not comparable
             kp, des = self.orb.detectAndCompute(gray, None)
@@ -995,9 +1000,9 @@ class CameraMoveWatch:
                 return
             pairs = self.bf.knnMatch(self.ref_des, des, k=2)
             good = [a for a, b in (p for p in pairs if len(p) == 2) if a.distance < 0.75 * b.distance]
-            moved, why = False, ""
+            moved, why, lost = False, "", False
             if len(good) < 15:
-                moved, why = True, "the room's fixed features are no longer in view (%d matches)" % len(good)
+                moved, why, lost = True, "the room's fixed features are no longer in view (%d matches)" % len(good), True
             else:
                 src = np.float32([self.ref_kp[g.queryIdx].pt for g in good])
                 dst = np.float32([kp[g.trainIdx].pt for g in good])
@@ -1011,9 +1016,10 @@ class CameraMoveWatch:
                     if shift > 0.04 or rot > 3.0 or abs(scale - 1.0) > 0.08:
                         moved, why = True, "view shifted %.0f%%, turned %.0f degrees" % (shift * 100, rot)
             self.strikes = self.strikes + 1 if moved else 0
+            need = self.NEEDED_LOST if lost else self.NEEDED
             if moved:
-                print("[CAM_MOVED] check %d/%d: %s" % (self.strikes, self.NEEDED, why), flush=True)
-            if self.strikes >= self.NEEDED:
+                print("[CAM_MOVED] check %d/%d: %s" % (self.strikes, need, why), flush=True)
+            if self.strikes >= need:
                 with open(self.flag_path, "w") as f:
                     json.dump({"moved": True, "at": datetime.now().isoformat(timespec="seconds"), "reason": why}, f)
                 print("[CAM_MOVED] camera has moved: asking for the bed and couch areas to be redrawn", flush=True)

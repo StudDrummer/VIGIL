@@ -994,6 +994,11 @@ def _reid_decide(ev, used):
             return hgt[0][1], "by height | " + txt
         # NOT_SURE_V1: two known people both fit -> keep watching, never a new person.
         if len(col) >= 2 and col[0][0] >= _REID_MIN_SIM and col[1][0] >= _REID_MIN_SIM - 0.05:
+            _nm = _named_ids()                    # STALE_DUPES_V1: named over an unnamed look-alike
+            _fit = [p for sc_, p in col if sc_ >= _REID_MIN_SIM - 0.05]
+            _fn = [p for p in _fit if p in _nm]
+            if len(_fn) == 1:
+                return _fn[0], "by clothes (named over an unnamed look-alike) | " + txt
             return "?", "NOT SURE " + txt
         if len(hgt) >= 2 and hgt[0][0] <= 0.04 and hgt[1][0] <= 0.06:
             return "?", "NOT SURE " + txt
@@ -1240,7 +1245,13 @@ def _reid6_decide(tid, ev, used):
     if resident:
         excluded |= {p for p in _signatures if p != resident}
     if _VR is not None and _VR.EMBEDDER.kind and len(fps) >= 3:
-        withfp = [p for p in _signatures if len(_VR.GALLERY.vecs.get(p, ())) > 0]
+        # STALE_DUPES_V1: an unnamed entry not seen for 30 minutes (an old
+        # duplicate of a family member) no longer competes with the real,
+        # named person; such look-alike duplicates made everyone "Not sure".
+        _nm = _named_ids()
+        _now6 = time.time()
+        withfp = [p for p in _signatures if len(_VR.GALLERY.vecs.get(p, ())) > 0
+                  and (p in _nm or _now6 - getattr(_signatures[p], "last_seen", 0.0) < 1800)]
         cands = [p for p in withfp if p not in excluded]
         refs = [p for p in withfp if p in excluded and (p in used or p in _VR.GALLERY.named)]
         if cands or refs:
@@ -1250,6 +1261,11 @@ def _reid6_decide(tid, ev, used):
                 ev["nobody"] = ev.get("nobody", 0) + 1
             if d == "?":
                 top = [p for _s, p in _VR.GALLERY.last_top]
+                # STALE_DUPES_V1: a named family member against an unnamed look-alike
+                # entry (almost always a duplicate of that same person): name them.
+                _tn = [p for p in top if p in _nm]
+                if len(_tn) == 1 and len(top) >= 2 and _tn[0] not in excluded:
+                    return _tn[0], "fingerprint (named over an unnamed look-alike) " + txt
                 if len(top) == 2:
                     hd, hw = _reid_decide(ev, set(_signatures) - set(top))
                     # LEARN_V4: only when this house's own learning says height
@@ -1562,7 +1578,7 @@ def _v8_check(assignments, tids):
             _V8_ST["against"][t] = _V8_ST["against"].get(t, 0) + 1
         else:
             _V8_ST["against"].pop(t, None)
-        if _V8_ST["against"].get(t, 0) >= 2:
+        if _V8_ST["against"].get(t, 0) >= 3:
             _V8_ST["against"].pop(t, None)
             _track_to_pid.pop(t, None)
             _V8_VER.pop(t, None)
@@ -1770,6 +1786,11 @@ def reload_known_persons() -> None:
                 sig.reported = True
                 sig.photo_reported = True
                 sig.photo_reported = True   # already identified in a prior run — don't re-crop
+                try:                        # STALE_DUPES_V1: when they were really last seen
+                    from datetime import datetime as _dt
+                    sig.last_seen = _dt.fromisoformat(str(last_seen_at).replace("Z", "")).timestamp()
+                except Exception:
+                    pass
                 _signatures[pid] = sig
                 print(f'[person_hook] Restored: {pid} height={height_px}')
     except Exception as e:

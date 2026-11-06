@@ -973,6 +973,16 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
   const [isRes,setIsRes]=useState(false);
   const [busy,setBusy]=useState(false);
   const [msg,setMsg]=useState<string|null>(null);
+  const [frame,setFrame]=useState<string|null>(null);
+  useEffect(()=>{                     // live picture, with the names VIGIL is showing
+    let alive=true;
+    (async()=>{while(alive){
+      try{const r=await AX.get(`${serverUrl}/camera/snapshot?w=800`,{timeout:4000});
+        if(alive&&r.data?.available&&r.data?.frame)setFrame(r.data.frame);}catch(_e){}
+      await new Promise(res=>setTimeout(res,350));
+    }})();
+    return()=>{alive=false;};
+  },[serverUrl]);
   useEffect(()=>{
     let alive=true;
     const tick=async()=>{
@@ -1035,6 +1045,12 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
             3. Tap their name. Then the next person.
           </Text>
         </View>
+        <View style={{marginTop:16,borderRadius:14,overflow:'hidden',backgroundColor:'#000',aspectRatio:16/9,alignItems:'center',justifyContent:'center'}}>
+          {frame
+            ?<Image source={{uri:`data:image/jpeg;base64,${frame}`}} style={{width:'100%',height:'100%'}} resizeMode="contain"/>
+            :<ActivityIndicator color={C.green}/>}
+        </View>
+        <Text style={{color:C.muted,fontSize:12,marginTop:6}}>Live camera. The label above each person is what VIGIL calls them now.</Text>
         {!!msg&&<Text style={{color:C.green,fontSize:14,marginTop:14}}>{msg}</Text>}
         <Text style={[s.secHeader,{marginHorizontal:0,marginTop:18}]}>In view now</Text>
         {named.length===0&&others.length===0&&(
