@@ -35,5 +35,52 @@ def test_srt_target_has_encryption():
     assert "passphrase=abc" in t and "streamid=publish:home01:cam_home01:x" in t
 
 
+def _arp_frame(ip, mac):
+    m = bytes(int(x, 16) for x in mac.split(":"))
+    return (b"\xff" * 6 + m + b"\x08\x06" + b"\x00\x01\x08\x00\x06\x04\x00\x01" + m
+            + ipaddress.IPv4Address(ip).packed + b"\x00" * 6 + ipaddress.IPv4Address("192.168.1.1").packed)
+
+
+def test_parse_frames():
+    nets = [ipaddress.ip_network("192.168.1.0/24")]
+    assert vr.parse_frame(_arp_frame(CAM, "ac:a7:f1:fd:42:92"), nets) == (CAM, "ac:a7:f1:fd:42:92")
+    assert vr.parse_frame(_arp_frame("10.0.0.5", "ac:a7:f1:fd:42:92"), nets) is None     # other network
+    m = bytes.fromhex("aca7f1fd4292")
+    mdns = (b"\x01\x00\x5e\x00\x00\xfb" + m + b"\x08\x00" + b"\x45" + b"\x00" * 11
+            + ipaddress.IPv4Address(CAM).packed + ipaddress.IPv4Address("224.0.0.251").packed)
+    assert vr.parse_frame(mdns, nets) == (CAM, "ac:a7:f1:fd:42:92")
+    unicast = b"\x02" + mdns[1:]
+    assert vr.parse_frame(unicast, nets) is None
+
+
+def test_finds_camera_when_address_lookups_fail():
+    """Like the T-Mobile house: the camera never answers ARP, so the scan finds
+    nothing, but it announces itself and pinning its address makes it reachable."""
+    import shutil
+    shutil.rmtree(vr.STATE_DIR, ignore_errors=True)
+    mac = "ac:a7:f1:fd:42:92"
+    pins = {}
+    old = (vr.port_open, vr.pin, vr.unpin, vr.neigh_mac, vr.listen_for_devices)
+    vr.port_open = lambda ip, port=554, timeout=0.6: str(ip) == "192.168.1.1" or pins.get(str(ip)) == mac
+    vr.neigh_mac = lambda ip: pins.get(str(ip))
+    vr.pin = lambda ip, m: pins.__setitem__(str(ip), m) or True
+    vr.unpin = lambda ip: pins.pop(str(ip), None)
+    vr.listen_for_devices = lambda s, nets: {"192.168.1.20": "11:22:33:44:55:66", CAM: mac}
+    try:
+        probed.clear()
+        ip, _ = vr.find_camera({"VIGIL_TAPO_USER": "u", "VIGIL_TAPO_PASS": "p"})
+        assert ip == CAM and pins == {CAM: mac}, (ip, pins)        # the phone's pin was taken back off
+        assert vr.remembered() == (CAM, mac)
+        # after a reboot the pin is gone; the remembered hardware address puts it straight back
+        pins.clear()
+        vr.listen_for_devices = lambda s, nets: (_ for _ in ()).throw(AssertionError("should not need to listen"))
+        ip, _ = vr.find_camera({"VIGIL_TAPO_USER": "u", "VIGIL_TAPO_PASS": "p"})
+        assert ip == CAM and pins == {CAM: mac}
+    finally:
+        vr.port_open, vr.pin, vr.unpin, vr.neigh_mac, vr.listen_for_devices = old
+
+
 if __name__ == "__main__":
-    test_scan_then_remember(); test_srt_target_has_encryption(); print("ok")
+    for n, f in list(globals().items()):
+        if n.startswith("test_"):
+            f(); print("ok", n)

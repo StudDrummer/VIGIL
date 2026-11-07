@@ -328,7 +328,7 @@ Username: <span class="mono">%(tapo_user)s</span> &nbsp;&nbsp; Password: <span c
 <h2>The green light</h2>
 <table>
 <tr><td><b>Steady on</b></td><td>Working.</td></tr>
-<tr><td><b>Slow blink</b></td><td>Cannot find the camera. Check the camera is plugged in and its light is on.</td></tr>
+<tr><td><b>Slow blink</b></td><td>Cannot find the camera. Check the camera is plugged in, its light is on, and it is on the main home Wi-Fi (not a Guest network).</td></tr>
 <tr><td><b>Fast blink</b></td><td>No internet. Check the home Wi-Fi is working.</td></tr>
 <tr><td><b>Two blinks, pause</b></td><td>New Wi-Fi. Do step 2 again.</td></tr>
 </table>

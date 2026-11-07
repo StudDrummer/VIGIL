@@ -148,30 +148,173 @@ def is_camera(cfg, ip):
         return False, {}
 
 
+# Some home routers (and some cameras in power save) drop the "who has this
+# address?" question (ARP), so a device on Wi-Fi gets "No route to host" even
+# though the camera is right there. The camera still announces itself now and
+# then (its own ARP and multicast), so the relay listens for that, learns the
+# camera's hardware address, and tells Linux the answer directly ("pins" it).
+ARP_LISTEN_S = float(os.environ.get("VIGIL_ARP_LISTEN_S", "90"))
+_pinned = set()
+
+
+def iface_for(ip):
+    try:
+        out = subprocess.run(["ip", "route", "get", str(ip)], capture_output=True, text=True, timeout=5).stdout.split()
+        return out[out.index("dev") + 1]
+    except Exception:
+        return None
+
+
+def neigh_mac(ip):
+    """The hardware address Linux has for ip right now, or None."""
+    try:
+        out = subprocess.run(["ip", "neigh", "show", str(ip)], capture_output=True, text=True, timeout=5).stdout.split()
+        if "lladdr" in out and "FAILED" not in out and "INCOMPLETE" not in out:
+            return out[out.index("lladdr") + 1].lower()
+    except Exception:
+        pass
+    return None
+
+
+def pin(ip, mac):
+    dev = iface_for(ip)
+    if not dev or not mac:
+        return False
+    r = subprocess.run(["ip", "neigh", "replace", str(ip), "lladdr", mac, "dev", dev, "nud", "permanent"],
+                       capture_output=True, text=True, timeout=5)
+    if r.returncode == 0:
+        _pinned.add(str(ip))
+        return True
+    return False
+
+
+def unpin(ip):
+    if str(ip) in _pinned:
+        dev = iface_for(ip)
+        if dev:
+            subprocess.run(["ip", "neigh", "del", str(ip), "dev", dev], capture_output=True, timeout=5)
+        _pinned.discard(str(ip))
+
+
+def parse_frame(frame, nets):
+    """(ip, mac) of the sender of one Ethernet frame, if it is an ARP packet or an
+    IPv4 broadcast/multicast from a device on our networks."""
+    if len(frame) < 34:
+        return None
+    etype = int.from_bytes(frame[12:14], "big")
+    mac = None
+    ip = None
+    if etype == 0x0806 and len(frame) >= 42:
+        mac = frame[22:28]
+        ip = ipaddress.IPv4Address(frame[28:32])
+    elif etype == 0x0800 and (frame[0] & 1):          # multicast or broadcast destination
+        mac = frame[6:12]
+        ip = ipaddress.IPv4Address(frame[26:30])
+    if ip is None or mac == b"\x00" * 6 or (mac[0] & 1) or ip.is_unspecified:
+        return None
+    if not any(ip in n for n in nets):
+        return None
+    return str(ip), ":".join("%02x" % b for b in mac)
+
+
+def listen_for_devices(seconds, nets):
+    """Listen quietly and return {ip: mac} for every device heard announcing itself."""
+    seen = {}
+    try:
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+    except (OSError, AttributeError) as e:
+        log("cannot listen for devices (%s)" % e)
+        return seen
+    s.settimeout(1.0)
+    end = time.time() + seconds
+    try:
+        while time.time() < end:
+            try:
+                frame, addr = s.recvfrom(2048)
+            except socket.timeout:
+                continue
+            if len(addr) > 2 and addr[2] == 4:          # our own outgoing packet
+                continue
+            got = parse_frame(frame, nets)
+            if got:
+                seen[got[0]] = got[1]
+    finally:
+        s.close()
+    return seen
+
+
+def remember(ip, mac):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "camera.json"), "w") as f:
+            json.dump({"ip": ip, "mac": mac}, f)
+        with open(os.path.join(STATE_DIR, "camera_ip"), "w") as f:
+            f.write(ip)
+    except OSError:
+        pass
+
+
+def remembered():
+    try:
+        with open(os.path.join(STATE_DIR, "camera.json")) as f:
+            d = json.load(f)
+        return d.get("ip"), (d.get("mac") or "").lower() or None
+    except (OSError, ValueError):
+        return _read(os.path.join(STATE_DIR, "camera_ip")), None
+
+
+def _try(cfg, ip, mac=None):
+    """Is the camera at ip? With a mac, pin it first so a lost ARP answer cannot stop us."""
+    pinned_now = False
+    if mac and neigh_mac(ip) != mac:
+        pinned_now = pin(ip, mac)
+    if port_open(ip):
+        ok, info = is_camera(cfg, ip)
+        if ok:
+            remember(ip, mac or neigh_mac(ip))
+            return True, info
+    if pinned_now:
+        unpin(ip)
+    return False, {}
+
+
 def find_camera(cfg):
-    remembered = os.path.join(STATE_DIR, "camera_ip")
+    r_ip, r_mac = remembered()
+    mac_cfg = (cfg.get("VIGIL_TAPO_MAC") or "").lower().replace("-", ":") or None
+    known_mac = mac_cfg or r_mac
     candidates = []
-    for ip in (cfg.get("VIGIL_TAPO_IP"), _read(remembered)):
+    for ip in (cfg.get("VIGIL_TAPO_IP"), r_ip):
         if ip and ip not in candidates:
             candidates.append(ip)
+    # 1. the address we know, pinned to the camera's hardware address if we know it
     for ip in candidates:
-        if port_open(ip):
-            ok, info = is_camera(cfg, ip)
-            if ok:
-                return ip, info
-    hosts = [str(h) for n in local_networks() for h in n.hosts()]
+        ok, info = _try(cfg, ip, known_mac)
+        if ok:
+            return ip, info
+    for ip in candidates:                       # a stale pin must not block normal lookup
+        unpin(ip)
+    # 2. ordinary scan of the home network
+    nets = local_networks()
+    hosts = [str(h) for n in nets for h in n.hosts()]
     with ThreadPoolExecutor(max_workers=64) as ex:
         open_ips = [h for h, ok in zip(hosts, ex.map(port_open, hosts)) if ok]
     for ip in open_ips:
-        ok, info = is_camera(cfg, ip)
+        ok, info = _try(cfg, ip)
         if ok:
-            try:
-                os.makedirs(STATE_DIR, exist_ok=True)
-                with open(remembered, "w") as f:
-                    f.write(ip)
-            except OSError:
-                pass
             return ip, info
+    # 3. the network is dropping address lookups: listen for the camera announcing itself
+    log("camera not answering address lookups; listening for it for %.0f s" % ARP_LISTEN_S)
+    heard = listen_for_devices(ARP_LISTEN_S, nets)
+    mine = {str(n.network_address) for n in nets}
+    order = sorted(heard.items(), key=lambda kv: (kv[1] != known_mac, kv[0]))   # known camera first
+    for ip, mac in order:
+        if ip in mine or ip in open_ips:
+            continue
+        ok, info = _try(cfg, ip, mac)
+        if ok:
+            log("found the camera at %s (%s) by listening; address pinned" % (ip, mac))
+            return ip, info
+    log("heard %d devices, none was the camera" % len(heard))
     return None, {}
 
 

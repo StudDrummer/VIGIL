@@ -11,7 +11,7 @@ The green light on the board is the only thing a family needs to read:
 | Light | Meaning | What to do |
 | --- | --- | --- |
 | Steady on | Sending video to VIGIL. | Nothing. |
-| Slow blink (1 s) | Cannot find the camera. | Check the camera is plugged in and on the same Wi-Fi. |
+| Slow blink (1 s) | Cannot find the camera. | Check the camera is plugged in and on the same Wi-Fi (the main home network, not a Guest network). |
 | Fast blink | Camera found, no internet to VIGIL. | Check the home internet. |
 | Two quick blinks, pause | Does not know this Wi-Fi. | Join **VIGIL-Setup** on a phone (password `vigilsetup`), pick the home Wi-Fi. |
 
@@ -53,6 +53,26 @@ The green light on the board is the only thing a family needs to read:
 7. **Burn in.** Leave it running 3 days. Check the app each day.
 8. **Print the card.** `python3 vigilctl.py card homeXX --tapo-user vigil --tapo-pass '...' --app-link <TestFlight link> --contact <your email>`
    writes `config/card_homeXX.html`. Open it, print it, put it in the box.
+
+## When the box cannot reach the camera on Wi-Fi
+
+Some routers drop the "who has this address?" question (ARP) between Wi-Fi
+devices, so the box sees `No route to host` even though the camera works. The
+relay handles this on its own: it listens for the camera announcing itself,
+learns its hardware address, pins it, and remembers it across reboots. The log
+line is `found the camera at ... by listening; address pinned`.
+
+If even that fails, give the box the camera's hardware address: Tapo app >
+camera > Settings > Device info > MAC address, then add a line to
+`/etc/vigil-relay.env`:
+
+```
+VIGIL_TAPO_MAC=ac:a7:f1:xx:xx:xx
+VIGIL_TAPO_IP=192.168.x.y
+```
+
+and `sudo systemctl restart vigil-relay`. Reserving the camera's address in
+the router (DHCP reservation) also helps, but is not required.
 
 ## Fixing a box from far away
 
