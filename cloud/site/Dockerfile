@@ -12,8 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Every step must succeed (a failed download stops the build instead of being cached).
+# A current pip is needed: the one in the base image mis-reads a dependency on
+# PyTorch's index. Dependencies come from PyPI; torch itself from the CPU index.
 RUN set -e \
- && pip install --no-cache-dir --retries 10 --timeout 120 --index-url https://download.pytorch.org/whl/cpu torch torchvision \
+ && pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir --retries 10 --timeout 120 --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple "torch>=2.4" "torchvision>=0.19" \
  && pip install --no-cache-dir --retries 10 --timeout 120 "ultralytics>=8.0" "numpy>=1.24,<2" \
         "flask>=3.0" "requests>=2.31" "scipy>=1.11" "scikit-learn>=1.3" "twilio>=9.0" "lap>=0.5.12" \
  && (pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true) \
