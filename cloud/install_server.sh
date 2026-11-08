@@ -17,8 +17,7 @@ sudo apt-get update -qq && sudo apt-get install -y -qq python3-flask python3-req
 DOCKER="docker"; docker info >/dev/null 2>&1 || DOCKER="sudo docker"
 
 echo "== Building the camera pipeline image (10-20 minutes the first time)"
-$DOCKER build -f site/Dockerfile -t vigil-site:latest ..
-$DOCKER build -t vigil-gateway:latest gateway
+bash build_images.sh
 
 if [ ! -f config/vigil_cloud.json ]; then
   python3 vigilctl.py init --domain "$DOMAIN"

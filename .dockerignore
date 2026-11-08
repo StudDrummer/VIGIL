@@ -1,7 +1,0 @@
-# The site image only needs these files. Everything else (camera data,
-# Caddy certificates, secrets, the app) stays out of the build.
-*
-!jetson-backend/*.py
-!jetson-backend/vigil_bytetrack.yaml
-!cloud/site/site_entry.sh
-!cloud/site/site_jobs.py
