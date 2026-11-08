@@ -57,7 +57,7 @@ try {
 }
 
 import axios from 'axios';
-import {launchImageLibrary} from 'react-native-image-picker';  // PHOTO_PICK_V1
+import {launchImageLibrary,launchCamera} from 'react-native-image-picker';  // PHOTO_PICK_V1
 
 // ─────────────────────────────────────────────
 // CONFIG
@@ -281,6 +281,7 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState<string|null>(null);
   const [note,setNote]=useState<string|null>(null);
+  const [showPw,setShowPw]=useState(false);
   const gw=()=>gateway.trim().replace(/\/+$/,'');
   const fail=(e:any,fallback:string)=>setErr(e?.response?.data?.reason||
     (e?.message?.includes('Network')?'Cannot reach VIGIL. Check the internet connection and try again.':fallback));
@@ -317,7 +318,10 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
         const r=await axios.post(`${gw()}/auth/reset`,{email:email.trim(),code:code.trim(),new_password:password,device:Platform.OS},{timeout:15000});
         done(r.data);
       }
-    }catch(e:any){fail(e,mode==='signup'?'Could not create the account.':mode==='signin'?'Sign-in failed.':'Something went wrong. Try again.');}
+    }catch(e:any){
+      if(mode==='signup'&&e?.response?.status===409){   // already has an account: take them to sign in, email kept
+        setMode('signin');setPassword('');setErr(null);setNote('You already have a VIGIL account with this email. Sign in below.');return;}
+      fail(e,mode==='signup'?'Could not create the account.':mode==='signin'?'Sign-in failed.':'Something went wrong. Try again.');}
     finally{setBusy(false);}
   };
   const ready=mode==='signup'?(!!name.trim()&&!!email.trim()&&password.length>=8)
@@ -348,8 +352,10 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
         placeholderTextColor={C.muted} keyboardType="number-pad" textContentType="oneTimeCode"/>}
       {mode!=='forgot'&&mode!=='verify'&&<TextInput style={inp} value={password} onChangeText={setPassword}
         placeholder={mode==='signin'?'Password':'Password (at least 8 characters)'} placeholderTextColor={C.muted}
-        autoCapitalize="none" autoCorrect={false} secureTextEntry textContentType={mode==='signin'?'password':'newPassword'}
+        autoCapitalize="none" autoCorrect={false} secureTextEntry={!showPw} textContentType={mode==='signin'?'password':'newPassword'}
         returnKeyType="go" onSubmitEditing={()=>{if(ready)go();}}/>}
+      {mode!=='forgot'&&mode!=='verify'&&<TouchableOpacity onPress={()=>setShowPw(v=>!v)} style={{alignSelf:'flex-end',paddingTop:8}}>
+        <Text style={{color:C.sub,fontSize:13}}>{showPw?'Hide password':'Show password'}</Text></TouchableOpacity>}
       {adv&&<TextInput style={[inp,{fontSize:13,color:C.sub}]} value={gateway} onChangeText={setGateway} placeholder={DEFAULT_CLOUD}
         placeholderTextColor={C.muted} autoCapitalize="none" autoCorrect={false} keyboardType="url"/>}
       {err&&<Text style={{color:C.red,fontSize:14,marginTop:10,lineHeight:20}}>{err}</Text>}
@@ -493,6 +499,377 @@ function AccountSection({cfg}:{cfg:CloudCfg}){
   );
 }
 
+// HOME_SETUP_V1: after the camera is added, set up the home properly: everyone
+// who lives there (photo, height, who VIGIL looks after), their consent, whose
+// Apple Watch this is, who gets alerts, the camera view, then Introduce everyone.
+// Each step is saved, so closing the app part-way resumes where it stopped.
+type HSPerson={id:string;name:string;resident:boolean;height_cm:number|null;consent:boolean};
+const NTFY_APP='https://apps.apple.com/app/ntfy/id1625396347';
+function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void}){
+  const owner=role!=='caregiver';
+  const STEPS=owner?['people','consent','watch','alerts','camera','meet','done']:['alerts','done'];
+  const [step,setStep]=useState(0);
+  const [people,setPeople]=useState<HSPerson[]>([]);
+  const [units,setUnits]=useState<'us'|'metric'>('us');
+  const [form,setForm]=useState<{id?:string;name:string;resident:boolean;height:string;photo:string|null}|null>(null);
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState<string|null>(null);
+  const [watch,setWatch]=useState<string|null|undefined>(undefined);   // undefined = not chosen, null = no watch
+  const [frame,setFrame]=useState<string|null>(null);
+  const [frameWait,setFrameWait]=useState(0);
+  const [code,setCode]=useState('');
+  const [meName,setMeName]=useState('');
+  const [teach,setTeach]=useState(false);
+  const url=cloudSiteUrl(cfg);
+  const site=cfg.sites.find(x=>x.id===cfg.siteId);
+  const KEY='vigil_home_setup_'+cfg.siteId;
+  const cur=STEPS[step];
+  useEffect(()=>{applyCloudHeaders(cfg);},[cfg]);
+  const load=useCallback(async()=>{
+    try{
+      const r=await AX.get(`${url}/persons`,{timeout:10000});
+      const named=(Array.isArray(r.data)?r.data:[]).filter((p:any)=>(p.name||'').trim());
+      setPeople(named.map((p:any)=>({id:p.id,name:p.name,resident:!!p.is_resident,height_cm:p.height_cm??null,consent:!!p.consent_at})));
+    }catch(_e){}
+  },[url]);
+  useEffect(()=>{
+    load();
+    AsyncStorage.getItem(KEY).then(v=>{const n=parseInt(v||'0',10);if(n>0&&n<STEPS.length)setStep(n);}).catch(()=>{});
+    axios.get(`${cfg.gateway}/auth/profile`,{timeout:10000,headers:{'X-VIGIL-Key':cfg.token}}).then(r=>setMeName(r.data?.user?.name||'')).catch(()=>{});
+    if(owner)axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/members`,{timeout:10000,headers:{'X-VIGIL-Key':cfg.token}})
+      .then(r=>setCode(r.data?.setup_code||'')).catch(()=>{});
+  },[]);
+  useEffect(()=>{                                    // live view on the camera step
+    if(cur!=='camera')return;
+    let alive=true;let n=0;
+    (async()=>{while(alive){
+      try{const r=await AX.get(`${url}/camera/snapshot?w=800`,{timeout:5000});if(alive&&r.data?.available&&r.data?.frame)setFrame(r.data.frame);}catch(_e){}
+      n++;if(alive)setFrameWait(n);
+      await new Promise<void>(res=>setTimeout(()=>res(),1000));
+    }})();
+    return()=>{alive=false;};
+  },[cur,url]);
+  const go=(n:number)=>{setErr(null);setStep(n);AsyncStorage.setItem(KEY,String(n)).catch(()=>{});};
+  const next=()=>go(Math.min(step+1,STEPS.length-1));
+  const back=()=>go(Math.max(step-1,0));
+  const finish=async()=>{
+    await AsyncStorage.removeItem(KEY).catch(()=>{});
+    onDone();
+  };
+  const fmtH=(cm:number|null)=>cm==null?'':units==='us'?`${Math.floor(cm/2.54/12)}' ${Math.round(cm/2.54)%12}"`:`${Math.round(cm)} cm`;
+  const pickPhoto=(fromCamera:boolean)=>{
+    const opts:any={mediaType:'photo',includeBase64:true,maxWidth:640,maxHeight:640,quality:0.85,selectionLimit:1,cameraType:'front'};
+    (fromCamera?launchCamera(opts):launchImageLibrary(opts)).then((r:any)=>{
+      if(r?.didCancel)return;
+      const b64=r?.assets?.[0]?.base64;
+      if(b64&&form)setForm({...form,photo:b64});
+      else if(r?.errorCode)setErr(r.errorCode==='camera_unavailable'?'No camera on this device. Choose a photo instead.':'Could not open the photos. Allow VIGIL in Settings, Privacy.');
+    }).catch(()=>{});
+  };
+  const savePerson=async()=>{
+    if(!form)return;
+    const n=form.name.trim();if(!n){setErr('Type their name.');return;}
+    const h=form.height.trim()?parseHeightCm(form.height):null;
+    if(form.height.trim()&&h==null){setErr(units==='us'?'Height like 5\'6" or 66 in.':'Height like 168 cm.');return;}
+    setBusy(true);setErr(null);
+    try{
+      let id=form.id;
+      if(id){
+        await AX.post(`${url}/persons/${id}/identify`,{name:n,is_resident:form.resident},{timeout:10000});
+        if(h!=null)await AX.post(`${url}/persons/${id}/height`,{height_cm:h},{timeout:10000});
+      }else{
+        const r=await AX.post(`${url}/persons/new`,{name:n,is_resident:form.resident,height_cm:h},{timeout:10000});
+        id=r.data?.person_id;
+      }
+      if(id&&form.photo){await AX.post(`${url}/persons/${id}/photo/set`,{photo_b64:form.photo},{timeout:20000});bumpPhoto(id);}
+      setForm(null);await load();
+    }catch(e:any){setErr(e?.response?.data?.reason||'Could not save. Check the internet connection.');}
+    finally{setBusy(false);}
+  };
+  const removePerson=(p:HSPerson)=>Alert.alert(`Remove ${p.name}?`,'VIGIL forgets them and everything measured about them.',[
+    {text:'Cancel',style:'cancel'},
+    {text:'Remove',style:'destructive',onPress:async()=>{try{await AX.post(`${url}/persons/${p.id}/delete`,{},{timeout:10000});load();}catch(_e){setErr('Could not remove. Try again.');}}}]);
+  const setConsent=async(p:HSPerson,v:boolean)=>{
+    setPeople(ps=>ps.map(x=>x.id===p.id?{...x,consent:v}:x));
+    try{await AX.post(`${url}/persons/${p.id}/consent`,v?{by:meName||cfg.email}:{given:false},{timeout:10000});}
+    catch(_e){setPeople(ps=>ps.map(x=>x.id===p.id?{...x,consent:!v}:x));setErr('Could not save. Check the internet connection.');}
+  };
+  const saveWatch=async(pid:string|null)=>{
+    setWatch(pid);
+    const res=people.find(p=>p.resident)??people[0];
+    try{
+      await AsyncStorage.setItem(SK_WATCH_OWNER,pid??'').catch(()=>{});
+      if(!pid)await AsyncStorage.removeItem(SK_WATCH_OWNER).catch(()=>{});
+      const profile:SavedProfile={residentName:res?.name??'',residentHeight:String(res?.height_cm??''),emergencyPhone:'',emergencyEmail:'',
+        watchEnabled:!!pid,weightKg:'',age:'',units};
+      await AsyncStorage.setItem(SK_PROFILE,JSON.stringify(profile));
+      AX.post(`${url}/config`,{resident_name:res?.name??'',resident_height_cm:res?.height_cm??170,units,has_apple_watch:pid?1:0},{timeout:10000}).catch(()=>{});
+      AX.post(`${url}/config/watch-owner`,{person_id:pid},{timeout:10000}).catch(()=>{});
+    }catch(_e){}
+  };
+  const inp={color:C.text,fontSize:17,paddingHorizontal:14,paddingVertical:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
+  const H1=({t,sub}:{t:string;sub?:string})=>(<>
+    <Text style={{color:C.text,fontSize:27,fontWeight:'800',letterSpacing:-0.3}}>{t}</Text>
+    {!!sub&&<Text style={{color:C.sub,fontSize:16,marginTop:8,lineHeight:23}}>{sub}</Text>}</>);
+  const Tick=({on}:{on:boolean})=>(
+    <View style={{width:26,height:26,borderRadius:8,borderWidth:2,borderColor:on?C.green:C.muted,backgroundColor:on?C.green:'transparent',alignItems:'center',justifyContent:'center'}}>
+      {on&&<Text style={{color:'#000',fontSize:15,fontWeight:'900'}}>{'✓'}</Text>}</View>);
+  const residents=people.filter(p=>p.resident);
+  const canNext=cur==='people'?(people.length>0&&residents.length>0&&!form)
+    :cur==='consent'?people.every(p=>p.consent)
+    :cur==='watch'?watch!==undefined:true;
+  const body=()=>{switch(cur){
+    case 'people':return(<>
+      <H1 t="Who lives here?" sub="Add everyone the camera will see most days. VIGIL looks after the people you mark, and learns everyone else so it never mixes them up."/>
+      <View style={{flexDirection:'row',backgroundColor:C.card,borderRadius:12,padding:4,marginTop:18,borderWidth:1,borderColor:C.border}}>
+        {([['us','Feet and inches'],['metric','Centimetres']] as const).map(([k,l])=>(
+          <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:10,borderRadius:9,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
+            <Text style={{color:units===k?'#000':C.sub,fontSize:14,fontWeight:'700'}}>{l}</Text></TouchableOpacity>))}
+      </View>
+      {people.map(p=>(
+        <View key={p.id} style={[s.card,{marginTop:12,flexDirection:'row',alignItems:'center'}]}>
+          <PersonAvatar personId={p.id} name={p.name} serverUrl={url} size={52} isResident={p.resident}/>
+          <View style={{flex:1,marginLeft:14}}>
+            <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>{p.name}</Text>
+            <Text style={{color:p.resident?C.green:C.sub,fontSize:13,marginTop:3}}>{p.resident?'VIGIL looks after them':'Lives here'}{p.height_cm?` · ${fmtH(p.height_cm)}`:''}</Text>
+          </View>
+          <TouchableOpacity onPress={()=>setForm({id:p.id,name:p.name,resident:p.resident,height:p.height_cm?fmtH(p.height_cm):'',photo:null})} style={{padding:8}}>
+            <Text style={{color:C.blue,fontSize:15}}>Edit</Text></TouchableOpacity>
+          <TouchableOpacity onPress={()=>removePerson(p)} style={{padding:8}}>
+            <Text style={{color:C.muted,fontSize:15}}>Remove</Text></TouchableOpacity>
+        </View>))}
+      {form?(
+        <View style={[s.card,{marginTop:14}]}>
+          <Text style={{color:C.text,fontSize:18,fontWeight:'700'}}>{form.id?`Edit ${form.name||'person'}`:'Add a person'}</Text>
+          <View style={{flexDirection:'row',alignItems:'center',marginTop:14}}>
+            <TouchableOpacity onPress={()=>Alert.alert('Their photo','A clear, front-facing photo helps VIGIL recognise them sooner.',
+                [{text:'Take a photo',onPress:()=>pickPhoto(true)},{text:'Choose a photo',onPress:()=>pickPhoto(false)},{text:'Cancel',style:'cancel'}])}
+              style={{width:76,height:76,borderRadius:38,backgroundColor:C.fill,alignItems:'center',justifyContent:'center',overflow:'hidden',borderWidth:1,borderColor:C.border}}>
+              {form.photo?<Image source={{uri:`data:image/jpeg;base64,${form.photo}`}} style={{width:76,height:76}}/>
+                :<Text style={{color:C.green,fontSize:13,fontWeight:'700',textAlign:'center'}}>Add{'\n'}photo</Text>}
+            </TouchableOpacity>
+            <Text style={{color:C.sub,fontSize:13,lineHeight:19,flex:1,marginLeft:14}}>Optional. A clear photo of their face helps VIGIL recognise them, and shows on their alerts.</Text>
+          </View>
+          <TextInput style={inp} value={form.name} onChangeText={t=>setForm({...form,name:t})} placeholder="Name, e.g. Nani" placeholderTextColor={C.muted}
+            autoCapitalize="words" autoCorrect={false} textContentType="name"/>
+          <TextInput style={inp} value={form.height} onChangeText={t=>setForm({...form,height:t})}
+            placeholder={units==='us'?'Height, e.g. 5\'4" (optional)':'Height in cm, e.g. 162 (optional)'} placeholderTextColor={C.muted}/>
+          <Text style={{color:C.muted,fontSize:12,marginTop:6,lineHeight:17}}>Their real height lets VIGIL measure walking speed accurately.</Text>
+          <View style={{flexDirection:'row',alignItems:'center',marginTop:14}}>
+            <Switch value={form.resident} onValueChange={v=>setForm({...form,resident:v})} trackColor={{false:C.fill,true:C.green}} thumbColor="#FFF"/>
+            <View style={{flex:1,marginLeft:12}}>
+              <Text style={{color:C.text,fontSize:15,fontWeight:'600'}}>VIGIL looks after them</Text>
+              <Text style={{color:C.sub,fontSize:12,marginTop:2,lineHeight:17}}>Fall alerts, walking and activity trends. Turn off for family who only live there.</Text>
+            </View>
+          </View>
+          <View style={{flexDirection:'row',gap:10,marginTop:16}}>
+            <TouchableOpacity onPress={()=>{setForm(null);setErr(null);}} style={{flex:1,padding:15,borderRadius:12,backgroundColor:C.fill,alignItems:'center'}}>
+              <Text style={{color:C.text,fontWeight:'700',fontSize:16}}>Cancel</Text></TouchableOpacity>
+            <TouchableOpacity disabled={busy||!form.name.trim()} onPress={savePerson} style={[s.btnPrimary,{flex:2,opacity:(busy||!form.name.trim())?0.5:1}]}>
+              {busy?<ActivityIndicator color="#000"/>:<Text style={s.btnPrimaryTxt}>Save</Text>}</TouchableOpacity>
+          </View>
+        </View>
+      ):(
+        <TouchableOpacity onPress={()=>{setErr(null);setForm({name:'',resident:residents.length===0,height:'',photo:null});}}
+          style={{marginTop:14,padding:18,borderRadius:14,borderWidth:1.5,borderStyle:'dashed',borderColor:C.green,alignItems:'center'}}>
+          <Text style={{color:C.green,fontSize:17,fontWeight:'700'}}>+ Add {people.length?'another person':'a person'}</Text></TouchableOpacity>
+      )}
+      {people.length>0&&!residents.length&&!form&&<Text style={{color:C.orange,fontSize:14,marginTop:12}}>Mark at least one person VIGIL looks after.</Text>}
+    </>);
+    case 'consent':return(<>
+      <H1 t="Everyone should know" sub="VIGIL works best, and is fair, when everyone it sees knows about it and agrees."/>
+      <View style={[s.card,{marginTop:18}]}>
+        {[['No sound','VIGIL never uses a microphone.'],
+          ['Video is not recorded','The camera picture is analysed as it arrives and then discarded.'],
+          ['What it keeps','Measurements like walking speed, a stick-figure replay around a fall, a small picture of each person, and one still of the room to notice if the camera is moved.'],
+          ['Who sees it','Only people you invite to this home in the app.'],
+          ['Turn it off any time','Unplug the camera, or remove a person or the whole account in Settings.']].map(([t,d])=>(
+          <View key={t} style={{flexDirection:'row',marginBottom:12}}>
+            <View style={{width:6,height:6,borderRadius:3,backgroundColor:C.green,marginTop:8,marginRight:12}}/>
+            <View style={{flex:1}}><Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>{t}</Text>
+              <Text style={{color:C.sub,fontSize:14,marginTop:2,lineHeight:20}}>{d}</Text></View>
+          </View>))}
+        <Text style={{color:C.blue,fontSize:14}} onPress={()=>Linking.openURL('https://vigilhealth.me/privacy.html')}>Read the privacy policy</Text>
+      </View>
+      <Text style={[s.secHeader,{marginHorizontal:0,marginTop:20}]}>Tap each person once they have agreed</Text>
+      {people.map(p=>(
+        <TouchableOpacity key={p.id} onPress={()=>setConsent(p,!p.consent)} style={[s.card,{marginTop:8,flexDirection:'row',alignItems:'center'}]}>
+          <Tick on={p.consent}/>
+          <Text style={{color:C.text,fontSize:16,marginLeft:14,flex:1}}>{p.name} knows about VIGIL and agrees</Text>
+        </TouchableOpacity>))}
+      <Text style={{color:C.muted,fontSize:13,marginTop:12,lineHeight:19}}>If someone cannot decide for themselves, the person responsible for their care can agree for them. Visitors should be told the camera is on.</Text>
+    </>);
+    case 'watch':return(<>
+      <H1 t="Apple Watch" sub="Is the Apple Watch paired with this iPhone worn by someone who lives here? Its heart rate, sleep and steps will show only on that person."/>
+      <View style={{marginTop:18}}>
+        {people.map(p=>(
+          <TouchableOpacity key={p.id} onPress={()=>saveWatch(p.id)} style={[s.card,{marginTop:8,flexDirection:'row',alignItems:'center',borderWidth:2,borderColor:watch===p.id?C.green:'transparent'}]}>
+            <PersonAvatar personId={p.id} name={p.name} serverUrl={url} size={40}/>
+            <Text style={{color:C.text,fontSize:16,fontWeight:'600',marginLeft:12,flex:1}}>{p.name} wears it</Text>
+            {watch===p.id&&<Tick on/>}
+          </TouchableOpacity>))}
+        <TouchableOpacity onPress={()=>saveWatch(null)} style={[s.card,{marginTop:8,flexDirection:'row',alignItems:'center',borderWidth:2,borderColor:watch===null?C.green:'transparent'}]}>
+          <Text style={{color:C.text,fontSize:16,fontWeight:'600',flex:1}}>No, nobody here, or no watch</Text>
+          {watch===null&&<Tick on/>}
+        </TouchableOpacity>
+      </View>
+      <Text style={{color:C.muted,fontSize:13,marginTop:12,lineHeight:19}}>VIGIL works fully with the camera alone. You can change this in Settings.</Text>
+    </>);
+    case 'alerts':return(<>
+      <H1 t="Who gets alerts" sub={owner?'Falls, a long time on the floor, and the camera going offline. Set up at least one way to hear about them now.':`You joined ${site?.name||'this home'}. Choose how you hear about falls and other alerts.`}/>
+      <AccountSection cfg={cfg}/>
+      {!!site?.ntfy_topic&&(
+        <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
+          <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Instant alerts on this phone</Text>
+          <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:20}}>1. Install the free ntfy app.{'\n'}2. In ntfy, tap +, paste this topic, and Subscribe:</Text>
+          <TouchableOpacity onPress={()=>{Share.share({message:site.ntfy_topic||''});}}
+            style={{marginTop:10,padding:12,borderRadius:10,backgroundColor:C.bg,borderWidth:1,borderColor:C.border}}>
+            <Text style={{color:C.green,fontSize:15,fontWeight:'700',textAlign:'center'}}>{site.ntfy_topic}</Text>
+            <Text style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:4}}>Tap to copy</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={()=>Linking.openURL(NTFY_APP)} style={{paddingTop:12}}>
+            <Text style={{color:C.blue,fontSize:15}}>Get ntfy from the App Store</Text></TouchableOpacity>
+          <Text style={{color:C.muted,fontSize:12,marginTop:8,lineHeight:17}}>Keep this topic private: anyone with it receives this home's alerts.</Text>
+        </View>)}
+      {owner&&!!code&&(
+        <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
+          <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Invite family</Text>
+          <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:20}}>They install VIGIL, create an account, and add the camera with this home's code. You get an email whenever someone joins, and can remove them in Settings.</Text>
+          <TouchableOpacity onPress={()=>Share.share({message:`Join me on VIGIL to look after ${site?.name||'our home'}. Install VIGIL, create an account, then tap Add a camera and type this code: ${code}`})}
+            style={[s.btnPrimary,{marginTop:12}]}><Text style={s.btnPrimaryTxt}>Send an invite</Text></TouchableOpacity>
+        </View>)}
+    </>);
+    case 'camera':return(<>
+      <H1 t="Check the camera view" sub="VIGIL can only help with what it can see."/>
+      <View style={{marginTop:16,borderRadius:14,overflow:'hidden',backgroundColor:'#000',aspectRatio:16/9,alignItems:'center',justifyContent:'center'}}>
+        {frame?<Image source={{uri:`data:image/jpeg;base64,${frame}`}} style={{width:'100%',height:'100%'}} resizeMode="contain"/>
+          :frameWait<15?<ActivityIndicator color={C.green}/>
+          :<Text style={{color:C.sub,fontSize:14,textAlign:'center',padding:20,lineHeight:20}}>No picture yet. Check the camera and the VIGIL box are plugged in; the box light should be steady. You can also do this later.</Text>}
+      </View>
+      <View style={[s.card,{marginTop:16}]}>
+        {['Mount it high in a corner, about 2 metres up, tilted down.','The floor where people walk should be visible from wall to wall, and people should be seen head to toe.',
+          'Avoid pointing it at a bright window or into a bathroom.','Plug it in where nobody will unplug it, near the VIGIL box.'].map((t,i)=>(
+          <View key={i} style={{flexDirection:'row',marginBottom:10}}>
+            <Text style={{color:C.green,fontSize:15,fontWeight:'800',width:22}}>{i+1}</Text>
+            <Text style={{color:C.sub,fontSize:15,lineHeight:21,flex:1}}>{t}</Text></View>))}
+      </View>
+    </>);
+    case 'meet':return(<>
+      <H1 t="Let VIGIL meet everyone" sub={`About a minute per person. Each of ${people.map(p=>p.name).join(', ')||'them'} stands in front of the camera; you tap their name; VIGIL studies their face, build, clothes and walk until a check appears.`}/>
+      <TouchableOpacity onPress={()=>setTeach(true)} style={[s.btnPrimary,{marginTop:22,paddingVertical:18}]}>
+        <Text style={[s.btnPrimaryTxt,{fontSize:18}]}>Start</Text></TouchableOpacity>
+      <Text style={{color:C.muted,fontSize:13,marginTop:12,lineHeight:19}}>Not everyone home? Do it any time: Settings, Camera, Introduce everyone. Until then, VIGIL may say "Not sure" about people.</Text>
+    </>);
+    default:return(<>
+      <View style={{alignItems:'center',marginTop:30}}>
+        <View style={{width:96,height:96,borderRadius:48,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}>
+          <Svg width={52} height={52} viewBox="0 0 52 52"><Path d="M12 27 L22 37 L41 16" stroke="#000" strokeWidth={6} fill="none" strokeLinecap="round" strokeLinejoin="round"/></Svg>
+        </View>
+        <Text style={{color:C.text,fontSize:28,fontWeight:'800',marginTop:20}}>You are all set</Text>
+        <Text style={{color:C.sub,fontSize:16,textAlign:'center',lineHeight:23,marginTop:10}}>
+          {owner?`VIGIL is watching over ${residents.map(p=>p.name).join(' and ')||'your home'}. Over the first week it learns what is normal for each person, then shows when something changes.`
+            :`You will see ${site?.name||'this home'}'s alerts and trends.`}
+        </Text>
+      </View>
+    </>);
+  }};
+  return(
+    <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
+      <StatusBar barStyle="light-content"/>
+      <Modal visible={teach} animationType="slide" presentationStyle="fullScreen" onRequestClose={()=>setTeach(false)}>
+        {teach&&<TeachWhoScreen serverUrl={url} units={units} onClose={()=>{setTeach(false);next();}}/>}
+      </Modal>
+      <View style={{paddingHorizontal:20,paddingTop:12}}>
+        <View style={{flexDirection:'row',gap:4}}>
+          {STEPS.map((_,i)=><View key={i} style={{flex:1,height:4,borderRadius:2,backgroundColor:i<=step?C.green:C.fill}}/>)}
+        </View>
+      </View>
+      <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
+        <ScrollView contentContainerStyle={{padding:20,paddingBottom:24}} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+          {body()}
+          {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:14,lineHeight:20}}>{err}</Text>}
+        </ScrollView>
+        <View style={{flexDirection:'row',gap:12,paddingHorizontal:20,paddingTop:8,paddingBottom:28}}>
+          {step>0&&cur!=='done'&&<TouchableOpacity onPress={back} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
+            <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text></TouchableOpacity>}
+          <TouchableOpacity disabled={!canNext} onPress={cur==='done'?finish:next}
+            style={[s.btnPrimary,{flex:2,paddingVertical:17},!canNext&&{backgroundColor:C.fill,shadowOpacity:0}]}>
+            <Text style={{color:canNext?'#000':C.muted,fontWeight:'700',fontSize:17}}>
+              {cur==='done'?'Open VIGIL':cur==='camera'?(frame?'Looks good':'Skip for now'):cur==='meet'?'Later':'Continue'}</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>);
+}
+
+// MEMBERS_V1 / ACCOUNT_DELETE_V1: who can see this home, inviting family, and
+// deleting the account from inside the app (App Store guideline 5.1.1(v)).
+function AccessSection({cfg,onDeleted}:{cfg:CloudCfg;onDeleted:()=>void}){
+  const [m,setM]=useState<any>(null);
+  const [msg,setMsg]=useState<string|null>(null);
+  const [del,setDel]=useState(false);
+  const [pw,setPw]=useState('');
+  const [busy,setBusy]=useState(false);
+  const h={timeout:12000,headers:{'X-VIGIL-Key':cfg.token}};
+  const site=cfg.sites.find(x=>x.id===cfg.siteId);
+  const load=useCallback(()=>{if(!cfg.siteId)return;
+    axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/members`,h).then(r=>setM(r.data)).catch(()=>{});},[cfg.siteId,cfg.token]);
+  useEffect(()=>{load();},[load]);
+  const remove=(u:any)=>Alert.alert(u.me?`Leave ${site?.name||'this home'}?`:`Remove ${u.name||u.email}?`,
+    u.me?'You will stop seeing its camera and alerts.':'They will stop seeing this camera and its alerts.',[
+    {text:'Cancel',style:'cancel'},
+    {text:u.me?'Leave':'Remove',style:'destructive',onPress:async()=>{
+      try{await axios.post(`${cfg.gateway}/auth/site/${cfg.siteId}/members/${u.id}/remove`,{},h);setMsg(u.me?'You left this home. Pull down on Today to refresh.':'Removed.');load();}
+      catch(e:any){setMsg(e?.response?.data?.reason||'Could not remove. Check the internet connection.');}}}]);
+  const makeOwner=(u:any)=>Alert.alert(`Make ${u.name||u.email} an owner?`,'Owners can invite and remove people.',[
+    {text:'Cancel',style:'cancel'},
+    {text:'Make owner',onPress:async()=>{try{await axios.post(`${cfg.gateway}/auth/site/${cfg.siteId}/members/${u.id}/owner`,{},h);load();}
+      catch(e:any){setMsg(e?.response?.data?.reason||'Could not change. Check the internet connection.');}}}]);
+  const deleteAccount=async()=>{
+    setBusy(true);setMsg(null);
+    try{await axios.post(`${cfg.gateway}/auth/delete`,{password:pw},h);setPw('');setDel(false);
+      Alert.alert('Account deleted','Your VIGIL account and sign-in details are deleted. The camera keeps working for the rest of the family.');onDeleted();}
+    catch(e:any){setMsg(e?.response?.data?.reason||'Could not delete. Check the internet connection.');}
+    finally{setBusy(false);}
+  };
+  const inp={color:C.text,fontSize:16,paddingHorizontal:12,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
+  return(
+    <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
+      <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>People with access{site?` to ${site.name}`:''}</Text>
+      <Text style={{color:C.sub,fontSize:13,marginTop:4,lineHeight:18}}>Everyone here can see the camera, trends and alerts.</Text>
+      {(m?.members||[]).map((u:any)=>(
+        <View key={u.id} style={{flexDirection:'row',alignItems:'center',paddingVertical:11,borderTopWidth:1,borderTopColor:C.hair,marginTop:6}}>
+          <View style={{flex:1}}>
+            <Text style={{color:C.text,fontSize:15,fontWeight:'600'}}>{u.name||u.email}{u.me?' (you)':''}</Text>
+            <Text style={{color:C.muted,fontSize:12,marginTop:2}}>{u.email} · {u.role==='owner'?'Owner':'Family'}</Text>
+          </View>
+          {m?.my_role==='owner'&&!u.me&&u.role!=='owner'&&<TouchableOpacity onPress={()=>makeOwner(u)} style={{padding:6}}>
+            <Text style={{color:C.blue,fontSize:14}}>Owner</Text></TouchableOpacity>}
+          {(u.me||(m?.my_role==='owner'&&u.role!=='owner'))&&<TouchableOpacity onPress={()=>remove(u)} style={{padding:6}}>
+            <Text style={{color:C.red,fontSize:14}}>{u.me?'Leave':'Remove'}</Text></TouchableOpacity>}
+        </View>))}
+      {m?.my_role==='owner'&&!!m?.setup_code&&(
+        <TouchableOpacity onPress={()=>Share.share({message:`Join me on VIGIL to look after ${site?.name||'our home'}. Install VIGIL, create an account, then tap Add a camera and type this code: ${m.setup_code}`})}
+          style={[s.btnPrimary,{marginTop:12}]}><Text style={s.btnPrimaryTxt}>Invite family</Text></TouchableOpacity>)}
+      <View style={{marginTop:18,paddingTop:14,borderTopWidth:1,borderTopColor:C.hair}}>
+        {!del?(
+          <TouchableOpacity onPress={()=>{setDel(true);setMsg(null);}}><Text style={{color:C.red,fontSize:15}}>Delete my account</Text></TouchableOpacity>
+        ):(<>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Delete your VIGIL account?</Text>
+          <Text style={{color:C.sub,fontSize:13,marginTop:4,lineHeight:18}}>This deletes your sign-in, name, email, phone and access, right away. It cannot be undone. The camera and the people it knows stay with the home for the rest of the family{m?.my_role==='owner'?'; another member becomes owner':''}.</Text>
+          <TextInput style={inp} value={pw} onChangeText={setPw} placeholder="Your password" placeholderTextColor={C.muted} secureTextEntry autoCapitalize="none" textContentType="password"/>
+          <View style={{flexDirection:'row',gap:10,marginTop:10}}>
+            <TouchableOpacity onPress={()=>{setDel(false);setPw('');}} style={{flex:1,padding:13,borderRadius:10,backgroundColor:C.fill,alignItems:'center'}}>
+              <Text style={{color:C.text,fontWeight:'700'}}>Cancel</Text></TouchableOpacity>
+            <TouchableOpacity disabled={busy||!pw} onPress={deleteAccount} style={{flex:1,padding:13,borderRadius:10,backgroundColor:C.red,alignItems:'center',opacity:(busy||!pw)?0.5:1}}>
+              {busy?<ActivityIndicator color="#fff"/>:<Text style={{color:'#fff',fontWeight:'700'}}>Delete</Text>}</TouchableOpacity>
+          </View>
+        </>)}
+      </View>
+      {msg&&<Text style={{color:C.sub,fontSize:13,marginTop:10,lineHeight:18}}>{msg}</Text>}
+    </View>);
+}
+
 // Module level so its identity is stable: defined inside OnboardingScreen it was
 // recreated on every keystroke, which remounted the TextInput and closed the keyboard.
 const OBField = ({label,value,onChange,placeholder,keyboard='default',note}:any) => (
@@ -528,6 +905,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   const [age,setAge]               = useState('');
   const [cloudCfg,setCloudCfg]     = useState<CloudCfg|null>(null);
   const [pendingCloud,setPendingCloud] = useState<CloudCfg|null>(null);   // ACCOUNTS_V1: signed in, no camera yet
+  const [homeSetup,setHomeSetup]   = useState<{cfg:CloudCfg;role:string}|null>(null);   // HOME_SETUP_V1
   const [serverIp,setSI]           = useState(DEFAULT_IP);
   const [serverPort,setSP]         = useState(DEFAULT_PORT);
   const [testing,setTesting]       = useState(false);
@@ -798,6 +1176,10 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
     </Text>
   );
 
+  if(homeSetup){
+    return <HomeSetup cfg={homeSetup.cfg} role={homeSetup.role} onDone={()=>{
+      AsyncStorage.removeItem('vigil_home_setup_role').catch(()=>{});onCloud&&onCloud(homeSetup.cfg);}}/>;
+  }
   if(mode!=='local'){
     return (
       <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
@@ -816,14 +1198,16 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
                 {pendingCloud?(
                   <AddCameraCard cfg={pendingCloud}
                     onAdded={(cfg,role)=>{setPendingCloud(null);
-                      // The first person to add a camera sets up who it watches; family who join later go straight in.
-                      if(role==='caregiver'){onCloud&&onCloud(cfg);return;}
-                      setCloudCfg(cfg);setMode('local');setStep(1);}}
+                      // HOME_SETUP_V1: the first person sets up the whole home; family who join later choose their alerts.
+                      AsyncStorage.setItem('vigil_home_setup_role',JSON.stringify({siteId:cfg.siteId,role:role||'owner'})).catch(()=>{});
+                      setHomeSetup({cfg,role:role||'owner'});}}
                     onSkip={()=>{const c=pendingCloud;setPendingCloud(null);onCloud&&onCloud(c);}}/>
                 ):(
-                  <CloudSignIn onSignedIn={cfg=>{
+                  <CloudSignIn onSignedIn={async cfg=>{
                     if(!cfg.sites.length){setPendingCloud(cfg);return;}
-                    // Existing account that already has cameras: nothing to set up again.
+                    // HOME_SETUP_V1: setup left part-way on this phone resumes; otherwise straight in.
+                    try{const v=JSON.parse((await AsyncStorage.getItem('vigil_home_setup_role'))||'null');
+                      if(v&&cfg.sites.some(x=>x.id===v.siteId)){setHomeSetup({cfg:{...cfg,siteId:v.siteId},role:v.role});return;}}catch(_e){}
                     onCloud&&onCloud(cfg);}}/>
                 )}
                 <TouchableOpacity onPress={()=>setMode('choose')} style={{alignItems:'center',paddingVertical:16}}>
@@ -4131,6 +4515,7 @@ export default function App() {
   const renderServerTab=()=>(
     <ScrollView automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
       {cloud&&<AccountSection cfg={cloud}/>}
+      {cloud&&<AccessSection cfg={cloud} onDeleted={()=>{AsyncStorage.removeItem(SK_CLOUD).catch(()=>{});AsyncStorage.removeItem(SK_ONBOARDING).catch(()=>{});enterCloud(null);setOnboarding(true);}}/>}
       {cloud?(
         <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
           <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Cameras</Text>
@@ -4427,7 +4812,14 @@ export default function App() {
   if(showOnboarding){
     return(
       <OnboardingScreen onDemo={()=>{setOnboarding(false);enterDemo();}}
-        onCloud={cfg=>{enterCloud(cfg);setOnboarding(false);}}
+        onCloud={cfg=>{enterCloud(cfg);setOnboarding(false);
+          // HOME_SETUP_V1: pick up the profile and watch choice the setup just saved
+          Promise.all([AsyncStorage.getItem(SK_PROFILE),AsyncStorage.getItem(SK_WATCH_OWNER)]).then(([ps,wo])=>{
+            setWatchOwnerS(wo||null);
+            if(ps){try{const p:SavedProfile=JSON.parse(ps);setResidentName(p.residentName||'');setWatchEnabled(!!p.watchEnabled);
+              if(p.units)setPUnits(p.units==='metric'?'metric':'us');}catch(_e){}}
+          }).catch(()=>{});
+          AsyncStorage.setItem('vigil_teach_offered_'+cfg.siteId,'1').catch(()=>{});}}
         onComplete={(profile,ip,port)=>{
         setResidentName(profile.residentName);setResidentHeight(profile.residentHeight);
         setEmergencyPhone(profile.emergencyPhone);setEmergencyEmail(profile.emergencyEmail);
