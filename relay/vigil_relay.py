@@ -448,9 +448,16 @@ def srt_target(cfg):
             % (cfg["VIGIL_CLOUD_HOST"], cfg.get("VIGIL_SRT_PORT", "8890"), sid, cfg["VIGIL_SRT_PASSPHRASE"]))
 
 
+# FFMPEG7_V1: newer ffmpeg (7.x, Raspberry Pi OS Trixie) refuses an input option
+# the stream does not use ("Option not found"); -rw_timeout is not used by RTSP.
+# The RTSP socket timeout is -timeout. If a build rejects even that, drop it.
+_FF = {"timeout": True}
+
+
 def ffmpeg_cmd(cfg, ip, mode):
     src = cfg.get("VIGIL_SOURCE_URL") or rtsp_url(cfg, ip)
-    inp = ["-rtsp_transport", "tcp", "-rw_timeout", "10000000"] if src.startswith("rtsp") else ["-re", "-stream_loop", "-1"]
+    inp = (["-rtsp_transport", "tcp"] + (["-timeout", "10000000"] if _FF["timeout"] else [])) \
+        if src.startswith("rtsp") else ["-re", "-stream_loop", "-1"]
     base = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin"] + inp + ["-i", src,
             "-map", "0:v:0", "-c:v", "copy", "-an"]
     if mode == "srt":
@@ -480,6 +487,9 @@ def stream(cfg, ip, mode, light):
         pass
     ran = time.time() - t0
     log("stream stopped after %.0f s%s" % (ran, (": " + last_err) if last_err else ""))
+    if "Option not found" in last_err and _FF["timeout"]:
+        _FF["timeout"] = False
+        log("this ffmpeg does not take -timeout; retrying without it")
     return ran
 
 
