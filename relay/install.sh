@@ -16,6 +16,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 read -rp "Tapo camera account username: " TAPO_USER
 read -rsp "Tapo camera account password: " TAPO_PASS; echo
+read -rp "Camera MAC address (Tapo app > camera > Settings > Device info; Enter to skip): " TAPO_MAC
 read -rp "Tailscale auth key (press Enter to skip): " TS_KEY
 read -rp "Wi-Fi name of the home it goes to (Enter to skip): " WIFI_SSID
 WIFI_PASS=""
@@ -28,7 +29,7 @@ apt-get install -y -qq ffmpeg python3 network-manager dnsmasq-base >/dev/null
 echo "== Installing VIGIL relay"
 install -d /opt/vigil-relay /var/lib/vigil-relay
 install -m 755 "$HERE/vigil_relay.py" "$HERE/wifi_setup.py" /opt/vigil-relay/
-{ cat "$SETTINGS"; echo "VIGIL_TAPO_USER=$TAPO_USER"; echo "VIGIL_TAPO_PASS=$TAPO_PASS"; } > /etc/vigil-relay.env
+{ cat "$SETTINGS"; echo "VIGIL_TAPO_USER=$TAPO_USER"; echo "VIGIL_TAPO_PASS=$TAPO_PASS"; if [ -n "$TAPO_MAC" ]; then echo "VIGIL_TAPO_MAC=$TAPO_MAC"; fi; } > /etc/vigil-relay.env
 chmod 600 /etc/vigil-relay.env
 
 cat > /etc/systemd/system/vigil-relay.service <<'EOF'

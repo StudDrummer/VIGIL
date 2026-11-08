@@ -176,6 +176,20 @@ def neigh_mac(ip):
     return None
 
 
+def neigh_table():
+    """{ip: mac} for every address Linux currently has a good answer for."""
+    table = {}
+    try:
+        out = subprocess.run(["ip", "-4", "neigh", "show"], capture_output=True, text=True, timeout=5).stdout
+        for line in out.splitlines():
+            w = line.split()
+            if w and "lladdr" in w and "FAILED" not in w and "INCOMPLETE" not in w:
+                table[w[0]] = w[w.index("lladdr") + 1].lower()
+    except Exception:
+        pass
+    return table
+
+
 def pin(ip, mac):
     dev = iface_for(ip)
     if not dev or not mac:
@@ -278,6 +292,52 @@ def _try(cfg, ip, mac=None):
     return False, {}
 
 
+def own_ips():
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=5).stdout
+        return [l.split()[3].split("/")[0] for l in out.splitlines() if len(l.split()) >= 4]
+    except Exception:
+        return []
+
+
+def gateway():
+    try:
+        out = subprocess.run(["ip", "route", "show", "default"], capture_output=True, text=True, timeout=5).stdout.split()
+        return out[out.index("via") + 1]
+    except Exception:
+        return None
+
+
+def sweep_for_mac(cfg, mac, nets, skip=()):
+    """The camera's hardware address is known but not its address (it may have
+    changed). Point every address that has no owner at the camera's hardware
+    address for a moment: only the camera's real address will answer."""
+    hosts = [str(h) for n in nets for h in n.hosts()]
+    known = neigh_table()
+    free = [h for h in hosts if h not in skip and not known.get(h)]
+    dev = iface_for(free[0]) if free else None
+    if not dev:
+        return None, {}
+    cmds = "".join("neigh replace %s lladdr %s dev %s nud permanent\n" % (h, mac, dev) for h in free)
+    subprocess.run(["ip", "-batch", "-"], input=cmds, capture_output=True, text=True, timeout=30)
+    _pinned.update(free)
+    try:
+        with ThreadPoolExecutor(max_workers=64) as ex:
+            open_ips = [h for h, ok in zip(free, ex.map(lambda h: port_open(h, timeout=1.5), free)) if ok]
+        for ip in open_ips:
+            ok, info = is_camera(cfg, ip)
+            if ok:
+                _pinned.discard(ip)                  # keep this one
+                remember(ip, mac)
+                return ip, info
+        return None, {}
+    finally:
+        rest = [h for h in free if h in _pinned]
+        cmds = "".join("neigh del %s dev %s\n" % (h, dev) for h in rest)
+        subprocess.run(["ip", "-batch", "-"], input=cmds, capture_output=True, text=True, timeout=30)
+        _pinned.difference_update(rest)
+
+
 def find_camera(cfg):
     r_ip, r_mac = remembered()
     mac_cfg = (cfg.get("VIGIL_TAPO_MAC") or "").lower().replace("-", ":") or None
@@ -302,10 +362,18 @@ def find_camera(cfg):
         ok, info = _try(cfg, ip)
         if ok:
             return ip, info
-    # 3. the network is dropping address lookups: listen for the camera announcing itself
+    # 3. we know the camera's hardware address: find which address it has now
+    if known_mac:
+        log("camera not answering address lookups; searching by its hardware address %s" % known_mac)
+        mine = set(own_ips())
+        ip, info = sweep_for_mac(cfg, known_mac, nets, skip=mine | {gateway()})
+        if ip:
+            log("found the camera at %s by its hardware address; address pinned" % ip)
+            return ip, info
+    # 4. listen for the camera announcing itself
     log("camera not answering address lookups; listening for it for %.0f s" % ARP_LISTEN_S)
     heard = listen_for_devices(ARP_LISTEN_S, nets)
-    mine = {str(n.network_address) for n in nets}
+    mine = set(own_ips()) | {gateway()}
     order = sorted(heard.items(), key=lambda kv: (kv[1] != known_mac, kv[0]))   # known camera first
     for ip, mac in order:
         if ip in mine or ip in open_ips:

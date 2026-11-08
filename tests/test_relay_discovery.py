@@ -80,6 +80,48 @@ def test_finds_camera_when_address_lookups_fail():
         vr.port_open, vr.pin, vr.unpin, vr.neigh_mac, vr.listen_for_devices = old
 
 
+def test_finds_camera_by_hardware_address_alone():
+    """The camera never announces itself and its address changed, but the box
+    was told its hardware address (VIGIL_TAPO_MAC)."""
+    import shutil
+    import types
+    shutil.rmtree(vr.STATE_DIR, ignore_errors=True)
+    mac = "ac:a7:f1:fd:42:92"
+    new_ip = "192.168.1.88"
+    pins = {"192.168.1.1": "aa:aa:aa:aa:aa:aa", "192.168.1.30": "11:22:33:44:55:66"}   # router, a phone
+    real_run = vr.subprocess.run
+
+    def fake_run(cmd, input=None, **kw):
+        if cmd[:2] == ["ip", "-batch"]:
+            for line in input.splitlines():
+                w = line.split()
+                if w[1] == "replace":
+                    pins[w[2]] = w[4]
+                elif w[1] == "del":
+                    pins.pop(w[2], None)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    old = (vr.neigh_table, vr.port_open, vr.neigh_mac, vr.iface_for, vr.own_ips, vr.gateway, vr.listen_for_devices, vr.is_camera)
+    vr.subprocess.run = fake_run
+    vr.port_open = lambda ip, port=554, timeout=0.6: str(ip) == new_ip and pins.get(new_ip) == mac
+    vr.neigh_mac = lambda ip: pins.get(str(ip))
+    vr.neigh_table = lambda: dict(pins)
+    vr.iface_for = lambda ip: "wlan0"
+    vr.own_ips = lambda: ["192.168.1.40"]
+    vr.gateway = lambda: "192.168.1.1"
+    vr.listen_for_devices = lambda s, nets: {}
+    vr.is_camera = lambda cfg, ip: (ip == new_ip, {"width": 1920})
+    try:
+        ip, info = vr.find_camera({"VIGIL_TAPO_USER": "u", "VIGIL_TAPO_PASS": "p", "VIGIL_TAPO_MAC": mac,
+                                   "VIGIL_TAPO_IP": CAM})
+        assert ip == new_ip, ip
+        # only the camera stays pinned; the router and phone entries were never touched
+        assert pins == {"192.168.1.1": "aa:aa:aa:aa:aa:aa", "192.168.1.30": "11:22:33:44:55:66", new_ip: mac}, pins
+        assert vr.remembered() == (new_ip, mac)
+    finally:
+        vr.subprocess.run = real_run
+        (vr.neigh_table, vr.port_open, vr.neigh_mac, vr.iface_for, vr.own_ips, vr.gateway, vr.listen_for_devices, vr.is_camera) = old
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):
