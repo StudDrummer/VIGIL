@@ -458,38 +458,74 @@ def ffmpeg_cmd(cfg, ip, mode):
     src = cfg.get("VIGIL_SOURCE_URL") or rtsp_url(cfg, ip)
     inp = (["-rtsp_transport", "tcp"] + (["-timeout", "10000000"] if _FF["timeout"] else [])) \
         if src.startswith("rtsp") else ["-re", "-stream_loop", "-1"]
-    base = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin"] + inp + ["-i", src,
+    base = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin", "-nostats",
+            "-progress", "pipe:1", "-stats_period", "2"] + inp + ["-i", src,
             "-map", "0:v:0", "-c:v", "copy", "-an"]
     if mode == "srt":
         return base + ["-f", "mpegts", srt_target(cfg)]
     return base + ["-f", "flv", cfg["VIGIL_RTMP_FALLBACK"]]
 
 
+STALL_S = float(os.environ.get("VIGIL_STALL_S", "20"))
+STALL_GRACE_S = float(os.environ.get("VIGIL_STALL_GRACE_S", "15"))
+
+
 def stream(cfg, ip, mode, light):
-    """Run one ffmpeg until it stops. Returns seconds it ran."""
+    """Run one ffmpeg until it stops. Returns seconds it ran.
+    STALL_V1: ffmpeg reports progress every 2 s; if no new video moves for
+    STALL_S seconds (a dead cloud connection, a frozen camera), it is stopped and
+    the main loop reconnects. Its error output is read all the time, so a chatty
+    ffmpeg can never fill the pipe and freeze."""
     t0 = time.time()
     log("sending camera %s to VIGIL Cloud by %s" % (ip, mode.upper()))
-    p = subprocess.Popen(ffmpeg_cmd(cfg, ip, mode), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    p = subprocess.Popen(ffmpeg_cmd(cfg, ip, mode), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    prog = {"last": time.time(), "value": None}
+    errs = []
+
+    def _out():
+        for line in p.stdout:
+            if line.startswith("total_size=") or line.startswith("out_time_us="):
+                v = line.strip()
+                if v != prog["value"]:
+                    prog.update(value=v, last=time.time())
+
+    def _err():
+        for line in p.stderr:
+            line = line.strip()
+            if line:
+                errs.append(line[:200])
+                del errs[:-20]
+    threading.Thread(target=_out, daemon=True).start()
+    threading.Thread(target=_err, daemon=True).start()
     marked = False
-    last_err = ""
+    stalled = False
     while p.poll() is None:
         time.sleep(1)
+        now = time.time()
         if marked:
             report({"state": "sending", "camera": ip, "mode": mode})
-        if not marked and time.time() - t0 > 8:
-            marked = True                      # still running after 8 s: the cloud accepted it
+        if not marked and now - t0 > min(8, STALL_GRACE_S) and now - prog["last"] < 5:
+            marked = True                      # running and moving after 8 s: the cloud accepted it
             light.state = "ok"
             write_status(state="sending", camera=ip, mode=mode, since=time.strftime("%H:%M:%S"))
-    try:
-        last_err = (p.stderr.read() or "").strip().splitlines()[-1:] or [""]
-        last_err = last_err[0][:200]
-    except Exception:
-        pass
+        if now - t0 > STALL_GRACE_S and now - prog["last"] > STALL_S:
+            stalled = True
+            log("no video moving for %.0f s; reconnecting" % (now - prog["last"]))
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                p.kill()
+            break
+    time.sleep(0.3)
+    last_err = errs[-1] if errs else ""
     ran = time.time() - t0
-    log("stream stopped after %.0f s%s" % (ran, (": " + last_err) if last_err else ""))
+    log("stream stopped after %.0f s%s" % (ran, (": " + last_err) if last_err and not stalled else ""))
     if "Option not found" in last_err and _FF["timeout"]:
         _FF["timeout"] = False
         log("this ffmpeg does not take -timeout; retrying without it")
+    if stalled and marked:
+        return max(ran, 8.0)                   # a stall after working is not a sign SRT is blocked
     return ran
 
 
