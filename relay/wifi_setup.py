@@ -109,8 +109,14 @@ def scan():
 def hotspot_on():
     os.makedirs(os.path.dirname(FLAG), exist_ok=True)
     open(FLAG, "w").close()
-    sh("nmcli", "device", "wifi", "hotspot", "ifname", "wlan0", "con-name", "vigil-setup",
-       "ssid", ssid_name(), "password", hotspot_password())
+    # HOTSPOT_24_V1: 2.4 GHz channel 6 is allowed in every country and every phone lists it.
+    # Left to itself the box can pick a channel some iPhones never show.
+    rc, out = sh("nmcli", "device", "wifi", "hotspot", "ifname", "wlan0", "con-name", "vigil-setup",
+                 "ssid", ssid_name(), "password", hotspot_password(), "band", "bg", "channel", "6")
+    if rc != 0:
+        print("[wifi-setup] hotspot on channel 6 failed (%s); letting the box choose" % out.strip()[:120], flush=True)
+        sh("nmcli", "device", "wifi", "hotspot", "ifname", "wlan0", "con-name", "vigil-setup",
+           "ssid", ssid_name(), "password", hotspot_password())
 
 
 def hotspot_off():
