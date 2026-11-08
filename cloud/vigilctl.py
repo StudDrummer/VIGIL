@@ -131,6 +131,9 @@ def render(st):
       VIGIL_FLOOR_ALERT_S: "{floor_s}"
       VIGIL_FACE_ID: "{face}"
       PYTHONFAULTHANDLER: "1"
+      # RTSP_TCP_V1: mediamtx serves the camera inside the server over TCP only; without
+      # this OpenCV asks for UDP first (461), stalls 30 s per try, and then crashes.
+      OPENCV_FFMPEG_CAPTURE_OPTIONS: "rtsp_transport;tcp|stimeout;10000000"
       TZ: "{tz}"
       HOME: /root
     volumes:
