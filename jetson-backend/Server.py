@@ -849,7 +849,7 @@ def camera_snapshot():
     """Returns the latest camera frame as a base64 JPEG."""
     if request.args.get("view") == "skeleton":
         try:
-            if time.time() - os.stat("/dev/shm/vigil_skeleton.jpg").st_mtime > 10:
+            if time.time() - os.stat("/dev/shm/vigil_skeleton.jpg").st_mtime > 30:   # SMOOTH_VIEW_V1
                 return jsonify({"frame": None, "available": False})
             with open("/dev/shm/vigil_skeleton.jpg", "rb") as _f:
                 return jsonify({"frame": __import__("base64").b64encode(_vigil_small(_f.read())).decode(),
@@ -861,7 +861,9 @@ def camera_snapshot():
     # stale or cut off mid-write.
     try:
         _lp = "/dev/shm/vigil_latest.jpg"
-        if time.time() - os.stat(_lp).st_mtime < 3:
+        # SMOOTH_VIEW_V1: a slower camera (cloud CPU) still shows only analysed frames,
+        # never alternating with the older 2-second picture, which looked like glitching.
+        if time.time() - os.stat(_lp).st_mtime < 15:
             with open(_lp, "rb") as _lf:
                 _lb = _lf.read()
             if _lb[:2] == b"\xff\xd8" and _lb[-2:] == b"\xff\xd9":

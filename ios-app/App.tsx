@@ -3807,7 +3807,7 @@ export default function App() {
   useEffect(()=>{AsyncStorage.getItem('vigil_privacy_view').then(v=>{if(v==='0'){setPrivacyView(false);privacyViewRef.current=false;}}).catch(()=>{});},[]);
   const togglePrivacyView=useCallback(()=>{
     const next=!privacyViewRef.current; privacyViewRef.current=next; setPrivacyView(next);
-    prevFrame.current=null; setCameraFrame(null);
+    prevFrame.current=null;   // SMOOTH_VIEW_V1: keep the last picture until the other view arrives
     AsyncStorage.setItem('vigil_privacy_view',next?'1':'0').catch(()=>{});
   },[]);
   const appStateRef   = useRef<AppStateStatus>('active');
@@ -3864,14 +3864,20 @@ export default function App() {
   // ─────────────────────────────────────────────
   // NETWORK
   // ─────────────────────────────────────────────
+  // STEADY_ONLINE_V1: one slow answer is not "offline". Three failures in a row
+  // are, and a check every 20 s brings it back by itself.
+  const pingFails=useRef(0);
   const pingJetson=useCallback(async()=>{
     const u=url();
     try{
-      const r=await AX.get(`${u}/health`);
+      const r=await AX.get(`${u}/health`,{timeout:15000});
       if(r.data?.status==='ok'){
-        setJetsonOk(true);setServerVersion(r.data?.version??null);
-      }else{setJetsonOk(false);}
-    }catch{setJetsonOk(false);}
+        pingFails.current=0;setJetsonOk(true);setServerVersion(r.data?.version??null);return;
+      }
+    }catch{}
+    pingFails.current+=1;
+    if(pingFails.current>=3)setJetsonOk(false);
+    else setTimeout(()=>pingJetson(),4000);
   },[]);
 
   const fetchDashboard=useCallback(async()=>{
@@ -4114,6 +4120,7 @@ export default function App() {
   // SERVER POLLING EFFECTS
   // ─────────────────────────────────────────────
   useEffect(()=>{if(!booting&&!showOnboarding&&!demoMode)setTimeout(()=>pingJetson(),1500);},[booting,showOnboarding,demoMode,pingJetson]);
+  useEffect(()=>{if(booting||showOnboarding||demoMode)return;const id=setInterval(()=>{if(!kbOpenRef.current)pingJetson();},20000);return()=>clearInterval(id);},[booting,showOnboarding,demoMode,pingJetson]);   // STEADY_ONLINE_V1
 
   useEffect(()=>{
     if(!initialized||jetsonOk!==true||demoMode)return;

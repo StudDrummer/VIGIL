@@ -438,6 +438,16 @@ def cmd_users(_a):
         print("%-34s %-18s %-6s %s" % (r[0], r[1] or "", "admin" if r[2] else "", r[3] or ""))
 
 
+def cmd_tune(a):
+    """CPU cores each camera's analysis may use (default 2)."""
+    st = load()
+    st["cpus_per_camera"] = a.cpus
+    save(st)
+    render(st)
+    compose_up(st)
+    print("Each camera may now use %.1f CPU cores." % a.cpus)
+
+
 def cmd_apply(_a):
     st = load()
     render(st)
@@ -476,6 +486,7 @@ def main():
     s.set_defaults(f=cmd_grant)
     sub.add_parser("users").set_defaults(f=cmd_users)
     sub.add_parser("apply").set_defaults(f=cmd_apply)
+    s = sub.add_parser("tune"); s.add_argument("--cpus", type=float, required=True); s.set_defaults(f=cmd_tune)
     a = p.parse_args()
     a.f(a)
 
