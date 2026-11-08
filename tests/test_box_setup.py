@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+_real_sleep = time.sleep
 from http.server import HTTPServer
 
 d = tempfile.mkdtemp()
@@ -35,7 +36,7 @@ def fake_sh(*cmd, timeout=30):
 
 ws.sh = fake_sh
 ws.online = lambda: NET["online"]
-ws.time.sleep = lambda s: None
+ws.time = type("T", (), {"sleep": staticmethod(lambda s: None), "time": staticmethod(time.time)})
 srv = HTTPServer(("127.0.0.1", 0), ws.H)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 BASE = "http://127.0.0.1:%d" % srv.server_port
@@ -52,10 +53,10 @@ def req(path, body=None):
 
 
 def wait_join():
-    for _ in range(100):
+    for _ in range(500):
         if not ws.STATE["joining"]:
             return
-        time.sleep(0.02)
+        _real_sleep(0.02)
 
 
 def test_names_and_password():
