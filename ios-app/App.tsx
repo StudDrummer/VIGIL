@@ -1419,6 +1419,7 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
    onDone:(learned:string[],another:boolean)=>void;onCancel:()=>void}){
   const [st,setSt]=useState<any>(null);
   const [err,setErr]=useState<string|null>(null);
+  const [othersSeen,setOthersSeen]=useState(0);     // ENROLL_V2: polls in a row with someone else in view
   const keyRef=useRef<string|null>(null);
   const spin=useRef(new Animated.Value(0)).current;
   const pop=useRef(new Animated.Value(0)).current;
@@ -1437,7 +1438,7 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
         try{
           const r=await AX.get(`${serverUrl}/enroll/status`,{params:{key:keyRef.current},timeout:4000});
           if(!alive)break;
-          if(r.data?.active){stale=0;setErr(null);setSt(r.data);if(r.data.done)break;}
+          if(r.data?.active){stale=0;setErr(null);setSt(r.data);setOthersSeen(n=>r.data.others_in_view>0?n+1:0);if(r.data.done)break;}
           else{stale++;if(stale>=16)setErr(r.data?.camera_running===false
             ?'The camera is not sending video right now. Check it is plugged in and online.'
             :'Waiting for the camera to start learning...');}
@@ -1496,7 +1497,7 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
           <Text style={{color:done?C.green:(st&&!st.in_view)?C.orange:C.text,fontSize:19,fontWeight:'700',marginTop:20,textAlign:'center'}}>
             {done?'Done':err&&!st?'Connecting...':st?.prompt??'Getting ready...'}
           </Text>
-          {!done&&st?.others_in_view>0&&(
+          {!done&&othersSeen>=6&&(
             <Text style={{color:C.orange,fontSize:14,marginTop:8,textAlign:'center'}}>Someone else is in view. Ask them to step out for a minute.</Text>)}
           {!!err&&<Text style={{color:C.orange,fontSize:14,marginTop:8,textAlign:'center',lineHeight:20}}>{err}</Text>}
           <View style={{flexDirection:'row',marginTop:18,gap:8}}>

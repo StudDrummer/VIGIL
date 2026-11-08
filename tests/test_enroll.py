@@ -103,5 +103,38 @@ def test_stop_request_ends_it():
     assert state()["active"] is False
 
 
+def test_lost_and_renamed_midway():
+    """ENROLL_V2: mom is lost, comes back as a new track that identity called
+    Nitin; she is the only person in view, so learning continues on her."""
+    import time as _t
+    with open(os.environ["VIGIL_ENROLL_REQ"], "w") as f:
+        json.dump({"key": "k2", "person_id": "mom", "name": "Shivani", "track": 20, "t": _t.time()}, f)
+    for _ in range(5):
+        frame("front", t=20)
+    assert ph._EN["track"] == 20
+    ph._EN["seen_t"] = _t.time() - 2          # lost for 2 s
+    ph._track_to_pid[31] = "nitin"            # new track, wrong name
+    k = kp("front"); ph._EN["track"] = None; ph._EN["track_hint"] = None
+    ph._EN["started"] = 0
+    # the same body drawn twice must not count as someone else
+    k2 = k.copy(); k2[:, :2] += 3
+    ph._EN["read_t"] = 0; ph._EN["write_t"] = 0
+    ph._enroll_tick([k, k2], [31, 32], [ph._kp_box(k), ph._kp_box(k2)], {31: rng.normal(size=16)})
+    st = state()
+    assert ph._EN["track"] == 31 and ph._track_to_pid[31] == "mom", (ph._EN["track"], ph._track_to_pid.get(31))
+    assert st["others_in_view"] == 0 and st["in_view"], st
+    # a real second person far away is counted, and never taken over
+    far = kp("front"); far[:, 0] += 600
+    ph._EN["read_t"] = 0; ph._EN["write_t"] = 0
+    ph._enroll_tick([k, far], [31, 40], [ph._kp_box(k), ph._kp_box(far)], {})
+    assert state()["others_in_view"] == 1 and ph._EN["track"] == 31
+    # lost again with two people in view: do not guess
+    ph._EN["track"] = None; ph._EN["seen_t"] = _t.time() - 2
+    ph._track_to_pid.pop(31, None)
+    ph._EN["read_t"] = 0; ph._EN["write_t"] = 0
+    ph._enroll_tick([far, kp("front")], [40, 41], [ph._kp_box(far), ph._kp_box(kp("front"))], {})
+    assert ph._EN["track"] is None and state()["in_view"] is False
+
+
 if __name__ == "__main__":
-    test_learns_every_part_then_commits(); test_stop_request_ends_it(); print("ok")
+    test_learns_every_part_then_commits(); test_stop_request_ends_it(); test_lost_and_renamed_midway(); print("ok")

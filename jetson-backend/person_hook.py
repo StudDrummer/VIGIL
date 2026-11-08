@@ -1480,9 +1480,35 @@ _EN_STAGE_PARTS = {"still": ("face", "front", "body", "height"), "turn": ("side"
 _EN_ORDER = ("still", "turn", "walk")
 
 
+def _en_iou(a, b):
+    try:
+        ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+        iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+        inter = ix * iy
+        u = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+        return inter / u if u > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _en_bodies(track_ids, boxes):
+    """Distinct people in view: one body drawn twice (two skeletons on top of
+    each other) counts once. Returns [(track, box)]."""
+    out = []
+    for i, t in enumerate(track_ids or []):
+        if t is None or i >= len(boxes) or boxes[i] is None:
+            continue
+        if any(_en_iou(boxes[i], b) > 0.45 for _t, b in out):
+            continue
+        out.append((t, boxes[i]))
+    return out
+
+
 def _enroll_find_track(track_ids):
     live = [t for t in track_ids if t is not None]
-    if _EN["track"] in live and _track_to_pid.get(_EN["track"]) in (None, _EN["pid"]):
+    # ENROLL_V2: the person being introduced keeps their track even if identity
+    # briefly calls them someone else; the caregiver said who this is.
+    if _EN["track"] in live:
         return _EN["track"]
     h = _EN["track_hint"]
     # the app's correction for this track takes up to 3 s to apply; until then trust the hint
@@ -1503,11 +1529,32 @@ def _enroll_tick(all_persons, track_ids, boxes, fps):
     dt = min(0.5, now - _EN["last_tick"])
     _EN["last_tick"] = now
     t = _enroll_find_track(track_ids or [])
+    bodies = _en_bodies(track_ids, boxes)
+    if t is None and len(bodies) == 1 and _EN["seen_t"] and now - _EN["seen_t"] > 0.8:
+        # ENROLL_V2: the tracker lost them and started a new track, and identity
+        # may have put another name on it. Only one person is in view, so it is
+        # the person being introduced: take it back and undo the wrong name.
+        t = bodies[0][0]
+        prev = _track_to_pid.get(t)
+        if prev and prev != _EN["pid"]:
+            try:
+                if _VR is not None and _trk_fp.get(t):
+                    _VR.GALLERY.remove_recent(prev, np.array(_trk_fp[t]))
+            except Exception:
+                pass
+        print("[ENROLL] %s picked up again on track %s (was %s)" % (_EN["pid"], t, prev or "unnamed"), flush=True)
     _EN["track"] = t
-    _EN["others"] = max(0, len([x for x in (track_ids or []) if x is not None]) - (1 if t is not None else 0))
+    tbox = next((b for tt, b in bodies if tt == t), None)
+    if tbox is None and t is not None and t in list(track_ids):
+        tbox = boxes[list(track_ids).index(t)]
+    _EN["others"] = len([1 for tt, b in bodies if tt != t and (tbox is None or _en_iou(b, tbox) <= 0.45)])
     if t is None:
         _enroll_write()
         return
+    if _track_to_pid.get(t) != _EN["pid"]:                    # hold the name on them while learning
+        _track_to_pid[t] = _EN["pid"]
+        _trk_status.pop(t, None)
+    _V8_VER[t] = _EN["pid"]
     i = list(track_ids).index(t)
     kp = all_persons[i]
     _EN["seen_t"] = now
