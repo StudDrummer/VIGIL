@@ -139,9 +139,9 @@ def rtsp_url(cfg, ip):
 def is_camera(cfg, ip):
     """True if this address answers as an RTSP camera with our camera account."""
     try:
-        r = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-rw_timeout", "6000000",
+        r = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-rw_timeout", "12000000",
                             "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height",
-                            "-of", "json", rtsp_url(cfg, ip)], capture_output=True, text=True, timeout=15)
+                            "-of", "json", rtsp_url(cfg, ip)], capture_output=True, text=True, timeout=25)
         info = json.loads(r.stdout or "{}").get("streams") or []
         return bool(info), (info[0] if info else {})
     except Exception:
@@ -322,8 +322,12 @@ def sweep_for_mac(cfg, mac, nets, skip=()):
     subprocess.run(["ip", "-batch", "-"], input=cmds, capture_output=True, text=True, timeout=30)
     _pinned.update(free)
     try:
-        with ThreadPoolExecutor(max_workers=64) as ex:
-            open_ips = [h for h, ok in zip(free, ex.map(lambda h: port_open(h, timeout=1.5), free)) if ok]
+        open_ips = []
+        for workers, wait in ((32, 3.0), (8, 6.0)):      # second, slower pass for a weak Wi-Fi link
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                open_ips = [h for h, ok in zip(free, ex.map(lambda h: port_open(h, timeout=wait), free)) if ok]
+            if open_ips:
+                break
         for ip in open_ips:
             ok, info = is_camera(cfg, ip)
             if ok:
