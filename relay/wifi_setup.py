@@ -222,6 +222,8 @@ def try_join(ssid, pw):
     if rc == 0 and online():
         MSG[0] = ""
         STATE.update(joining=None, last_error="", joined=ssid)
+        NET["retries_fixed"].discard(ssid)
+        keep_retrying()
         print("[wifi-setup] joined %s" % (ssid or "known Wi-Fi"), flush=True)
         return
     print("[wifi-setup] could not join %s: %s" % (ssid, out.strip()[:200]), flush=True)
@@ -233,28 +235,162 @@ def try_join(ssid, pw):
     hotspot_on()
 
 
+# ALWAYS_ON_V1: the box keeps itself connected with nobody touching it.
+#  * NetworkManager retries saved Wi-Fi forever (its default gives up after 4 tries).
+#  * While the Wi-Fi itself is down, repairs escalate: reconnect (30 s), restart the
+#    radio (2 min), reload the Wi-Fi driver (5 min; the Pi 3 chip can lock up),
+#    reboot (10 min, at most once every 20 min so it can never reboot-loop).
+#  * If the router answers but the internet is down, there is nothing to fix on
+#    the box: it waits, and the cloud's offline alert tells the family.
+#  * The setup hotspot opens only when setup is needed: no saved Wi-Fi, no camera
+#    account, or the saved Wi-Fi is nowhere to be seen for 10 minutes (moved house).
+#    Even then it steps aside every 5 minutes to look for the saved Wi-Fi, unless
+#    a phone is connected to it right now.
+REBOOT_FILE = os.environ.get("VIGIL_LAST_REBOOT", "/var/lib/vigil-relay/last_reboot")
+NET = {"offline_since": None, "level": 0, "hotspot_since": None, "retries_fixed": set()}
+
+
+def default_gateway():
+    rc, out = sh("ip", "route", "show", "default")
+    w = out.split()
+    return w[w.index("via") + 1] if "via" in w else None
+
+
+def link_state():
+    """'internet', 'local' (router answers, internet does not) or 'down'."""
+    rc, out = sh("nmcli", "-t", "-f", "TYPE,STATE", "device")
+    if "wifi:connected" not in out:
+        return "down"
+    if sh("ping", "-c", "1", "-W", "3", "1.1.1.1", timeout=6)[0] == 0 or \
+            sh("ping", "-c", "1", "-W", "3", "8.8.8.8", timeout=6)[0] == 0:
+        return "internet"
+    gw = default_gateway()
+    if gw and sh("ping", "-c", "1", "-W", "3", gw, timeout=6)[0] == 0:
+        return "local"
+    return "down"
+
+
+def keep_retrying():
+    """Saved Wi-Fi: retry forever, reconnect on its own, never sleep the radio."""
+    for name in known_wifi():
+        if name in NET["retries_fixed"]:
+            continue
+        sh("nmcli", "connection", "modify", name, "connection.autoconnect", "yes",
+           "connection.autoconnect-retries", "0", "802-11-wireless.powersave", "2")
+        NET["retries_fixed"].add(name)
+
+
+def saved_visible():
+    """Is any saved Wi-Fi in range? (A scan is not possible while the hotspot is up.)"""
+    seen = {n for n, _s in scan()}
+    return any(k in seen for k in known_wifi())
+
+
+def hotspot_clients():
+    rc, out = sh("iw", "dev", "wlan0", "station", "dump")
+    return out.count("Station ")
+
+
+def may_reboot(now):
+    try:
+        with open(REBOOT_FILE) as f:
+            last = float(f.read().strip() or 0)
+    except (OSError, ValueError):
+        last = 0.0
+    return now - last >= 20 * 60
+
+
+def do_reboot(now, why):
+    try:
+        os.makedirs(os.path.dirname(REBOOT_FILE), exist_ok=True)
+        with open(REBOOT_FILE, "w") as f:
+            f.write(str(now))
+    except OSError:
+        pass
+    print("[net] %s; restarting the box" % why, flush=True)
+    sh("systemctl", "reboot")
+
+
+def open_setup(why):
+    NETWORKS[:] = scan()
+    print("[wifi-setup] %s; opening %s" % (why, ssid_name()), flush=True)
+    hotspot_on()
+    NET["hotspot_since"] = time.time()
+
+
+def tick(now=None):
+    """One check, every 15 s. Returns what it did (for the log and the tests)."""
+    now = now or time.time()
+    if STATE["joining"]:
+        return "joining"
+    ready = has_camera_account()
+    saved = known_wifi()
+    if os.path.exists(FLAG):                                    # hotspot is up
+        if ready and saved and now - (NET["hotspot_since"] or now) >= 300 and not hotspot_clients():
+            hotspot_off()                                       # step aside and look for the saved Wi-Fi
+            NET.update(hotspot_since=None, offline_since=now, level=0)
+            return "left hotspot to look for saved Wi-Fi"
+        return "hotspot"
+    if not saved:
+        open_setup("no Wi-Fi saved")
+        return "setup: no wifi"
+    if not ready:
+        open_setup("no camera account yet")
+        return "setup: no camera account"
+    keep_retrying()
+    st = link_state()
+    if st in ("internet", "local"):
+        if NET["offline_since"] and st == "internet":
+            print("[net] back online after %.0f s" % (now - NET["offline_since"]), flush=True)
+        if st == "internet":
+            NET.update(offline_since=None, level=0)
+        return st                                               # "local": the internet is down, not the box
+    if NET["offline_since"] is None:
+        NET["offline_since"] = now
+    dur = now - NET["offline_since"]
+    lv = NET["level"]
+    if dur >= 600 and lv < 4:
+        NET["level"] = 4
+        if not saved_visible():
+            open_setup("saved Wi-Fi not seen for 10 minutes")
+            return "setup: saved wifi gone"
+        if may_reboot(now):
+            do_reboot(now, "Wi-Fi down for 10 minutes")
+            return "reboot"
+        NET.update(offline_since=now, level=0)                 # rebooted recently: start the repairs again
+        return "repairs again"
+    if dur >= 300 and lv < 3:
+        NET["level"] = 3
+        print("[net] reloading the Wi-Fi driver", flush=True)
+        sh("modprobe", "-r", "brcmfmac")
+        time.sleep(2)
+        sh("modprobe", "brcmfmac")
+        return "driver reloaded"
+    if dur >= 120 and lv < 2:
+        NET["level"] = 2
+        print("[net] restarting the Wi-Fi radio", flush=True)
+        sh("nmcli", "radio", "wifi", "off")
+        time.sleep(3)
+        sh("nmcli", "radio", "wifi", "on")
+        return "radio restarted"
+    if dur >= 30 and lv < 1:
+        NET["level"] = 1
+        print("[net] Wi-Fi down; reconnecting", flush=True)
+        sh("nmcli", "device", "connect", "wlan0", timeout=45)
+        return "reconnect"
+    return "down"
+
+
 def main():
     time.sleep(int(os.environ.get("VIGIL_WIFI_WAIT_S", "90")))
-    srv = None
+    srv = HTTPServer(("0.0.0.0", 80), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     while True:
-        ready = has_camera_account()
-        if STATE["joining"]:
-            time.sleep(5)
-            continue
-        if online() and ready:
-            if os.path.exists(FLAG):
-                hotspot_off()
-            time.sleep(30)
-            continue
-        if not os.path.exists(FLAG):
-            NETWORKS[:] = scan()
-            print("[wifi-setup] %s; opening %s" % ("no Wi-Fi" if ready else "no camera account yet", ssid_name()),
-                  flush=True)
-            hotspot_on()
-            if srv is None:
-                srv = HTTPServer(("0.0.0.0", 80), H)
-                threading.Thread(target=srv.serve_forever, daemon=True).start()
-        time.sleep(20)
+        try:
+            tick()
+        except Exception as e:
+            print("[net] check error: %s" % e, flush=True)
+        time.sleep(15)
 
 
 if __name__ == "__main__":
