@@ -1394,6 +1394,246 @@ def _v8_observe(all_persons, track_ids, boxes, frame):
                     d.pop(t, None)
 
 
+# ---------------------------------------------------------------------------
+# ENROLL_V1: "Introduce everyone" learns a person properly before saying so.
+# The app asks (vigil_enroll.json) to learn person P, seen as track T. This
+# follows that person and collects what identity needs: face views, clothing
+# fingerprints from the front, side and back, body proportions, standing
+# height and the walk. Progress goes to vigil_enroll_state.json for the app's
+# ring; only when every part is in does it commit them all to P at once.
+# ---------------------------------------------------------------------------
+_ENROLL_REQ = os.environ.get("VIGIL_ENROLL_REQ", "/dev/shm/vigil_enroll.json")
+_ENROLL_OUT = os.environ.get("VIGIL_ENROLL_OUT", "/dev/shm/vigil_enroll_state.json")
+EN_FACES = 8            # face views
+EN_FRONT, EN_SIDE, EN_BACK = 8, 5, 5      # clothing fingerprints per view
+EN_BODY = 12            # body proportion samples
+EN_HEIGHT = 12          # standing height samples
+EN_STAGE_MAX = {"still": 40.0, "turn": 50.0, "walk": 45.0}   # seconds in view before moving on with what we have
+EN_LOST_S = 1.5
+_EN = {"key": None, "pid": None, "name": None, "track": None, "track_hint": None, "stage": "still",
+       "stage_t": 0.0, "last_tick": 0.0, "seen_t": 0.0, "faces": [], "face_ids": set(),
+       "fp": {"front": [], "side": [], "back": []}, "body": [], "height": [], "walk": None,
+       "notes": [], "done": False, "read_t": 0.0, "write_t": 0.0, "others": 0, "started": 0.0}
+
+
+def _view_of(kp):
+    """front / side / back from the keypoints of one person."""
+    k = np.asarray(kp, dtype=float)
+    c = lambda i: k[i][2] if k.shape[0] > i else 0.0
+    nose, le, re = c(0), c(1), c(2)
+    sw = abs(k[5][0] - k[6][0]) if c(5) >= 0.4 and c(6) >= 0.4 else None
+    th = abs((k[11][1] + k[12][1]) / 2 - (k[5][1] + k[6][1]) / 2) if min(c(5), c(6), c(11), c(12)) >= 0.4 else None
+    if sw is not None and th and sw < 0.32 * th:
+        return "side"
+    if nose >= 0.5 and le >= 0.4 and re >= 0.4:
+        return "front"
+    if nose < 0.3 and le < 0.3 and re < 0.3:
+        return "back"
+    return "side"
+
+
+def _enroll_reset(req):
+    _EN.update({"key": req.get("key"), "pid": req.get("person_id"), "name": req.get("name") or "them",
+                "track": None, "track_hint": req.get("track"), "stage": "still", "stage_t": 0.0,
+                "last_tick": time.time(), "started": time.time(), "seen_t": 0.0, "faces": [], "face_ids": set(),
+                "fp": {"front": [], "side": [], "back": []}, "body": [], "height": [], "walk": None,
+                "notes": [], "done": False, "others": 0})
+    print("[ENROLL] learning %s (track hint %s)" % (_EN["pid"], _EN["track_hint"]), flush=True)
+
+
+def _enroll_read():
+    now = time.time()
+    if now - _EN["read_t"] < 0.7:
+        return
+    _EN["read_t"] = now
+    try:
+        import json as _js
+        with open(_ENROLL_REQ) as f:
+            req = _js.load(f)
+    except Exception:
+        req = None
+    if not req or req.get("stop") or now - float(req.get("t", 0)) > 600:
+        if _EN["key"] is not None:
+            print("[ENROLL] stopped", flush=True)
+        _EN["key"] = None
+        _EN["track"] = None
+        return
+    if req.get("key") != _EN["key"]:
+        _enroll_reset(req)
+
+
+def _en_parts():
+    """Fraction complete of each part (face, front, side, back, body, height, walk)."""
+    face_ok = _V8_FACE is not None and getattr(_V8_FACE, "ok", False)
+    p = {"front": min(1.0, len(_EN["fp"]["front"]) / EN_FRONT),
+         "body": min(1.0, len(_EN["body"]) / EN_BODY),
+         "height": min(1.0, len(_EN["height"]) / EN_HEIGHT),
+         "side": min(1.0, len(_EN["fp"]["side"]) / EN_SIDE),
+         "back": min(1.0, len(_EN["fp"]["back"]) / EN_BACK),
+         "walk": 1.0 if _EN["walk"] is not None else 0.0}
+    if face_ok:
+        p["face"] = min(1.0, len(_EN["faces"]) / EN_FACES)
+    return p
+
+
+_EN_STAGE_PARTS = {"still": ("face", "front", "body", "height"), "turn": ("side", "back"), "walk": ("walk",)}
+_EN_ORDER = ("still", "turn", "walk")
+
+
+def _enroll_find_track(track_ids):
+    live = [t for t in track_ids if t is not None]
+    if _EN["track"] in live and _track_to_pid.get(_EN["track"]) in (None, _EN["pid"]):
+        return _EN["track"]
+    h = _EN["track_hint"]
+    # the app's correction for this track takes up to 3 s to apply; until then trust the hint
+    if h in live and (_track_to_pid.get(h) in (None, _EN["pid"]) or time.time() - _EN["started"] < 6):
+        return h
+    for t in live:          # the person came back on a new track VIGIL already gave their name
+        if _track_to_pid.get(t) == _EN["pid"] and not _TRACK_BAD.get(t):
+            return t
+    return None
+
+
+def _enroll_tick(all_persons, track_ids, boxes, fps):
+    _enroll_read()
+    if _EN["key"] is None or _EN["done"]:
+        _enroll_write()
+        return
+    now = time.time()
+    dt = min(0.5, now - _EN["last_tick"])
+    _EN["last_tick"] = now
+    t = _enroll_find_track(track_ids or [])
+    _EN["track"] = t
+    _EN["others"] = max(0, len([x for x in (track_ids or []) if x is not None]) - (1 if t is not None else 0))
+    if t is None:
+        _enroll_write()
+        return
+    i = list(track_ids).index(t)
+    kp = all_persons[i]
+    _EN["seen_t"] = now
+    occl = _is_occluded(i, boxes)
+    if not occl:
+        if t in fps:
+            v = _view_of(kp)
+            q = _EN["fp"][v]
+            q.append(np.array(fps[t]))
+            del q[:-16]
+        for e in list(_V8_TF.get(t, ()))[-2:]:
+            if id(e) not in _EN["face_ids"]:
+                _EN["face_ids"].add(id(e))
+                _EN["faces"].append(e)
+                del _EN["faces"][:-20]
+        tq = _PROP_TRK.get(t)
+        if tq:
+            _EN["body"] = list(tq)[-EN_BODY:]
+        th = _V8_TH.get(t)
+        if th:
+            _EN["height"] = list(th)[-EN_HEIGHT:]
+        if _V8_WALK is not None:
+            try:
+                sig = _V8_WALK.signature(t)
+                if sig is not None:
+                    _EN["walk"] = sig
+            except Exception:
+                pass
+    # stages move on when their parts are in, or after long enough in view
+    _EN["stage_t"] += dt
+    parts = _en_parts()
+    st = _EN["stage"]
+    need = [k for k in _EN_STAGE_PARTS[st] if k in parts]
+    complete = all(parts[k] >= 1.0 for k in need)
+    if not complete and _EN["stage_t"] >= EN_STAGE_MAX[st]:
+        short = [k for k in need if parts[k] < 1.0]
+        _EN["notes"].append("%s: not enough %s" % (st, ", ".join(short)))
+        complete = True
+    if complete:
+        nxt = _EN_ORDER.index(st) + 1
+        if nxt < len(_EN_ORDER):
+            _EN["stage"] = _EN_ORDER[nxt]
+            _EN["stage_t"] = 0.0
+        else:
+            _enroll_commit(t)
+    _enroll_write()
+
+
+def _enroll_commit(t):
+    pid = _EN["pid"]
+    got = []
+    try:
+        if _track_to_pid.get(t) != pid:
+            _track_to_pid[t] = pid
+        _V8_VER[t] = pid
+        if pid not in _signatures:
+            _nd = _PersonSignature(pid)
+            _nd.reported = True
+            _nd.photo_reported = True
+            _signatures[pid] = _nd
+        if _VR is not None:
+            vecs = [v for b in ("front", "side", "back") for v in _EN["fp"][b][-8:]]
+            if vecs:
+                _VR.GALLERY.add(pid, np.array(vecs), pin=True)
+                _VR.GALLERY.save(force=True)
+                got.append("clothing from %d views" % sum(1 for b in ("front", "side", "back") if _EN["fp"][b]))
+        try:
+            _prop_learn(t, pid)
+            if _EN["body"]:
+                got.append("build")
+        except Exception:
+            pass
+        if _V8 is not None:
+            nf = _V8.learn_face(pid, list(_EN["faces"]))
+            if nf:
+                got.append("face (%d views)" % len(_EN["faces"]))
+            if _EN["walk"] is not None and _V8.learn_walk(pid, _EN["walk"]):
+                got.append("walk")
+            if _EN["height"]:
+                got.append("height")
+            _v8_learn_track(t, pid, _named_ids() | {pid}, "introduced")
+            _V8.save(force=True)
+    except Exception as e:
+        _EN["notes"].append("save error: %s" % e)
+    _EN["done"] = True
+    _EN["learned"] = got
+    print("[ENROLL] %s learned: %s%s" % (pid, ", ".join(got) or "nothing",
+          (" | " + "; ".join(_EN["notes"])) if _EN["notes"] else ""), flush=True)
+
+
+_EN_PROMPT = {"still": "Stand still and face the camera",
+              "turn": "Now turn slowly in a full circle",
+              "walk": "Now walk across the room and back"}
+
+
+def _enroll_write():
+    now = time.time()
+    if now - _EN["write_t"] < 0.4:
+        return
+    _EN["write_t"] = now
+    try:
+        import json as _js
+        if _EN["key"] is None:
+            out = {"t": now, "active": False}
+        else:
+            parts = _en_parts()
+            st = _EN["stage"]
+            si = _EN_ORDER.index(st)
+            need = [k for k in _EN_STAGE_PARTS[st] if k in parts]
+            sp = (sum(parts[k] for k in need) / len(need)) if need else 1.0
+            pct = 1.0 if _EN["done"] else min(0.99, (si + sp) / len(_EN_ORDER))
+            lost = _EN["track"] is None
+            out = {"t": now, "active": True, "key": _EN["key"], "person_id": _EN["pid"], "name": _EN["name"],
+                   "stage": "done" if _EN["done"] else st, "stage_index": si, "stages": len(_EN_ORDER),
+                   "progress": round(pct, 3), "parts": {k: round(v, 2) for k, v in parts.items()},
+                   "in_view": not lost, "others_in_view": _EN["others"], "done": _EN["done"],
+                   "learned": _EN.get("learned") or [], "notes": _EN["notes"],
+                   "prompt": ("Done" if _EN["done"] else
+                              ("Step back in front of the camera" if lost else _EN_PROMPT[st]))}
+        with open(_ENROLL_OUT + ".tmp", "w") as f:
+            _js.dump(out, f)
+        os.replace(_ENROLL_OUT + ".tmp", _ENROLL_OUT)
+    except Exception:
+        pass
+
+
 def _v8_raw(tid, pid):
     """Raw score of each cue for 'track tid is person pid' (None = no data)."""
     raw = {}
@@ -1902,7 +2142,8 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                 _t = track_ids[_i] if _i < len(track_ids) else None
                 if _t is None or _is_occluded(_i, _boxes):
                     continue
-                if _t not in _track_to_pid or _fp_frame[0] % 3 == 0 or _t in _V7["pending"]:
+                if _t not in _track_to_pid or _fp_frame[0] % 3 == 0 or _t in _V7["pending"] \
+                        or _t == _EN["track"]:                     # ENROLL_V1: every frame while learning them
                     _want.append((_t, _k))
             if _want:
                 _fps = _fp_for(_want[:4], _current_frame)
@@ -1910,6 +2151,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             _v8_observe(all_persons, track_ids, _boxes, _current_frame)
         except Exception as _e8o:
             print("[V8] observe error: %s" % _e8o, flush=True)
+        try:                                                     # ENROLL_V1
+            _enroll_tick(all_persons, track_ids, _boxes, _fps)
+        except Exception as _een:
+            print("[ENROLL] error: %s" % _een, flush=True)
         for _idx, kp in enumerate(all_persons):
             height_px = _estimate_height(kp)
             shape_r = _estimate_shape(kp)

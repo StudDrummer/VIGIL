@@ -962,6 +962,135 @@ const fmtHeight=(cm:number|null|undefined,units:'us'|'metric')=>{
 // camera; the caregiver names them (or confirms the name VIGIL shows). Each tap
 // teaches every identity cue: face, build, height, walk and clothing. Offered
 // once after setup, and any time from Settings, Camera.
+// ENROLL_V1: after someone is named, VIGIL keeps reading them (face, clothing from
+// every side, build, height, walk) and only shows the check once it really has them.
+const EN_PARTS:[string,string][]=[['face','Face'],['front','Clothing, front'],['side','Clothing, side'],
+  ['back','Clothing, back'],['body','Build'],['height','Height'],['walk','Walk']];
+const EN_STAGES:[string,string][]=[['still','Stand still'],['turn','Turn around'],['walk','Walk']];
+function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
+  {serverUrl:string;personId:string;personName:string;track:number|null;frame:string|null;
+   onDone:(learned:string[])=>void;onCancel:()=>void}){
+  const [st,setSt]=useState<any>(null);
+  const [err,setErr]=useState<string|null>(null);
+  const keyRef=useRef<string|null>(null);
+  const spin=useRef(new Animated.Value(0)).current;
+  const pop=useRef(new Animated.Value(0)).current;
+  const done=!!st?.done;
+  useEffect(()=>{
+    const loop=Animated.loop(Animated.timing(spin,{toValue:1,duration:1400,useNativeDriver:true,easing:(t:number)=>t}));
+    loop.start();return()=>loop.stop();
+  },[spin]);
+  useEffect(()=>{if(done)Animated.spring(pop,{toValue:1,useNativeDriver:true,friction:5,tension:90}).start();},[done,pop]);
+  useEffect(()=>{
+    let alive=true;let stale=0;
+    (async()=>{
+      try{const r=await AX.post(`${serverUrl}/enroll/start`,{person_id:personId,track},{timeout:8000});keyRef.current=r.data?.key??null;}
+      catch(_e){if(alive)setErr('Could not reach the camera. Check it is online, then try again.');return;}
+      while(alive){
+        try{
+          const r=await AX.get(`${serverUrl}/enroll/status`,{params:{key:keyRef.current},timeout:4000});
+          if(!alive)break;
+          if(r.data?.active){stale=0;setErr(null);setSt(r.data);if(r.data.done)break;}
+          else{stale++;if(stale>=16)setErr(r.data?.camera_running===false
+            ?'The camera is not sending video right now. Check it is plugged in and online.'
+            :'Waiting for the camera to start learning...');}
+        }catch(_e){stale++;if(stale>=16&&alive)setErr('Lost the connection to the camera. Retrying...');}
+        await new Promise<void>(res=>setTimeout(()=>res(),500));
+      }
+    })();
+    return()=>{alive=false;};
+  },[serverUrl,personId,track]);
+  const cancel=()=>{AX.post(`${serverUrl}/enroll/stop`,{},{timeout:5000}).catch(()=>{});onCancel();};
+  const finish=()=>{AX.post(`${serverUrl}/enroll/stop`,{},{timeout:5000}).catch(()=>{});onDone(st?.learned||[]);};
+  const R=86,SW=10,CIRC=2*Math.PI*R;
+  const prog=Math.max(0,Math.min(1,st?.progress??0));
+  const parts=st?.parts||{};
+  const stageIdx=done?3:EN_STAGES.findIndex(x=>x[0]===st?.stage);
+  const rot=spin.interpolate({inputRange:[0,1],outputRange:['0deg','360deg']});
+  const missing=done?EN_PARTS.filter(([k])=>parts[k]!=null&&parts[k]<1).map(([,l])=>l.toLowerCase()):[];
+  return(
+    <Modal visible animationType="fade" onRequestClose={cancel}>
+      <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
+        <ScrollView contentContainerStyle={{padding:20,paddingBottom:40,alignItems:'center'}}>
+          <Text style={{color:C.text,fontSize:24,fontWeight:'800',alignSelf:'flex-start'}}>{done?`VIGIL knows ${personName}`:`Learning ${personName}`}</Text>
+          <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:20,alignSelf:'flex-start'}}>
+            {done?'Every part is saved. VIGIL keeps improving each time you confirm or correct a name.'
+              :`Only ${personName} in front of the camera. This takes about a minute; the circle fills as VIGIL learns each part.`}
+          </Text>
+          {!!frame&&!done&&(
+            <View style={{marginTop:14,width:'100%',borderRadius:12,overflow:'hidden',backgroundColor:'#000',aspectRatio:16/9}}>
+              <Image source={{uri:`data:image/jpeg;base64,${frame}`}} style={{width:'100%',height:'100%'}} resizeMode="contain"/>
+            </View>)}
+          <View style={{width:2*R+SW+8,height:2*R+SW+8,marginTop:22,alignItems:'center',justifyContent:'center'}}>
+            <Svg width={2*R+SW+8} height={2*R+SW+8} style={{position:'absolute'}}>
+              <Circle cx={R+SW/2+4} cy={R+SW/2+4} r={R} stroke={C.fill} strokeWidth={SW} fill="none"/>
+              <Circle cx={R+SW/2+4} cy={R+SW/2+4} r={R} stroke={C.green} strokeWidth={SW} fill="none"
+                strokeLinecap="round" strokeDasharray={`${CIRC*prog} ${CIRC}`}
+                transform={`rotate(-90 ${R+SW/2+4} ${R+SW/2+4})`}/>
+            </Svg>
+            {!done&&(
+              <Animated.View style={{position:'absolute',width:2*R+SW+8,height:2*R+SW+8,transform:[{rotate:rot}]}}>
+                <Svg width={2*R+SW+8} height={2*R+SW+8}>
+                  <Circle cx={R+SW/2+4} cy={R+SW/2+4} r={R+SW/2+2} stroke={C.green+'66'} strokeWidth={2} fill="none"
+                    strokeLinecap="round" strokeDasharray={`${CIRC*0.12} ${CIRC}`}/>
+                </Svg>
+              </Animated.View>)}
+            {done?(
+              <Animated.View style={{width:96,height:96,borderRadius:48,backgroundColor:C.green,alignItems:'center',justifyContent:'center',
+                transform:[{scale:pop}]}}>
+                <Svg width={52} height={52} viewBox="0 0 52 52">
+                  <Path d="M12 27 L22 37 L41 16" stroke="#000" strokeWidth={6} fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                </Svg>
+              </Animated.View>
+            ):(
+              <Text style={{color:C.text,fontSize:30,fontWeight:'800',fontVariant:['tabular-nums']}}>{Math.round(prog*100)}%</Text>
+            )}
+          </View>
+          <Text style={{color:done?C.green:(st&&!st.in_view)?C.orange:C.text,fontSize:19,fontWeight:'700',marginTop:20,textAlign:'center'}}>
+            {done?'Done':err&&!st?'Connecting...':st?.prompt??'Getting ready...'}
+          </Text>
+          {!done&&st?.others_in_view>0&&(
+            <Text style={{color:C.orange,fontSize:14,marginTop:8,textAlign:'center'}}>Someone else is in view. Ask them to step out for a minute.</Text>)}
+          {!!err&&<Text style={{color:C.orange,fontSize:14,marginTop:8,textAlign:'center',lineHeight:20}}>{err}</Text>}
+          <View style={{flexDirection:'row',marginTop:18,gap:8}}>
+            {EN_STAGES.map(([k,l],i)=>(
+              <View key={k} style={{paddingHorizontal:12,paddingVertical:7,borderRadius:16,
+                backgroundColor:i<stageIdx?C.green+'22':i===stageIdx?C.fill:'transparent',borderWidth:1,borderColor:i<=stageIdx?C.green+'66':C.border}}>
+                <Text style={{color:i<stageIdx?C.green:i===stageIdx?C.text:C.muted,fontSize:13,fontWeight:'700'}}>{i<stageIdx?'✓ ':''}{l}</Text>
+              </View>))}
+          </View>
+          <View style={[s.card,{marginTop:18,width:'100%'}]}>
+            {EN_PARTS.filter(([k])=>parts[k]!=null||!st).map(([k,l])=>{
+              const v=parts[k]??0;const ok=v>=1;
+              return(
+                <View key={k} style={{flexDirection:'row',alignItems:'center',paddingVertical:7}}>
+                  <View style={{width:22,height:22,borderRadius:11,marginRight:12,alignItems:'center',justifyContent:'center',
+                    backgroundColor:ok?C.green:'transparent',borderWidth:ok?0:2,borderColor:C.border}}>
+                    {ok&&<Text style={{color:'#000',fontSize:12,fontWeight:'900'}}>{'✓'}</Text>}
+                  </View>
+                  <Text style={{color:ok?C.text:C.sub,fontSize:15,flex:1}}>{l}</Text>
+                  {!ok&&<View style={{width:70,height:5,borderRadius:3,backgroundColor:C.fill}}>
+                    <View style={{width:`${Math.round(v*100)}%` as any,height:5,borderRadius:3,backgroundColor:C.green}}/></View>}
+                </View>);
+            })}
+          </View>
+          {done&&missing.length>0&&(
+            <Text style={{color:C.muted,fontSize:13,marginTop:10,lineHeight:19,alignSelf:'flex-start'}}>
+              Not fully seen: {missing.join(', ')}. That is fine: VIGIL fills it in as {personName} moves around.
+            </Text>)}
+          {done?(
+            <TouchableOpacity onPress={finish} style={[s.btnPrimary,{marginTop:22,alignSelf:'stretch'}]}>
+              <Text style={s.btnPrimaryTxt}>Next person</Text>
+            </TouchableOpacity>
+          ):(
+            <TouchableOpacity onPress={cancel} style={{marginTop:22,padding:12}}>
+              <Text style={{color:C.sub,fontSize:15}}>Stop. {personName} stays named, VIGIL learns more over time.</Text>
+            </TouchableOpacity>)}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>);
+}
+
 function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'metric';onClose:()=>void}){
   const [named,setNamed]=useState<{id:string;name:string|null}[]>([]);
   const [others,setOthers]=useState<{label:string;track:number|null}[]>([]);
@@ -974,6 +1103,7 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
   const [busy,setBusy]=useState(false);
   const [msg,setMsg]=useState<string|null>(null);
   const [frame,setFrame]=useState<string|null>(null);
+  const [enrolling,setEnrolling]=useState<{id:string;name:string;track:number|null}|null>(null);   // ENROLL_V1
   useEffect(()=>{                     // live picture, with the names VIGIL is showing
     let alive=true;
     (async()=>{while(alive){
@@ -1001,13 +1131,13 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
   const learned=(n:string)=>{setDone(d=>d.includes(n)?d:[...d,n]);setMsg(`Learned ${n}. Next person, or Done.`);};
   const confirm=async(p:{id:string;name:string|null})=>{
     setBusy(true);
-    try{await AX.post(`${serverUrl}/persons/${p.id}/confirm`,{},{timeout:8000});learned(p.name||'them');}
+    try{await AX.post(`${serverUrl}/persons/${p.id}/confirm`,{},{timeout:8000});setMsg(null);setEnrolling({id:p.id,name:p.name||'them',track:null});}
     catch(_e){setMsg('Could not reach the camera. Try again.');}
     finally{setBusy(false);}
   };
   const assign=async(track:number,p:{id:string;name:string|null})=>{
     setBusy(true);
-    try{await AX.post(`${serverUrl}/tracks/${track}/assign`,{target_person_id:p.id},{timeout:8000});setEditing(null);learned(p.name||'them');}
+    try{await AX.post(`${serverUrl}/tracks/${track}/assign`,{target_person_id:p.id},{timeout:8000});setEditing(null);setMsg(null);setEnrolling({id:p.id,name:p.name||'them',track});}
     catch(_e){setMsg('Could not reach the camera. Try again.');}
     finally{setBusy(false);}
   };
@@ -1017,8 +1147,9 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
     if(newHeight.trim()&&h==null){setMsg(units==='us'?'Height like 5\'6" or 66 in.':'Height like 168 cm.');return;}
     setBusy(true);
     try{
-      await AX.post(`${serverUrl}/tracks/${track}/new`,{name:n,height_cm:h,is_resident:isRes},{timeout:8000});
-      setEditing(null);setNewName('');setNewHeight('');setIsRes(false);learned(n);
+      const r=await AX.post(`${serverUrl}/tracks/${track}/new`,{name:n,height_cm:h,is_resident:isRes},{timeout:8000});
+      setEditing(null);setNewName('');setNewHeight('');setIsRes(false);setMsg(null);
+      if(r.data?.person_id)setEnrolling({id:r.data.person_id,name:n,track});else learned(n);
     }catch(e:any){setMsg(e?.response?.data?.reason||'Could not reach the camera. Try again.');}
     finally{setBusy(false);}
   };
@@ -1031,18 +1162,22 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
   const inp={color:C.text,fontSize:16,paddingHorizontal:12,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
   return(
     <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
+      {enrolling&&<EnrollRing serverUrl={serverUrl} personId={enrolling.id} personName={enrolling.name} track={enrolling.track}
+        frame={frame} onDone={()=>{const n=enrolling.name;setEnrolling(null);learned(n);}}
+        onCancel={()=>{const n=enrolling.name;setEnrolling(null);setDone(d=>d.includes(n)?d:[...d,n]);setMsg(`${n} is named. VIGIL keeps learning them over time.`);}}/>}
       <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
       <ScrollView contentContainerStyle={{padding:20,paddingBottom:60}} keyboardShouldPersistTaps="handled">
         <Text style={{color:C.text,fontSize:26,fontWeight:'800'}}>Introduce everyone</Text>
         <Text style={{color:C.sub,fontSize:15,marginTop:8,lineHeight:22}}>
-          About 2 minutes. Recommended: VIGIL then tells your family apart by face, build, height, walk and clothing, and keeps learning every time you name someone.
+          About a minute per person. Recommended: VIGIL then tells your family apart by face, build, height, walk and clothing, and keeps learning every time you name someone.
         </Text>
         <View style={[s.card,{marginTop:16}]}>
           <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>For each person, one at a time</Text>
           <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:21}}>
             1. Stand 2 to 3 metres from the camera, facing it, in good light.{'\n'}
             2. Stay still for about 10 seconds until they appear below.{'\n'}
-            3. Tap their name. Then the next person.
+            3. Tap their name. VIGIL then studies them for about a minute: stand still, turn around once, walk across the room. A check appears when it knows them.{'\n'}
+            4. Then the next person.
           </Text>
         </View>
         <View style={{marginTop:16,borderRadius:14,overflow:'hidden',backgroundColor:'#000',aspectRatio:16/9,alignItems:'center',justifyContent:'center'}}>
@@ -1231,9 +1366,10 @@ const BL_WHY:Record<string,string>={
 // AI INSIGHTS SCREEN
 // ─────────────────────────────────────────────
 function PersonDetailScreen({
-  personId, personName, serverUrl, onClose, demoMode, embedded, view='week',
+  personId, personName, serverUrl, onClose, demoMode, embedded, view='week', watchHistory=null,
 }:{personId:string; personName:string; serverUrl:string; onClose:()=>void;
-   demoMode?:boolean; embedded?:boolean; view?:'week'|'baseline'}) {
+   demoMode?:boolean; embedded?:boolean; view?:'week'|'baseline';
+   watchHistory?:DailySummary[]|null}) {   // WATCH_OWNER_V2: only passed for the person who wears the watch
   const [trends,setTrends]         = useState<PersonTrendDay[]>([]);
   const [baseline,setBaseline]     = useState<PersonBaselineStatus|null>(null);
   const [weeklyTrend,setWeeklyTrend] = useState<any>(null);
@@ -1300,6 +1436,8 @@ function PersonDetailScreen({
     const cutoff=new Date(); cutoff.setDate(cutoff.getDate()-6);
     const cut=cutoff.toISOString().slice(0,10);
     const wk=trends.filter(t=>t.date>=cut);
+    const watchAll=[...(watchHistory??[])].sort((a,b)=>a.date<b.date?-1:1);
+    const watchWk=watchAll.filter(r=>r.date>=cut&&(r.step_count!=null||r.resting_hr!=null||r.hrv_sdnn!=null||r.sleep_hours!=null));
     const stat=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>{
       const b=baseline?.baseline?.[k];
       if(b)return {mean:b.mean,std:b.std,src:'baseline'};
@@ -1324,7 +1462,8 @@ function PersonDetailScreen({
           </View>
         </View>}
         {view==='week'?(
-          wk.length===0?(
+          <>
+          {wk.length===0?(
             <View style={{alignItems:'center',paddingVertical:36}}>
               <Text style={{color:C.sub,fontSize:15}}>No walking recorded this week</Text>
               <Text style={{color:C.muted,fontSize:12,marginTop:4}}>Data appears after {personName} is seen walking by the camera</Text>
@@ -1337,17 +1476,35 @@ function PersonDetailScreen({
               <PTrendBar data={wk.map(t=>t.avg_posture)} label="Posture Score" unit="/100" color={C.purple} dec={0}/>
               <PTrendBar data={wk.map(t=>t.avg_asymmetry)} label="Gait Asymmetry" unit="%" color={C.orange} dec={1}/>
             </>
-          )
+          )}
+          {watchWk.length>0&&(
+            <>
+              <Text style={s.secHeader}>{personName}'s Apple Watch — This Week</Text>
+              <PTrendBar data={watchWk.map(r=>r.step_count)} label="Steps" unit="steps" color={C.green} dec={0}/>
+              <PTrendBar data={watchWk.map(r=>r.resting_hr)} label="Resting HR" unit="bpm" color={C.red} dec={0}/>
+              <PTrendBar data={watchWk.map(r=>r.hrv_sdnn)} label="HRV" unit="ms" color={C.purple} dec={1}/>
+              <PTrendBar data={watchWk.map(r=>r.sleep_hours)} label="Sleep" unit="h" color={C.orange} dec={1}/>
+            </>
+          )}
+          </>
         ):(
           <>
             {(()=>{
               const ser=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>trends.map(t=>({date:t.date,v:t[k]}));
+              const wser=(k:'resting_hr'|'hrv_sdnn'|'sleep_hours')=>watchAll.map(r=>{const v=r[k];return{date:r.date,v:(typeof v==='number'&&isFinite(v)&&v>0)?v:null};});
+              const hasWatch=watchAll.some(r=>r.resting_hr!=null||r.hrv_sdnn!=null||r.sleep_hours!=null);
               return <BaselineView name={personName} measures={[
                 {key:'speed',label:'Walking speed',unit:'m/s',dec:2,why:BL_WHY.speed,series:ser('avg_speed')},
                 {key:'cadence',label:'Steps per minute',unit:'steps/min',dec:0,why:BL_WHY.cadence,series:ser('avg_cadence')},
                 {key:'posture',label:'Posture',unit:'/100',dec:0,why:BL_WHY.posture,series:ser('avg_posture')},
                 {key:'asym',label:'Step evenness',unit:'% uneven',dec:1,higherWorse:true,why:BL_WHY.asym,series:ser('avg_asymmetry')},
-              ]}/>;
+                ...(hasWatch?[
+                  {key:'rhr',label:'Resting heart rate',unit:'bpm',dec:0,higherWorse:true,why:BL_WHY.rhr,series:wser('resting_hr')},
+                  {key:'hrv',label:'Heart rate variability',unit:'ms',dec:0,why:BL_WHY.hrv,series:wser('hrv_sdnn')},
+                  {key:'sleep',label:'Sleep',unit:'h',dec:1,why:BL_WHY.sleep,series:wser('sleep_hours')},
+                ]:[]),
+              ]} groups={hasWatch?[{title:'Walking',keys:['speed','cadence','posture','asym']},
+                                   {title:`${personName}'s Apple Watch`,keys:['rhr','hrv','sleep']}]:undefined}/>;
             })()}
           </>
         )}
@@ -2060,7 +2217,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                                            borderBottomWidth:1,borderBottomColor:C.border}}>
                 <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
                   <Text style={{color:low?C.muted:C.text,fontSize:14,fontWeight:'600',flex:1,marginRight:8}}>
-                    {s.label}
+                    {s.label}{s.who?<Text style={{color:C.muted,fontSize:12,fontWeight:'500'}}>{'  '}{s.who}</Text>:null}
                   </Text>
                   {s.severity!=='normal'&&(
                     <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
@@ -2622,8 +2779,11 @@ export default function App() {
   const [watchOwner,setWatchOwnerS]    = useState<string|null>(null);   // HOME_PEOPLE_V2
   const [showTeach,setShowTeach]       = useState(false);                // TEACH_V1
   const teachOffered=useRef(false);
-  useEffect(()=>{AsyncStorage.getItem(SK_WATCH_OWNER).then(v=>{if(v)setWatchOwnerS(v);}).catch(()=>{});},[]);
-  const setWatchOwner=(pid:string)=>{setWatchOwnerS(pid);AsyncStorage.setItem(SK_WATCH_OWNER,pid).catch(()=>{});};
+  // WATCH_OWNER_V2: the server is told too, so health signals and alerts name the right person.
+  const pushWatchOwner=(pid:string|null)=>{AX.post(`${urlRef.current||FALLBACK_URL}/config/watch-owner`,{person_id:pid},{timeout:6000}).catch(()=>{});};
+  useEffect(()=>{AsyncStorage.getItem(SK_WATCH_OWNER).then(v=>{if(v){setWatchOwnerS(v);setTimeout(()=>pushWatchOwner(v),4000);}}).catch(()=>{});},[]);
+  const setWatchOwner=(pid:string)=>{setWatchOwnerS(pid);AsyncStorage.setItem(SK_WATCH_OWNER,pid).catch(()=>{});pushWatchOwner(pid);};
+  const clearWatchOwner=()=>{setWatchOwnerS(null);AsyncStorage.removeItem(SK_WATCH_OWNER).catch(()=>{});pushWatchOwner(null);};
   const [history,setHistory]           = useState<DailySummary[]>([]);
   const [alerts,setAlerts]             = useState<AlertEntry[]>([]);
   const [cameraStatus,setCameraStatus] = useState<CameraStatus|null>(null);
@@ -3331,7 +3491,8 @@ export default function App() {
   const dayLoading=!!selPid&&!dayData&&!demoMode;
   // The Apple Watch belongs to whoever this phone is synced for; only their chip shows it.
   const watchOwnerOk=!!watchOwner&&namedPeople.some(p=>p.id===watchOwner);
-  const watchHere=demoMode||!selPid||(watchOwnerOk&&selPid===watchOwner);
+  // WATCH_OWNER_V2: with nobody picked the page is about the resident, so only show the watch if it is theirs.
+  const watchHere=demoMode||(watchOwnerOk?(selPid?selPid===watchOwner:watchOwner===residentPerson?.id):(!selPid&&namedPeople.length===0));
   const hasWatchData=today?.step_count!=null||today?.resting_hr!=null||today?.hrv_sdnn!=null||today?.sleep_hours!=null;
   const renderToday=()=>(
     <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>} showsVerticalScrollIndicator={false}>
@@ -3567,7 +3728,7 @@ export default function App() {
       </View>
 
       {/* Apple Watch — only if enabled and data exists */}
-      {watchEnabled&&!!selPid&&!watchOwnerOk&&!demoMode&&(
+      {watchEnabled&&namedPeople.length>0&&!watchOwnerOk&&!demoMode&&(
         <View style={[s.card,{marginHorizontal:16,marginTop:8}]}>
           <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Whose Apple Watch is synced to this phone?</Text>
           <Text style={{color:C.sub,fontSize:13,marginTop:4,marginBottom:10,lineHeight:18}}>Its steps, heart rate and sleep will show only on that person.</Text>
@@ -3577,8 +3738,8 @@ export default function App() {
       {watchHere&&(watchEnabled||demoMode)&&(
         <>
           <Text style={s.secHeader}>{homePerson?`${homePerson.name}'s Apple Watch`:residentName?`${residentName}'s Apple Watch`:'Apple Watch'}</Text>
-          {watchOwnerOk&&!demoMode&&<TouchableOpacity onPress={()=>{setWatchOwnerS(null);AsyncStorage.removeItem(SK_WATCH_OWNER).catch(()=>{});}}
-            style={{marginHorizontal:20,marginTop:-6,marginBottom:6}}><Text style={{color:C.muted,fontSize:12}}>Not {homePerson?.name}'s watch? Tap to change.</Text></TouchableOpacity>}
+          {watchOwnerOk&&!demoMode&&<TouchableOpacity onPress={clearWatchOwner}
+            style={{marginHorizontal:20,marginTop:-6,marginBottom:6}}><Text style={{color:C.muted,fontSize:12}}>Not {namedPeople.find(p=>p.id===watchOwner)?.name??'their'}'s watch? Tap to change.</Text></TouchableOpacity>}
           {today?.step_count==null&&today?.resting_hr==null&&today?.hrv_sdnn==null&&today?.sleep_hours==null&&(
             <Text style={{color:C.muted,fontSize:13,marginHorizontal:20,marginBottom:8,lineHeight:18}}>
               No watch data yet today. Make sure the watch is paired with this iPhone and VIGIL is allowed in the Health app (Sharing, Apps, VIGIL).
@@ -3621,6 +3782,11 @@ export default function App() {
     const byDate:Record<string,DailySummary>={};history.forEach(r=>{byDate[r.date]=r;});
     const week=(k:keyof DailySummary)=>weekDates.map(d=>{if(d>todayStr)return null;return(byDate[d]?.[k] as number|null)??null;});
     const DAY=['S','M','T','W','T','F','S'];
+    // WATCH_OWNER_V2: the watch on this phone belongs to one person; never show it on anyone else.
+    // TRENDS_PERSON_V2: with nobody picked, show the resident's own measurements (camera_metrics in the
+    // daily summary are an average of everyone in view, so they are only used when nobody is named).
+    const shownTrendPerson=demoMode?trendPerson:(trendPerson??residentPerson??namedPeople.find(p=>p.id===watchOwner)??namedPeople[0]??null);
+    const watchIsResident=demoMode||(watchEnabled&&(watchOwnerOk?watchOwner===residentPerson?.id:namedPeople.length===0));
 
     const TrendBar=({data,label,unit,color,dec=0}:{data:(number|null)[];label:string;unit:string;color:string;dec?:number})=>{
       const valid=data.filter(v=>v!=null) as number[];
@@ -3671,7 +3837,7 @@ export default function App() {
       const ser=(k:keyof DailySummary)=>[...history].sort((a,b)=>a.date<b.date?-1:1).map(r=>{
         const v=r[k] as any;const ok=typeof v==='number'&&isFinite(v)&&!(v<=0&&POS_ONLY.includes(k as string));
         return{date:r.date,v:ok?v:null};});
-      const watch=history.some(r=>r.resting_hr!=null);
+      const watch=watchIsResident&&history.some(r=>r.resting_hr!=null);
       const ms:BLMeasure[]=[
         {key:'speed',label:'Walking speed',unit:'m/s',dec:2,why:BL_WHY.speed,series:ser('camera_gait_speed_ms')},
         {key:'cadence',label:'Steps per minute',unit:'steps/min',dec:0,why:BL_WHY.cadence,series:ser('camera_cadence_spm')},
@@ -3698,12 +3864,12 @@ export default function App() {
           <Text style={s.pageTitle}>Trends</Text>
           <Text style={s.pageSub}>{history.length} days recorded</Text>
         </View>
-        <PersonChips people={namedPeople} selectedId={trendPid??residentPerson?.id??null}
-          serverUrl={urlRef.current} onPick={p=>{if(!p)return; setTrendPid(p.id===residentPerson?.id?null:p.id);}}/>
+        <PersonChips people={namedPeople} selectedId={shownTrendPerson?.id??null}
+          serverUrl={urlRef.current} onPick={p=>{if(!p)return; setTrendPid(p.id);}}/>
         <Text style={{color:C.muted,fontSize:12,lineHeight:17,marginHorizontal:16,marginBottom:12}}>
-          {trendPerson
-            ?`${trendPerson.name}'s walking and posture, from the times VIGIL recognised them. Tap another person to switch.`
-            :`These charts follow ${residentPerson?.name??(residentName||'the resident')}, measured by the camera. Tap anyone above to see their trends.`}
+          {shownTrendPerson
+            ?`${shownTrendPerson.name}'s walking and posture, only from the times VIGIL recognised them${shownTrendPerson.id===watchOwner&&watchEnabled?', plus their Apple Watch':''}. Tap another person to switch.`
+            :`These charts are for everyone the camera sees. Name people in Introduce everyone to get each person's own trends.`}
         </Text>
         <View style={{flexDirection:'row',marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:12,padding:4}}>
           {([['week','7-Day'],['baseline','Baseline']] as const).map(([key,lbl])=>(
@@ -3714,10 +3880,29 @@ export default function App() {
             </TouchableOpacity>
           ))}
         </View>
-        {trendPerson?(
-          <PersonDetailScreen key={trendPerson.id} embedded view={trendView} demoMode={demoMode}
-            personId={trendPerson.id} personName={trendPerson.name??'This person'}
+        {watchEnabled&&!watchOwnerOk&&namedPeople.length>0&&!demoMode&&(
+          <View style={[s.card,{marginHorizontal:16,marginBottom:12}]}>
+            <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Whose Apple Watch is synced to this phone?</Text>
+            <Text style={{color:C.sub,fontSize:13,marginTop:4,marginBottom:10,lineHeight:18}}>Its heart rate, sleep and steps will show only in that person's trends.</Text>
+            <PersonChips people={namedPeople} selectedId={null} serverUrl={urlRef.current} onPick={p=>{if(p)setWatchOwner(p.id);}}/>
+          </View>
+        )}
+        {shownTrendPerson?(
+          <>
+          <PersonDetailScreen key={shownTrendPerson.id} embedded view={trendView} demoMode={demoMode}
+            watchHistory={watchEnabled&&watchOwnerOk&&shownTrendPerson.id===watchOwner?history:null}
+            personId={shownTrendPerson.id} personName={shownTrendPerson.name??'This person'}
             serverUrl={urlRef.current} onClose={()=>setTrendPid(null)}/>
+          {trendView==='week'&&history.some(r=>r.activity_level_pct!=null||r.active_minutes!=null)&&(
+            <>
+              <Text style={s.secHeader}>Everyone at home — This Week</Text>
+              <Text style={{color:C.muted,fontSize:12,lineHeight:17,marginHorizontal:16,marginTop:-4,marginBottom:8}}>Movement and stillness are measured for the whole room, not one person.</Text>
+              <TrendBar data={week('activity_level_pct')} label="Activity Level" unit="%" color={C.green}/>
+              <TrendBar data={week('active_minutes')} label="Active Minutes" unit="min" color={C.green}/>
+              <TrendBar data={week('longest_stillness_min')} label="Longest Stillness" unit="min" color={C.orange}/>
+            </>
+          )}
+          </>
         ):trendView==='baseline'?renderBaseline():history.length===0?(
           <View style={s.empty}><View style={s.emptyGlyph}><Text style={s.emptyGlyphTxt}>…</Text></View><Text style={s.emptyTxt}>No trend data yet</Text><Text style={s.emptySub}>Data collects automatically each day</Text></View>
         ):(
@@ -3731,9 +3916,9 @@ export default function App() {
             <TrendBar data={week('posture_score')} label="Posture Score" unit="/100" color={C.purple}/>
             <TrendBar data={week('camera_asymmetry_pct')} label="Gait Asymmetry" unit="%" color={C.orange} dec={1}/>
             <TrendBar data={week('stride_variability')} label="Step-Time Variation (lower is steadier)" unit="%" color={C.teal} dec={1}/>
-            {history.some(r=>r.hrv_sdnn!=null)&&(
+            {watchIsResident&&history.some(r=>r.hrv_sdnn!=null)&&(
               <>
-                <Text style={s.secHeader}>Apple Watch — This Week</Text>
+                <Text style={s.secHeader}>{residentPerson?.name?`${residentPerson.name}'s Apple Watch`:'Apple Watch'} — This Week</Text>
                 <TrendBar data={week('hrv_sdnn')} label="HRV" unit="ms" color={C.purple} dec={1}/>
                 <TrendBar data={week('resting_hr')} label="Resting HR" unit="bpm" color={C.red}/>
               </>

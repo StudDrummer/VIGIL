@@ -220,7 +220,8 @@ def init_db():
     if 'resident_person_id' not in cfg_existing:
         conn.execute("ALTER TABLE config ADD COLUMN resident_person_id TEXT")
     for _c, _t in (("resident_weight_kg", "REAL"), ("resident_age", "INTEGER"), ("units", "TEXT"),
-                   ("has_apple_watch", "INTEGER DEFAULT 0")):             # PROFILE_V2
+                   ("has_apple_watch", "INTEGER DEFAULT 0"),              # PROFILE_V2
+                   ("watch_owner_pid", "TEXT")):                          # WATCH_OWNER_V2
         if _c not in cfg_existing:
             conn.execute("ALTER TABLE config ADD COLUMN %s %s" % (_c, _t))
     conn.execute("""CREATE TABLE IF NOT EXISTS person_activity (
@@ -389,8 +390,8 @@ def _check_anomalies(conn, date_str):
     cols = {
         "active_minutes": ("Activity Level", "min", False),
         "activity_level_pct": ("Activity Ratio", "%", False),
-        "camera_gait_speed_ms": ("Walking Speed", "m/s", False),
-        "posture_score": ("Posture", "/100", False),
+        # walking speed and posture are judged per person in /insights (the daily summary
+        # averages everyone in view, so it cannot say whose walking changed)
         "longest_stillness_min": ("Longest Stillness", "min", True),
         "hrv_sdnn": ("HRV", "ms", False),
         "resting_hr": ("Resting HR", "bpm", True),
@@ -402,13 +403,12 @@ def _check_anomalies(conn, date_str):
     if not today: return
     hist = conn.execute("SELECT * FROM daily_summary WHERE date<? ORDER BY date DESC LIMIT 14", (date_str,)).fetchall()
     if len(hist) < 3: return
-    cfg = get_config(conn)
-    name = cfg.get("resident_name") or "the resident"
+    owner = _watch_owner_name(conn)
     for col, (label, unit, worse_high) in cols.items():
+        if col in WATCH_COLS and not owner:
+            continue            # nobody has said whose watch it is: do not guess
         tv = today[col]
         if tv is None: continue
-        if col in ("camera_gait_speed_ms", "posture_score") and (today["camera_data_points"] or 0) < 300:
-            continue        # SIGNALS_V2: too little walking seen that day to judge
         hv = [r[col] for r in hist if r[col] is not None]
         if len(hv) < 3: continue
         mean = sum(hv) / len(hv)
@@ -420,15 +420,17 @@ def _check_anomalies(conn, date_str):
         ex = conn.execute("SELECT id FROM alerts WHERE alert_type='health_signal' AND json_extract(payload,'$.day')=? AND json_extract(payload,'$.metric')=?", (date_str, label)).fetchone()
         if ex: continue
         direction = "elevated" if z > 0 else "low"
-        msg = f"{label} was {direction} yesterday vs 14-day baseline ({tv:.1f} vs avg {mean:.1f} {unit})"
+        who = owner if col in WATCH_COLS else "Everyone at home"
+        msg = f"{who}: {label} was {direction} yesterday vs 14-day baseline ({tv:.1f} vs avg {mean:.1f} {unit})"
         conn.execute("INSERT INTO alerts (alert_type,detected_at,payload) VALUES ('health_signal',?,?)", (
             datetime.now().isoformat(),
             json.dumps({"metric": label, "day": date_str, "value": round(tv, 2), "unit": unit,
                         "baseline": round(mean, 2), "z_score": round(z, 2),
-                        "direction": direction, "message": msg})
+                        "direction": direction, "message": msg, "who": who})
         ))
         print(f"Anomaly alert: {msg}")
-        send_sms(f"VIGIL: {name}'s {label.lower()} was {direction} yesterday ({tv:.1f} vs usual {mean:.1f} {unit}). Consider checking in.")
+        subj = f"{owner}'s {label.lower()}" if col in WATCH_COLS else f"Activity at home ({label.lower()})"
+        send_sms(f"VIGIL: {subj} was {direction} yesterday ({tv:.1f} vs usual {mean:.1f} {unit}). Consider checking in.")
 
 @app.route("/health")
 def health(): return jsonify({"status": "ok", "db": DB_PATH, "version": "v6"})
@@ -607,6 +609,41 @@ def config_set():
                 pass
     conn.commit(); conn.close()
     return jsonify({"status": "ok"})
+
+# WATCH_OWNER_V2: Apple Watch numbers belong to whoever wears the watch synced to the
+# phone, not to the resident. Camera activity numbers belong to the whole room.
+WATCH_COLS = {"resting_hr", "hrv_sdnn", "spo2_avg", "respiratory_rate", "wrist_temp", "sleep_hours",
+              "step_count", "active_calories", "vo2_max", "walking_asymmetry_pct", "walking_speed_ms"}
+HOME_COLS = {"active_minutes", "activity_level_pct", "longest_stillness_min"}
+
+
+def _watch_owner_name(conn):
+    try:
+        row = conn.execute("SELECT watch_owner_pid FROM config WHERE id=1").fetchone()
+        pid = row[0] if row else None
+        if pid:
+            p = conn.execute("SELECT name FROM persons WHERE id=?", (pid,)).fetchone()
+            if p and p[0]:
+                return p[0]
+        named = conn.execute("SELECT COUNT(*) FROM persons WHERE name IS NOT NULL AND name != ''").fetchone()[0]
+        if not named:
+            return get_config(conn).get("resident_name") or None
+    except Exception:
+        pass
+    return None
+
+
+@app.route("/config/watch-owner", methods=["POST"])
+@require_api_key
+def config_watch_owner():
+    pid = (request.get_json() or {}).get("person_id") or None
+    conn = get_db()
+    conn.execute("UPDATE config SET watch_owner_pid=? WHERE id=1", (pid,))
+    conn.commit()
+    name = _watch_owner_name(conn)
+    conn.close()
+    return jsonify({"status": "ok", "watch_owner": name})
+
 
 @app.route("/summary/today")
 @require_api_key
@@ -1733,6 +1770,7 @@ def signals_latest():
         rows = conn.execute(
             "SELECT date, %s FROM daily_summary ORDER BY date DESC LIMIT ?"
             % ",".join(cols), (SIGNAL_BASELINE_DAYS + SIGNAL_RECENT_DAYS,)).fetchall()
+        owner = _watch_owner_name(conn)
         conn.close()
 
         if not rows:
@@ -1745,6 +1783,9 @@ def signals_latest():
         signals = []
         for col in cols:
             label, unit, adverse_dir, note = SIGNAL_METRICS[col]
+            if col in WATCH_COLS and not owner:
+                continue        # WATCH_OWNER_V2: whose watch is unknown, so whose signal is unknown
+            who = owner if col in WATCH_COLS else "Everyone at home"
             base_vals = [r[col] for r in base_rows if r[col] is not None]
             recent_vals = [r[col] for r in recent_rows if r[col] is not None]
             if len(base_vals) < SIGNAL_MIN_BASELINE or not recent_vals:
@@ -1768,6 +1809,7 @@ def signals_latest():
                 "baseline_cv": round(cv, 2),
                 "metric": col,
                 "label": label,
+                "who": who,
                 "unit": unit,
                 "current": round(float(cur), 2),
                 "baseline_mean": round(float(mean), 2),
@@ -3015,6 +3057,68 @@ def confirm_person(person_id):
     conn.close()
     return jsonify({"status": "ok"})
 
+
+
+# ENROLL_V1: "Introduce everyone" learns each person fully before showing a check.
+ENROLL_REQ = os.environ.get("VIGIL_ENROLL_REQ", "/dev/shm/vigil_enroll.json")
+ENROLL_OUT = os.environ.get("VIGIL_ENROLL_OUT", "/dev/shm/vigil_enroll_state.json")
+
+
+def _enroll_write_req(d):
+    tmp = ENROLL_REQ + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, ENROLL_REQ)
+
+
+@app.route("/enroll/start", methods=["POST"])
+@require_api_key
+def enroll_start():
+    import uuid
+    data = request.get_json() or {}
+    pid = data.get("person_id")
+    if not pid:
+        return jsonify({"status": "error", "reason": "person_id required"}), 400
+    conn = get_db()
+    row = conn.execute("SELECT name FROM persons WHERE id=?", (pid,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"status": "error", "reason": "no such person"}), 404
+    try:
+        track = int(data["track"]) if data.get("track") is not None else None
+    except (TypeError, ValueError):
+        track = None
+    key = uuid.uuid4().hex[:12]
+    _enroll_write_req({"key": key, "person_id": pid, "name": row["name"], "track": track, "t": time.time()})
+    return jsonify({"status": "ok", "key": key})
+
+
+@app.route("/enroll/status", methods=["GET"])
+@require_api_key
+def enroll_status():
+    key = request.args.get("key")
+    try:
+        with open(ENROLL_OUT) as f:
+            d = json.load(f)
+    except Exception:
+        return jsonify({"active": False, "camera_running": False})
+    fresh = time.time() - float(d.get("t", 0)) < 4
+    if not fresh:
+        return jsonify({"active": False, "camera_running": False})
+    if key and d.get("key") != key:
+        return jsonify({"active": False, "camera_running": True, "starting": True})
+    d["camera_running"] = True
+    return jsonify(d)
+
+
+@app.route("/enroll/stop", methods=["POST"])
+@require_api_key
+def enroll_stop():
+    try:
+        _enroll_write_req({"stop": True, "t": time.time()})
+    except Exception:
+        pass
+    return jsonify({"status": "ok"})
 
 
 # DELETE_PERSON_V1
