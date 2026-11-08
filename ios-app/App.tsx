@@ -512,6 +512,7 @@ function AccountSection({cfg}:{cfg:CloudCfg}){
 const BOX_URL='http://10.42.0.1';
 const TAPO_APP='https://apps.apple.com/app/tp-link-tapo/id1472718009';
 const Hotspot:any=(NativeModules as any).VIGILHotspot;
+const CAM_USER='vigilcam';   // Tapo needs a camera-account username of at least 6 characters
 function genCamPass(){const a='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';let p='';for(let i=0;i<12;i++)p+=a[Math.floor(Math.random()*a.length)];return p;}
 
 type Led='double'|'slow'|'fast'|'steady'|'off';
@@ -709,7 +710,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
   const send=async()=>{
     setBusy(true);setErr(null);
     try{
-      await axios.post(`${BOX_URL}/api/setup`,{code:boxPw,ssid:ssid.trim(),wifi_password:wpw,tapo_user:'vigil',tapo_pass:camPass},{timeout:8000});
+      await axios.post(`${BOX_URL}/api/setup`,{code:boxPw,ssid:ssid.trim(),wifi_password:wpw,tapo_user:CAM_USER,tapo_pass:camPass},{timeout:8000});
       try{Hotspot?.leave?.(boxSsid);}catch(_e){}
       setLiveS(0);setRelay(null);setDone(false);go(3);
     }catch(e:any){setErr(e?.response?.data?.reason||`Could not reach the box. Check this phone is still on ${boxSsid}.`);}
@@ -760,7 +761,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
         <TouchableOpacity onPress={()=>Linking.openURL(TAPO_APP)} style={{marginTop:6}}><Text style={{color:C.blue,fontSize:15,fontWeight:'600'}}>Get Tapo</Text></TouchableOpacity></Step>
       <Step n={2}><P>Tap <B>+</B>, add the camera, and connect it to your home Wi-Fi.</P></Step>
       <Step n={3}><P>Open the camera, tap the gear, then <B>Advanced Settings, Camera Account</B>. Use exactly these:</P>
-        <Field label="Username" value="vigil"/>
+        <Field label="Username" value={CAM_USER}/>
         <Field label="Password" value={camPass}/></Step>
       <Step n={4}><P>In Tapo: <B>Me, Third-Party Services, Third-Party Compatibility</B>: on.</P></Step>
       <Step n={5}><P>Recommended: camera settings, <B>Firmware Update</B>, automatic updates off.</P></Step>
