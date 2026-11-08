@@ -11,12 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 ffmpeg curl ca-certificates tini \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision \
- && pip install "ultralytics>=8.0" "numpy>=1.24,<2" \
+# Every step must succeed (a failed download stops the build instead of being cached).
+RUN set -e \
+ && pip install --no-cache-dir --retries 10 --timeout 120 --index-url https://download.pytorch.org/whl/cpu torch torchvision \
+ && pip install --no-cache-dir --retries 10 --timeout 120 "ultralytics>=8.0" "numpy>=1.24,<2" \
         "flask>=3.0" "requests>=2.31" "scipy>=1.11" "scikit-learn>=1.3" "twilio>=9.0" "lap>=0.5.12" \
- && pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true \
- && pip install "opencv-python-headless>=4.8,<4.12" "numpy>=1.24,<2" \
- && python -c "import cv2; assert hasattr(cv2, 'FaceDetectorYN'); print('OpenCV', cv2.__version__)"
+ && (pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python || true) \
+ && pip install --no-cache-dir "opencv-python-headless>=4.8,<4.12" "numpy>=1.24,<2" \
+ && python -c "import cv2, torch, ultralytics; assert hasattr(cv2, 'FaceDetectorYN'); print('OpenCV', cv2.__version__, 'torch', torch.__version__, 'ultralytics', ultralytics.__version__)"
 
 WORKDIR /opt/vigil-code
 COPY jetson-backend/*.py jetson-backend/vigil_bytetrack.yaml ./
