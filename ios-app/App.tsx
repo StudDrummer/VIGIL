@@ -499,6 +499,193 @@ function AccountSection({cfg}:{cfg:CloudCfg}){
   );
 }
 
+// APP_SETUP_V1: the family sets up the box and camera from the VIGIL app alone.
+// The Tapo app is only used to put the camera on Wi-Fi (TP-Link allows nothing
+// else), and VIGIL hands them the exact camera account to type there. Then the
+// phone joins the box's own Wi-Fi and sends it the home Wi-Fi and that account.
+const BOX_URL='http://10.42.0.1';
+const TAPO_APP='https://apps.apple.com/app/tp-link-tapo/id1472718009';
+function genCamPass(){const a='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';let p='';for(let i=0;i<12;i++)p+=a[Math.floor(Math.random()*a.length)];return p;}
+function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>void}){
+  const STEPS=['plug','tapo','box','wait'];
+  const [step,setStep]=useState(0);
+  const [camPass,setCamPass]=useState('');
+  const [code,setCode]=useState('');
+  const [tapoDone,setTapoDone]=useState(false);
+  const [box,setBox]=useState<any>(null);            // /api/info while the phone is on the box's Wi-Fi
+  const [nets,setNets]=useState<{ssid:string;signal:number}[]>([]);
+  const [ssid,setSsid]=useState('');
+  const [manual,setManual]=useState(false);
+  const [wpw,setWpw]=useState('');
+  const [showPw,setShowPw]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState<string|null>(null);
+  const [waitS,setWaitS]=useState(0);
+  const [online,setOnline]=useState(false);
+  const KEY='vigil_box_setup_'+cfg.siteId;
+  const site=cfg.sites.find(x=>x.id===cfg.siteId);
+  const boxSsid=`VIGIL-${cfg.siteId}`;
+  const boxPw=code.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
+  const cur=STEPS[step];
+  useEffect(()=>{
+    AsyncStorage.getItem(KEY).then(v=>{const d=v?JSON.parse(v):{};setCamPass(d.camPass||genCamPass());if(d.step)setStep(Math.min(d.step,3));if(d.tapoDone)setTapoDone(true);}).catch(()=>setCamPass(genCamPass()));
+    axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/members`,{timeout:10000,headers:{'X-VIGIL-Key':cfg.token}}).then(r=>setCode(r.data?.setup_code||'')).catch(()=>{});
+  },[]);
+  const save=(patch:any)=>AsyncStorage.getItem(KEY).then(v=>AsyncStorage.setItem(KEY,JSON.stringify({...(v?JSON.parse(v):{}),camPass,...patch}))).catch(()=>{});
+  const go=(n:number)=>{setErr(null);setStep(n);save({step:n,camPass,tapoDone});};
+  useEffect(()=>{                                    // find the box while on its Wi-Fi
+    if(cur!=='box')return;
+    let alive=true;
+    (async()=>{while(alive){
+      try{const r=await axios.get(`${BOX_URL}/api/info`,{timeout:2500});
+        if(alive&&r.data?.box==='vigil-relay'){setBox(r.data);
+          if(!nets.length){const n=await axios.get(`${BOX_URL}/api/networks`,{timeout:4000});if(alive)setNets(n.data?.networks||[]);}}}
+      catch(_e){if(alive)setBox(null);}
+      await new Promise<void>(res=>setTimeout(()=>res(),2000));
+    }})();
+    return()=>{alive=false;};
+  },[cur]);
+  useEffect(()=>{                                    // wait for the first picture to reach VIGIL Cloud
+    if(cur!=='wait')return;
+    let alive=true;let n=0;
+    (async()=>{while(alive){
+      try{const r=await axios.get(`${cfg.gateway}/auth/me`,{timeout:8000,headers:{'X-VIGIL-Key':cfg.token}});
+        const st=(r.data?.sites||[]).find((x:any)=>x.id===cfg.siteId);
+        if(alive&&st?.online){setOnline(true);AsyncStorage.removeItem(KEY).catch(()=>{});break;}}catch(_e){}
+      n+=5;if(alive)setWaitS(n);
+      await new Promise<void>(res=>setTimeout(()=>res(),5000));
+    }})();
+    return()=>{alive=false;};
+  },[cur]);
+  const send=async()=>{
+    setBusy(true);setErr(null);
+    try{
+      await axios.post(`${BOX_URL}/api/setup`,{code:boxPw,ssid:manual?ssid.trim():ssid,wifi_password:wpw,tapo_user:'vigil',tapo_pass:camPass},{timeout:8000});
+      setWaitS(0);setOnline(false);go(3);
+    }catch(e:any){setErr(e?.response?.data?.reason||'Could not reach the VIGIL box. Check this phone is on the '+boxSsid+' Wi-Fi.');}
+    finally{setBusy(false);}
+  };
+  const copy=(t:string)=>Share.share({message:t}).catch(()=>{});
+  const H1=({t,sub}:{t:string;sub?:string})=>(<>
+    <Text style={{color:C.text,fontSize:27,fontWeight:'800',letterSpacing:-0.3}}>{t}</Text>
+    {!!sub&&<Text style={{color:C.sub,fontSize:16,marginTop:8,lineHeight:23}}>{sub}</Text>}</>);
+  const Num=({n,children}:{n:number;children:any})=>(
+    <View style={{flexDirection:'row',marginTop:14}}>
+      <View style={{width:26,height:26,borderRadius:13,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center',marginRight:12}}>
+        <Text style={{color:C.green,fontWeight:'800',fontSize:13}}>{n}</Text></View>
+      <View style={{flex:1}}>{children}</View></View>);
+  const Field=({label,value}:{label:string;value:string})=>(
+    <TouchableOpacity onPress={()=>copy(value)} style={{flexDirection:'row',alignItems:'center',marginTop:8,padding:12,borderRadius:10,backgroundColor:C.bg,borderWidth:1,borderColor:C.border}}>
+      <Text style={{color:C.sub,fontSize:14,width:84}}>{label}</Text>
+      <Text selectable style={{color:C.text,fontSize:18,fontWeight:'700',flex:1,letterSpacing:0.5}}>{value}</Text>
+      <Text style={{color:C.blue,fontSize:14}}>Copy</Text></TouchableOpacity>);
+  const P=({children}:{children:any})=><Text style={{color:C.sub,fontSize:15,lineHeight:22}}>{children}</Text>;
+  const body=()=>{switch(cur){
+    case 'plug':return(<>
+      <H1 t="Plug everything in" sub="Two pieces came in the box: the VIGIL box and the camera."/>
+      <Num n={1}><P><Text style={{color:C.text,fontWeight:'700'}}>The VIGIL box:</Text> plug it in near your Wi-Fi router. Its light starts blinking.</P></Num>
+      <Num n={2}><P><Text style={{color:C.text,fontWeight:'700'}}>The camera:</Text> plug it in where it will watch: high in a corner, seeing the floor from wall to wall.</P></Num>
+      <Num n={3}><P>Wait about 2 minutes, until the box light blinks twice, pauses, blinks twice. That means it is ready to be set up.</P></Num>
+    </>);
+    case 'tapo':return(<>
+      <H1 t="Put the camera on Wi-Fi" sub="The camera's maker only lets its own app do this part. It takes about 5 minutes."/>
+      <Num n={1}><P>Install the free Tapo app and create a Tapo account.</P>
+        <TouchableOpacity onPress={()=>Linking.openURL(TAPO_APP)} style={{marginTop:6}}><Text style={{color:C.blue,fontSize:15}}>Get Tapo from the App Store</Text></TouchableOpacity></Num>
+      <Num n={2}><P>In Tapo tap <Text style={{color:C.text,fontWeight:'700'}}>+</Text>, add the camera, and follow its steps to connect it to your home Wi-Fi.</P></Num>
+      <Num n={3}><P>Open the camera in Tapo, tap the gear for Settings, then <Text style={{color:C.text,fontWeight:'700'}}>Advanced Settings, Camera Account</Text>. Type exactly these (tap to copy):</P>
+        <Field label="Username" value="vigil"/>
+        <Field label="Password" value={camPass}/></Num>
+      <Num n={4}><P>In Tapo tap <Text style={{color:C.text,fontWeight:'700'}}>Me, Third-Party Services, Third-Party Compatibility</Text> and turn it on.</P></Num>
+      <Num n={5}><P>Recommended: camera Settings, <Text style={{color:C.text,fontWeight:'700'}}>Firmware Update</Text>, turn automatic updates off, so an update cannot interrupt VIGIL.</P></Num>
+      <TouchableOpacity onPress={()=>{setTapoDone(!tapoDone);save({tapoDone:!tapoDone});}} style={[s.card,{marginTop:18,flexDirection:'row',alignItems:'center'}]}>
+        <View style={{width:26,height:26,borderRadius:8,borderWidth:2,borderColor:tapoDone?C.green:C.muted,backgroundColor:tapoDone?C.green:'transparent',alignItems:'center',justifyContent:'center'}}>
+          {tapoDone&&<Text style={{color:'#000',fontWeight:'900'}}>{'✓'}</Text>}</View>
+        <Text style={{color:C.text,fontSize:16,marginLeft:12,flex:1}}>The camera shows its picture in Tapo, and I typed the camera account</Text>
+      </TouchableOpacity>
+    </>);
+    case 'box':return(<>
+      <H1 t="Connect the VIGIL box" sub={box?'Found your VIGIL box. Choose your home Wi-Fi.':'This phone joins the box for a moment to tell it your Wi-Fi.'}/>
+      {!box?(<>
+        <Num n={1}><P>Open the iPhone <Text style={{color:C.text,fontWeight:'700'}}>Settings</Text> app, tap <Text style={{color:C.text,fontWeight:'700'}}>Wi-Fi</Text>, and choose:</P>
+          <Field label="Wi-Fi" value={boxSsid}/>
+          <Field label="Password" value={boxPw||'(your setup code)'}/></Num>
+        <Num n={2}><P>If the iPhone says the network has no internet, that is expected. Stay on it and come back to VIGIL.</P></Num>
+        <View style={{flexDirection:'row',alignItems:'center',marginTop:20}}>
+          <ActivityIndicator color={C.green}/><Text style={{color:C.sub,fontSize:15,marginLeft:10}}>Looking for the box...</Text></View>
+        <Text style={{color:C.muted,fontSize:13,marginTop:14,lineHeight:19}}>Not in the list? Check the box light blinks twice and pauses. If it is steady, the box already has Wi-Fi: go back and continue.</Text>
+      </>):(<>
+        {!!box.last_error&&<Text style={{color:C.orange,fontSize:15,marginTop:12,lineHeight:21}}>{box.last_error}</Text>}
+        <View style={[s.card,{marginTop:14,paddingVertical:4}]}>
+          {nets.slice(0,12).map(n=>(
+            <TouchableOpacity key={n.ssid} onPress={()=>{setSsid(n.ssid);setManual(false);}} style={{flexDirection:'row',alignItems:'center',paddingVertical:13,borderBottomWidth:1,borderBottomColor:C.hair}}>
+              <Text style={{color:C.text,fontSize:16,flex:1,fontWeight:ssid===n.ssid&&!manual?'700':'400'}}>{n.ssid}</Text>
+              <Text style={{color:C.muted,fontSize:12,marginRight:8}}>{n.signal>=70?'Strong':n.signal>=45?'Good':'Weak'}</Text>
+              {ssid===n.ssid&&!manual&&<Text style={{color:C.green,fontWeight:'900'}}>{'✓'}</Text>}
+            </TouchableOpacity>))}
+          <TouchableOpacity onPress={()=>{setManual(true);setSsid('');}} style={{paddingVertical:13}}>
+            <Text style={{color:C.blue,fontSize:15}}>{nets.length?'My Wi-Fi is not listed':'Type the Wi-Fi name'}</Text></TouchableOpacity>
+        </View>
+        {manual&&<TextInput value={ssid} onChangeText={setSsid} placeholder="Wi-Fi name, exactly" placeholderTextColor={C.muted} autoCapitalize="none" autoCorrect={false}
+          style={{color:C.text,fontSize:17,padding:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:10}}/>}
+        {!!ssid&&<>
+          <TextInput value={wpw} onChangeText={setWpw} placeholder={`Password for ${ssid}`} placeholderTextColor={C.muted} secureTextEntry={!showPw}
+            autoCapitalize="none" autoCorrect={false} style={{color:C.text,fontSize:17,padding:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:10}}/>
+          <TouchableOpacity onPress={()=>setShowPw(v=>!v)} style={{alignSelf:'flex-end',paddingTop:8}}><Text style={{color:C.sub,fontSize:13}}>{showPw?'Hide password':'Show password'}</Text></TouchableOpacity>
+          <Text style={{color:C.muted,fontSize:13,marginTop:6,lineHeight:19}}>Use the same Wi-Fi the camera is on.</Text>
+          <TouchableOpacity disabled={busy||!ssid.trim()} onPress={send} style={[s.btnPrimary,{marginTop:14,opacity:(busy||!ssid.trim())?0.5:1}]}>
+            {busy?<ActivityIndicator color="#000"/>:<Text style={s.btnPrimaryTxt}>Connect the box</Text>}</TouchableOpacity>
+        </>}
+      </>)}
+    </>);
+    default:return(<>
+      <H1 t={online?'VIGIL can see':'Connecting'} sub={online?'The camera picture is reaching VIGIL. Next, tell VIGIL who lives here.':'The box is joining your Wi-Fi and looking for the camera. This phone goes back to your own Wi-Fi by itself.'}/>
+      <View style={{alignItems:'center',marginTop:30}}>
+        {online?(
+          <View style={{width:96,height:96,borderRadius:48,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}>
+            <Svg width={52} height={52} viewBox="0 0 52 52"><Path d="M12 27 L22 37 L41 16" stroke="#000" strokeWidth={6} fill="none" strokeLinecap="round" strokeLinejoin="round"/></Svg></View>
+        ):<ActivityIndicator size="large" color={C.green}/>}
+        {!online&&<Text style={{color:C.sub,fontSize:15,marginTop:16}}>{waitS<60?'Usually 1 to 3 minutes.':`${Math.floor(waitS/60)} min ${waitS%60} s`}</Text>}
+      </View>
+      {!online&&waitS>=180&&(
+        <View style={[s.card,{marginTop:24}]}>
+          <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>Taking longer than usual</Text>
+          <P>{'\n'}Box light blinking twice again: the Wi-Fi password was not right. Tap Try again.{'\n\n'}Light blinking slowly: the box cannot find the camera. Check the camera is on the same Wi-Fi in Tapo, and the camera account is exactly as shown on the camera step.{'\n\n'}Light blinking fast: the Wi-Fi has no internet right now.</P>
+          <TouchableOpacity onPress={()=>{setBox(null);setNets([]);go(2);}} style={[s.btnPrimary,{marginTop:12}]}><Text style={s.btnPrimaryTxt}>Try again</Text></TouchableOpacity>
+          <TouchableOpacity onPress={()=>go(1)} style={{paddingTop:12,alignItems:'center'}}><Text style={{color:C.blue,fontSize:15}}>See the camera step again</Text></TouchableOpacity>
+        </View>)}
+    </>);
+  }};
+  const canNext=cur==='tapo'?tapoDone:cur==='wait'?online:cur!=='box';
+  return(
+    <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
+      <StatusBar barStyle="light-content"/>
+      <View style={{paddingHorizontal:20,paddingTop:12}}>
+        <View style={{flexDirection:'row',gap:4}}>
+          {STEPS.map((_,i)=><View key={i} style={{flex:1,height:4,borderRadius:2,backgroundColor:i<=step?C.green:C.fill}}/>)}
+        </View>
+        <Text style={{color:C.muted,fontSize:13,marginTop:6}}>{site?.name||'Your camera'}</Text>
+      </View>
+      <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
+        <ScrollView contentContainerStyle={{padding:20,paddingBottom:24}} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
+          {body()}
+          {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:14,lineHeight:20}}>{err}</Text>}
+          {cur!=='wait'&&<TouchableOpacity onPress={onSkip} style={{alignItems:'center',paddingTop:22}}>
+            <Text style={{color:C.muted,fontSize:14}}>The box and camera are already working</Text></TouchableOpacity>}
+        </ScrollView>
+        {cur!=='box'&&<View style={{flexDirection:'row',gap:12,paddingHorizontal:20,paddingTop:8,paddingBottom:28}}>
+          {step>0&&cur!=='wait'&&<TouchableOpacity onPress={()=>go(step-1)} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
+            <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text></TouchableOpacity>}
+          <TouchableOpacity disabled={!canNext} onPress={cur==='wait'?onDone:()=>go(step+1)}
+            style={[s.btnPrimary,{flex:2,paddingVertical:17},!canNext&&{backgroundColor:C.fill,shadowOpacity:0}]}>
+            <Text style={{color:canNext?'#000':C.muted,fontWeight:'700',fontSize:17}}>{cur==='wait'?(online?'Continue':'Waiting for the camera...'):'Continue'}</Text>
+          </TouchableOpacity>
+        </View>}
+        {cur==='box'&&<TouchableOpacity onPress={()=>go(1)} style={{alignItems:'center',paddingBottom:28,paddingTop:8}}>
+          <Text style={{color:C.sub,fontSize:16}}>Back</Text></TouchableOpacity>}
+      </KeyboardAvoidingView>
+    </SafeAreaView>);
+}
+
 // HOME_SETUP_V1: after the camera is added, set up the home properly: everyone
 // who lives there (photo, height, who VIGIL looks after), their consent, whose
 // Apple Watch this is, who gets alerts, the camera view, then Introduce everyone.
@@ -906,6 +1093,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
   const [cloudCfg,setCloudCfg]     = useState<CloudCfg|null>(null);
   const [pendingCloud,setPendingCloud] = useState<CloudCfg|null>(null);   // ACCOUNTS_V1: signed in, no camera yet
   const [homeSetup,setHomeSetup]   = useState<{cfg:CloudCfg;role:string}|null>(null);   // HOME_SETUP_V1
+  const [boxSetup,setBoxSetup]     = useState<CloudCfg|null>(null);                    // APP_SETUP_V1
   const [serverIp,setSI]           = useState(DEFAULT_IP);
   const [serverPort,setSP]         = useState(DEFAULT_PORT);
   const [testing,setTesting]       = useState(false);
@@ -1176,6 +1364,9 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
     </Text>
   );
 
+  if(boxSetup){
+    return <BoxSetup cfg={boxSetup} onDone={()=>setBoxSetup(null)} onSkip={()=>setBoxSetup(null)}/>;
+  }
   if(homeSetup){
     return <HomeSetup cfg={homeSetup.cfg} role={homeSetup.role} onDone={()=>{
       AsyncStorage.removeItem('vigil_home_setup_role').catch(()=>{});onCloud&&onCloud(homeSetup.cfg);}}/>;
@@ -1200,6 +1391,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
                     onAdded={(cfg,role)=>{setPendingCloud(null);
                       // HOME_SETUP_V1: the first person sets up the whole home; family who join later choose their alerts.
                       AsyncStorage.setItem('vigil_home_setup_role',JSON.stringify({siteId:cfg.siteId,role:role||'owner'})).catch(()=>{});
+                      if((role||'owner')==='owner'&&!cfg.sites.find(x=>x.id===cfg.siteId)?.online)setBoxSetup(cfg);   // camera not sending yet: set up the box
                       setHomeSetup({cfg,role:role||'owner'});}}
                     onSkip={()=>{const c=pendingCloud;setPendingCloud(null);onCloud&&onCloud(c);}}/>
                 ):(
@@ -1207,7 +1399,9 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
                     if(!cfg.sites.length){setPendingCloud(cfg);return;}
                     // HOME_SETUP_V1: setup left part-way on this phone resumes; otherwise straight in.
                     try{const v=JSON.parse((await AsyncStorage.getItem('vigil_home_setup_role'))||'null');
-                      if(v&&cfg.sites.some(x=>x.id===v.siteId)){setHomeSetup({cfg:{...cfg,siteId:v.siteId},role:v.role});return;}}catch(_e){}
+                      if(v&&cfg.sites.some(x=>x.id===v.siteId)){const c2={...cfg,siteId:v.siteId};
+                        if(v.role==='owner'&&(await AsyncStorage.getItem('vigil_box_setup_'+v.siteId)))setBoxSetup(c2);
+                        setHomeSetup({cfg:c2,role:v.role});return;}}catch(_e){}
                     onCloud&&onCloud(cfg);}}/>
                 )}
                 <TouchableOpacity onPress={()=>setMode('choose')} style={{alignItems:'center',paddingVertical:16}}>
@@ -3328,6 +3522,7 @@ export default function App() {
   },[]);
   // IN_VIEW_LIVE_V1: exactly who is in the camera picture right now.
   const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number;track?:number|null}[]>([]);
+  const [boxAgain,setBoxAgain]=useState(false);   // APP_SETUP_V1: new Wi-Fi or new camera account
   const [whoToday,setWhoToday]=useState<{track:number|null;current:{id:string;name:string|null}|null}|null>(null);   // WHO_SHEET_V1
   const [identifying,setIdentifying]=useState(0);
   // IDENTITY_V6_APP
@@ -4580,6 +4775,11 @@ export default function App() {
               {site.id===cloud.siteId&&<Text style={{color:C.green,fontSize:13,fontWeight:'600'}}>Viewing</Text>}
             </TouchableOpacity>
           ))}
+          {!!cloud.siteId&&<TouchableOpacity onPress={()=>setBoxAgain(true)} style={{paddingTop:12}}>
+            <Text style={{color:C.blue,fontSize:15}}>New Wi-Fi or camera? Set up the VIGIL box again</Text></TouchableOpacity>}
+          <Modal visible={boxAgain} animationType="slide" presentationStyle="fullScreen" onRequestClose={()=>setBoxAgain(false)}>
+            {boxAgain&&cloud&&<BoxSetup cfg={cloud} onDone={()=>{setBoxAgain(false);refreshCloudSites();}} onSkip={()=>setBoxAgain(false)}/>}
+          </Modal>
           {!!cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic&&(
             <TouchableOpacity onPress={()=>Share.share({message:cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic||''})}>
               <Text style={{color:C.sub,fontSize:12,marginTop:10,lineHeight:17}}>

@@ -223,8 +223,9 @@ def relay_config(st, c):
     return ("# VIGIL relay settings for camera %s (%s). Keep private.\n"
             "VIGIL_CAMERA_ID=%s\nVIGIL_CLOUD_HOST=%s\nVIGIL_SRT_PORT=8890\n"
             "VIGIL_STREAM_USER=%s\nVIGIL_STREAM_PASS=%s\nVIGIL_SRT_PASSPHRASE=%s\n"
-            "VIGIL_RTMP_FALLBACK=%s\n" % (c["id"], c["name"], c["id"], st["domain"], c["stream_user"],
-                                           c["stream_pass"], c["srt_passphrase"], camera_url(st, c)))
+            "VIGIL_RTMP_FALLBACK=%s\nVIGIL_SETUP_CODE=%s\n" % (c["id"], c["name"], c["id"], st["domain"], c["stream_user"],
+                                           c["stream_pass"], c["srt_passphrase"], camera_url(st, c),
+                                           c.get("setup_code", "")))
 
 
 def camera_url(st, c):

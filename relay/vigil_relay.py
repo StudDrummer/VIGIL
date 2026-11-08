@@ -450,7 +450,7 @@ def internet_ok(cfg):
 def main():
     cfg = load_env()
     need = ["VIGIL_CAMERA_ID", "VIGIL_CLOUD_HOST", "VIGIL_STREAM_USER", "VIGIL_STREAM_PASS",
-            "VIGIL_SRT_PASSPHRASE", "VIGIL_TAPO_USER", "VIGIL_TAPO_PASS"]
+            "VIGIL_SRT_PASSPHRASE"]
     missing = [k for k in need if not cfg.get(k)]
     if missing:
         log("settings missing in %s: %s" % (ENV_FILE, ", ".join(missing)))
@@ -464,6 +464,11 @@ def main():
         if os.path.exists("/run/vigil-relay/setup-mode"):
             light.state = "setup"
             write_status(state="wifi_setup")
+            time.sleep(5)
+            continue
+        if not cfg.get("VIGIL_SOURCE_URL") and not (cfg.get("VIGIL_TAPO_USER") and cfg.get("VIGIL_TAPO_PASS")):
+            light.state = "setup"             # APP_SETUP_V1: the VIGIL app sends the camera account
+            write_status(state="needs_camera_account")
             time.sleep(5)
             continue
         if cfg.get("VIGIL_SOURCE_URL"):       # any other camera or a test file: no search needed
