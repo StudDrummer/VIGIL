@@ -130,6 +130,7 @@ def render(st):
       VIGIL_BED_EXIT_ALWAYS: "{bed_always}"
       VIGIL_FLOOR_ALERT_S: "{floor_s}"
       VIGIL_FACE_ID: "{face}"
+      PYTHONFAULTHANDLER: "1"
       TZ: "{tz}"
       HOME: /root
     volumes:
