@@ -380,10 +380,19 @@ def claim_camera():
         db().commit()
         return jsonify({"status": "error", "reason": "that code was not recognised; check the card and try again"}), 404
     has_owner = db().execute("SELECT 1 FROM grants WHERE site_id=? AND role='owner'", (site["id"],)).fetchone()
+    already = db().execute("SELECT 1 FROM grants WHERE user_id=? AND site_id=?", (g.user_id, site["id"])).fetchone()
     db().execute("INSERT OR IGNORE INTO grants VALUES (?,?,?)",
                  (g.user_id, site["id"], "caregiver" if has_owner else "owner"))
     db().commit()
     audit("claim", site_id=site["id"])
+    if has_owner and not already:            # MEMBERS_V1: owners always know who joined
+        me_ = db().execute("SELECT name, email FROM users WHERE id=?", (g.user_id,)).fetchone()
+        for o in db().execute("SELECT u.email FROM grants gr JOIN users u ON u.id=gr.user_id "
+                              "WHERE gr.site_id=? AND gr.role='owner' AND u.disabled=0", (site["id"],)):
+            send_email(o[0], "VIGIL: %s joined %s" % (me_["name"] or me_["email"], site.get("name", site["id"])),
+                       "%s (%s) used the setup code to join '%s' and can now see its camera and alerts.\n\n"
+                       "If you did not expect this, open VIGIL > Settings > People with access and remove them."
+                       % (me_["name"] or "Someone", me_["email"], site.get("name", site["id"])))
     role = db().execute("SELECT role FROM grants WHERE user_id=? AND site_id=?", (g.user_id, site["id"])).fetchone()
     return jsonify({"status": "ok", "site": public_site(site), "role": role[0] if role else "caregiver",
                     "sites": [public_site(s) for s in user_sites(g.user_id, g.is_admin)]})
@@ -493,6 +502,85 @@ def change_password():
     db().execute("DELETE FROM tokens WHERE user_id=? AND token_hash<>?", (g.user_id, _h(_token_from_request())))
     db().commit()
     audit("password_changed")
+    return jsonify({"status": "ok"})
+
+
+# MEMBERS_V1: who can see a camera, and removing them.
+def _role(site_id, user_id=None):
+    r = db().execute("SELECT role FROM grants WHERE user_id=? AND site_id=?",
+                     (g.user_id if user_id is None else user_id, site_id)).fetchone()
+    return r[0] if r else None
+
+
+@app.route("/auth/site/<site_id>/members")
+@require_user
+def site_members(site_id):
+    if not (_role(site_id) or g.is_admin):
+        return jsonify({"status": "error", "reason": "not your camera"}), 403
+    rows = db().execute("SELECT u.id, u.name, u.email, gr.role FROM grants gr JOIN users u ON u.id=gr.user_id "
+                        "WHERE gr.site_id=? AND u.disabled=0 ORDER BY gr.role='owner' DESC, u.name", (site_id,)).fetchall()
+    s_ = sites().get(site_id, {})
+    return jsonify({"status": "ok", "my_role": _role(site_id), "setup_code": s_.get("setup_code", "") if _role(site_id) == "owner" else "",
+                    "members": [{"id": r["id"], "name": r["name"] or "", "email": r["email"], "role": r["role"],
+                                 "me": r["id"] == g.user_id} for r in rows]})
+
+
+@app.route("/auth/site/<site_id>/members/<int:uid>/remove", methods=["POST"])
+@require_user
+def site_member_remove(site_id, uid):
+    mine = _role(site_id)
+    if uid != g.user_id and mine != "owner" and not g.is_admin:
+        return jsonify({"status": "error", "reason": "only the owner can remove people"}), 403
+    target = _role(site_id, uid)
+    if not target:
+        return jsonify({"status": "error", "reason": "not a member"}), 404
+    if target == "owner":
+        others = db().execute("SELECT COUNT(*) FROM grants WHERE site_id=? AND role='owner' AND user_id<>?",
+                              (site_id, uid)).fetchone()[0]
+        if not others:
+            return jsonify({"status": "error", "reason": "the owner cannot leave; make someone else owner first or delete the account"}), 400
+    db().execute("DELETE FROM grants WHERE site_id=? AND user_id=?", (site_id, uid))
+    db().commit()
+    audit("member_removed:%d" % uid, site_id=site_id)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/auth/site/<site_id>/members/<int:uid>/owner", methods=["POST"])
+@require_user
+def site_member_make_owner(site_id, uid):
+    if _role(site_id) != "owner" and not g.is_admin:
+        return jsonify({"status": "error", "reason": "only the owner can do this"}), 403
+    if not _role(site_id, uid):
+        return jsonify({"status": "error", "reason": "not a member"}), 404
+    db().execute("UPDATE grants SET role='owner' WHERE site_id=? AND user_id=?", (site_id, uid))
+    db().commit()
+    audit("owner_added:%d" % uid, site_id=site_id)
+    return jsonify({"status": "ok"})
+
+
+# ACCOUNT_DELETE_V1 (App Store 5.1.1(v)): delete the account from inside the app.
+@app.route("/auth/delete", methods=["POST"])
+@require_user
+def delete_account():
+    body = request.get_json(silent=True) or {}
+    u = db().execute("SELECT * FROM users WHERE id=?", (g.user_id,)).fetchone()
+    if not check_password_hash(u["pw_hash"], body.get("password") or ""):
+        return jsonify({"status": "error", "reason": "password is wrong"}), 401
+    uid = g.user_id
+    # a home this person owns alone passes to its longest-standing caregiver
+    for (sid,) in db().execute("SELECT site_id FROM grants WHERE user_id=? AND role='owner'", (uid,)).fetchall():
+        others = db().execute("SELECT COUNT(*) FROM grants WHERE site_id=? AND role='owner' AND user_id<>?", (sid, uid)).fetchone()[0]
+        if not others:
+            nxt = db().execute("SELECT user_id FROM grants WHERE site_id=? AND user_id<>? ORDER BY rowid LIMIT 1", (sid, uid)).fetchone()
+            if nxt:
+                db().execute("UPDATE grants SET role='owner' WHERE site_id=? AND user_id=?", (sid, nxt[0]))
+    for sql in ("DELETE FROM tokens WHERE user_id=?", "DELETE FROM grants WHERE user_id=?",
+                "DELETE FROM verify_codes WHERE user_id=?", "DELETE FROM users WHERE id=?"):
+        db().execute(sql, (uid,))
+    db().execute("DELETE FROM reset_codes WHERE email=?", (u["email"],))
+    db().execute("UPDATE audit SET user_id=NULL WHERE user_id=?", (uid,))
+    db().commit()
+    audit("account_deleted", user_id=None)
     return jsonify({"status": "ok"})
 
 

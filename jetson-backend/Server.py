@@ -216,6 +216,9 @@ def init_db():
         conn.execute("ALTER TABLE persons ADD COLUMN colour_hist TEXT")
     if 'height_cm' not in persons_existing:                      # HEIGHT_PER_PERSON_V1
         conn.execute("ALTER TABLE persons ADD COLUMN height_cm REAL")
+    for _c, _t in (("consent_at", "TEXT"), ("consent_by", "TEXT")):   # HOUSEHOLD_V1
+        if _c not in persons_existing:
+            conn.execute("ALTER TABLE persons ADD COLUMN %s %s" % (_c, _t))
     cfg_existing = {row[1] for row in conn.execute("PRAGMA table_info(config)")}
     if 'resident_person_id' not in cfg_existing:
         conn.execute("ALTER TABLE config ADD COLUMN resident_person_id TEXT")
@@ -1169,6 +1172,54 @@ def set_person_height(person_id):
 
 # TEACH_V1: "Introduce everyone": name someone the camera does not know yet,
 # straight from the person standing in view. Every cue learns from it.
+# HOUSEHOLD_V1: add the people who live in the home during setup, before the
+# camera has seen them. Introduce everyone then links each one to how they look.
+@app.route("/persons/new", methods=["POST"])
+@require_api_key
+def new_person():
+    import uuid
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()[:40]
+    if not name:
+        return jsonify({"status": "error", "reason": "type a name"}), 400
+    try:
+        h = float(data.get("height_cm")) if data.get("height_cm") not in (None, "") else None
+    except (TypeError, ValueError):
+        h = None
+    if h is not None and not 50 <= h <= 230:
+        return jsonify({"status": "error", "reason": "height should be between 50 and 230 cm"}), 400
+    conn = get_db()
+    dup = conn.execute("SELECT id FROM persons WHERE LOWER(TRIM(name))=LOWER(?)", (name,)).fetchone()
+    if dup:
+        conn.close()
+        return jsonify({"status": "error", "reason": "%s is already in this home" % name, "person_id": dup[0]}), 409
+    pid = "named_" + uuid.uuid4().hex[:10]
+    now = datetime.now().isoformat()
+    conn.execute("INSERT INTO persons (id, name, is_resident, height_cm, room_id, first_seen_at, last_seen_at, identified_at) "
+                 "VALUES (?,?,?,?,?,?,?,datetime('now'))",
+                 (pid, name, 1 if data.get("is_resident") else 0, h, data.get("room_id") or "room_1", now, now))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok", "person_id": pid})
+
+
+@app.route("/persons/<person_id>/consent", methods=["POST"])
+@require_api_key
+def person_consent(person_id):
+    """Records that this person was told about the camera and agreed."""
+    data = request.get_json() or {}
+    conn = get_db()
+    if data.get("given") is False:
+        conn.execute("UPDATE persons SET consent_at=NULL, consent_by=NULL WHERE id=?", (person_id,))
+    else:
+        conn.execute("UPDATE persons SET consent_at=datetime('now'), consent_by=? WHERE id=?",
+                     ((data.get("by") or "")[:80], person_id))
+    n = conn.total_changes
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok" if n else "error"}), (200 if n else 404)
+
+
 @app.route("/tracks/<int:track_id>/new", methods=["POST"])
 @require_api_key
 def new_person_from_track(track_id):

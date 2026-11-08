@@ -97,6 +97,7 @@ class FaceID:
         if os.environ.get("VIGIL_FACE_FINDER", "") != "keypoints" and hasattr(cv2, "FaceDetectorYN"):
             try:
                 self.det = cv2.FaceDetectorYN.create(det, "", (320, 320), self.MIN_SCORE, 0.3, 5)
+                self._det_path = det
                 self.det.setInputSize((96, 96))
                 self.det.detect(np.zeros((96, 96, 3), dtype=np.uint8))
                 self.mode = "yunet"
@@ -104,6 +105,34 @@ class FaceID:
                 self.mode = "keypoints"
         self.ok = True
         self.why = "face finder: %s" % ("YuNet" if self.mode == "yunet" else "eyes and nose from the pose model")
+
+    def embed_photo(self, img):
+        """PHOTO_SEED_V1: (vector, quality) for the largest clear face in a phone
+        photo, or None. Needs the YuNet face finder (OpenCV 4.8+)."""
+        if not self.ok or img is None or self.mode != "yunet":
+            return None
+        try:
+            cv2 = self.cv2
+            h, w = img.shape[:2]
+            sc = min(1.0, 640.0 / max(h, w))
+            if sc < 1.0:
+                img = cv2.resize(img, (int(w * sc), int(h * sc)), interpolation=cv2.INTER_AREA)
+            with self.lock:
+                det = cv2.FaceDetectorYN.create(self._det_path, "", (img.shape[1], img.shape[0]), self.MIN_SCORE, 0.3, 5)
+                _n, faces = det.detect(img)
+                if faces is None or not len(faces):
+                    return None
+                f = max(faces, key=lambda r: r[2] * r[3])
+                if f[2] < 40 or float(f[14]) < self.MIN_SCORE:
+                    return None
+                crop = self.rec.alignCrop(img, f)
+                v = self.rec.feature(crop).flatten().astype(np.float32)
+            n = float(np.linalg.norm(v))
+            if n <= 0:
+                return None
+            return v / n, min(1.0, float(f[14]))
+        except Exception:
+            return None
 
     def embed(self, frame, kp):
         """(128-d unit vector, quality 0..1) for the face of the person with

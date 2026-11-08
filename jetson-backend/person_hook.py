@@ -1634,6 +1634,65 @@ def _enroll_write():
         pass
 
 
+# PHOTO_SEED_V1: a clear photo added in the app gives face matching a first
+# view of that person before the camera has seen them up close.
+_SEED = {"t": 0.0, "done": None}
+_SEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_seeds.json")
+
+
+def _seed_faces_from_photos():
+    now = time.time()
+    if _V8 is None or _V8_FACE is None or not getattr(_V8_FACE, "ok", False) \
+            or getattr(_V8_FACE, "mode", "") != "yunet" or now - _SEED["t"] < 30:
+        return
+    _SEED["t"] = now
+    import json as _js
+    import hashlib
+    import base64 as _b64
+    import sqlite3 as _sq
+    if _SEED["done"] is None:
+        try:
+            with open(_SEED_FILE) as f:
+                _SEED["done"] = _js.load(f)
+        except Exception:
+            _SEED["done"] = {}
+    c = _sq.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vigil.db"), timeout=2)
+    try:
+        rows = c.execute("SELECT id, photo_b64 FROM persons WHERE photo_b64 IS NOT NULL AND photo_b64 != '' "
+                         "AND name IS NOT NULL AND TRIM(name) != ''").fetchall()
+    except Exception:
+        rows = []
+    finally:
+        c.close()
+    changed = False
+    for pid, ph in rows:
+        hsh = hashlib.sha1(ph.encode()).hexdigest()[:16]
+        if _SEED["done"].get(pid) == hsh:
+            continue
+        _SEED["done"][pid] = hsh
+        changed = True
+        try:
+            import cv2 as _cv
+            raw = ph.split(",", 1)[1] if ph.startswith("data:") else ph
+            img = _cv.imdecode(np.frombuffer(_b64.b64decode(raw), np.uint8), _cv.IMREAD_COLOR)
+            e = _V8_FACE.embed_photo(img)
+            if e is not None:
+                n = _V8.learn_face(pid, [e])
+                _V8.save(force=True)
+                print("[V8] face from %s's photo: %s" % (pid, "added" if n else "already known"), flush=True)
+            else:
+                print("[V8] %s's photo has no clear face; used as their picture only" % pid, flush=True)
+        except Exception as e:
+            print("[V8] photo face error for %s: %s" % (pid, e), flush=True)
+    if changed:
+        try:
+            with open(_SEED_FILE + ".tmp", "w") as f:
+                _js.dump(_SEED["done"], f)
+            os.replace(_SEED_FILE + ".tmp", _SEED_FILE)
+        except Exception:
+            pass
+
+
 def _v8_raw(tid, pid):
     """Raw score of each cue for 'track tid is person pid' (None = no data)."""
     raw = {}
@@ -2129,6 +2188,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
         _used_this_frame = set()
         _apply_corrections()
         _apply_merges()
+        try:
+            _seed_faces_from_photos()                            # PHOTO_SEED_V1
+        except Exception:
+            pass
         _boxes = [_kp_box(_k) for _k in all_persons]
         try:
             _v7_mark_crossings(_boxes, track_ids)          # IDENTITY_V7

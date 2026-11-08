@@ -144,7 +144,35 @@ def test_everything():
     assert [to for to, _ in MAIL[n:]] == ["dad@example.com"]
 
 
+def test_members_and_account_deletion():
+    """MEMBERS_V1 / ACCOUNT_DELETE_V1: the owner sees who joined and can remove
+    them; anyone can delete their account in the app (App Store 5.1.1(v))."""
+    joined = [b for to, b in MAIL if to == "dad@example.com" and "joined" in b]
+    assert joined and "mom@example.com" in joined[0], "owner was not told mom joined"
+    tok_d = C.post("/auth/login", json={"email": "dad@example.com", "password": "new password 1"}).json["token"]
+    tok_m = C.post("/auth/login", json={"email": "mom@example.com", "password": "good password"}).json["token"]
+    Hd, Hm = {"X-VIGIL-Key": tok_d}, {"X-VIGIL-Key": tok_m}
+    r = C.get("/auth/site/home01/members", headers=Hd).json
+    assert r["my_role"] == "owner" and r["setup_code"] == "K7Q2-M9XD", r
+    roles = {m["email"]: m["role"] for m in r["members"]}
+    assert roles == {"dad@example.com": "owner", "mom@example.com": "caregiver"}, roles
+    assert C.get("/auth/site/home01/members", headers=Hm).json["setup_code"] == ""      # code only for owners
+    dad_id = next(m["id"] for m in r["members"] if m["role"] == "owner")
+    mom_id = next(m["id"] for m in r["members"] if m["role"] == "caregiver")
+    assert C.post("/auth/site/home01/members/%d/remove" % dad_id, headers=Hm).status_code == 403
+    assert C.post("/auth/site/home01/members/%d/remove" % mom_id, headers=Hd).json["status"] == "ok"
+    assert C.get("/auth/me", headers=Hm).json["sites"] == []
+    assert C.post("/auth/claim", json={"code": "K7Q2M9XD"}, headers=Hm).json["role"] == "caregiver"
+    assert C.post("/auth/delete", json={"password": "nope"}, headers=Hd).status_code == 401
+    assert C.post("/auth/delete", json={"password": "new password 1"}, headers=Hd).json["status"] == "ok"
+    assert C.post("/auth/login", json={"email": "dad@example.com", "password": "new password 1"}).status_code == 401
+    assert C.get("/auth/me", headers=Hd).status_code == 401                              # old session is gone
+    r = C.get("/auth/site/home01/members", headers=Hm).json
+    assert r["my_role"] == "owner" and len(r["members"]) == 1, r                         # home passed to mom
+
+
 if __name__ == "__main__":
     test_everything()
+    test_members_and_account_deletion()
     print("ok: %d emails sent" % len(MAIL))
     smtp.stop()
