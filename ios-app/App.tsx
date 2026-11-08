@@ -673,6 +673,18 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
     }})();
     return()=>{alive=false;};
   },[cur]);
+  // SETUP_RESUME_V1: the box may already be on the home Wi-Fi (setup sent, or done
+  // before). If the cloud hears from it, skip straight to the live progress.
+  useEffect(()=>{
+    if(cur!=='connect')return;
+    let alive=true;
+    (async()=>{while(alive){
+      try{const r=await axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/relay`,gh);
+        if(alive&&r.data?.box_online&&r.data?.state!=='needs_camera_account'){setLiveS(0);setRelay(r.data);setDone(false);go(3);break;}}catch(_e){}
+      await new Promise<void>(res=>setTimeout(()=>res(),4000));
+    }})();
+    return()=>{alive=false;};
+  },[cur]);
   const joinBox=async()=>{
     setJoinTried(true);setJoinFailed(false);setErr(null);
     if(!Hotspot?.join||!boxPw){setJoinFailed(true);return;}
@@ -852,7 +864,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
             <Text style={{color:C.muted,fontSize:14}}>My box and camera are already working</Text></TouchableOpacity>}
         </ScrollView>
         {(cur!=='connect'||!box)&&<View style={{flexDirection:'row',gap:12,paddingHorizontal:20,paddingTop:8,paddingBottom:28}}>
-          {step>0&&!done&&<TouchableOpacity onPress={()=>{if(cur==='live'){setBox(null);setNets([]);sheet.setValue(0);}go(step-1);}} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
+          {step>0&&cur!=='live'&&<TouchableOpacity onPress={()=>go(step-1)} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
             <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text></TouchableOpacity>}
           {cur!=='connect'&&<TouchableOpacity disabled={!canNext} onPress={cur==='live'?onDone:()=>go(step+1)}
             style={[s.btnPrimary,{flex:2,paddingVertical:17},!canNext&&{backgroundColor:C.fill,shadowOpacity:0}]}>
