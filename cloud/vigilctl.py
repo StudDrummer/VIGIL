@@ -21,6 +21,7 @@ Every change rewrites three generated files and applies them:
   docker-compose.yml     one container per camera, plus the shared services
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -83,6 +84,8 @@ def render(st):
     sites = [{"id": c["id"], "name": c["name"], "home": c.get("home", ""), "room": c.get("room", ""),
               "timezone": c.get("tz", ""), "ntfy_topic": c["ntfy_topic"], "api_key": c["api_key"],
               "setup_code": c.get("setup_code", ""),
+              # SETUP_LIVE_V1: the relay box reports its setup progress with its stream password
+              "relay_key_sha256": hashlib.sha256(c["stream_pass"].encode()).hexdigest(),
               "internal_url": "http://site-%s:5001" % c["id"]} for c in cams]
     _write(os.path.join(CONF, "sites.json"), json.dumps({"sites": sites}, indent=2), secret=True)
 
@@ -282,60 +285,40 @@ def cmd_cameras(_a):
 
 CARD_HTML = """<!doctype html><html><head><meta charset="utf-8"><title>VIGIL setup card</title>
 <style>
-@page{size:A4;margin:14mm}
-body{font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#111;margin:0;font-size:13px;line-height:1.38}
-h1{font-size:28px;margin:0 0 2px}h2{font-size:16px;margin:12px 0 4px}
-.sub{color:#555;margin:0 0 14px}
-.code{font-size:40px;font-weight:800;letter-spacing:6px;border:3px solid #111;border-radius:12px;padding:10px 18px;display:inline-block;margin:4px 0}
-ol{padding-left:22px;margin:6px 0}li{margin:3px 0}
-.box{border:1px solid #bbb;border-radius:10px;padding:10px 14px;margin:8px 0}
-table{border-collapse:collapse;width:100%%}td{border-top:1px solid #ddd;padding:3px 4px;vertical-align:top}
-.mono{font-family:Menlo,Consolas,monospace;font-size:17px;font-weight:700}
+@page{size:A5;margin:12mm}
+body{font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#111;margin:0;font-size:14px;line-height:1.45}
+.top{display:flex;gap:22px;align-items:center}
+h1{font-size:30px;margin:0;letter-spacing:-.5px}
+.sub{color:#555;margin:2px 0 0}
+#qr{width:150px;height:150px;flex:none}
+#qr img,#qr canvas{width:150px!important;height:150px!important}
+.code{font-size:30px;font-weight:800;letter-spacing:5px;border:2.5px solid #111;border-radius:10px;padding:6px 14px;display:inline-block;margin:8px 0 2px}
+ol{padding-left:22px;margin:14px 0}li{margin:7px 0}
+table{border-collapse:collapse;width:100%%;margin-top:6px}td{border-top:1px solid #ddd;padding:5px 4px;vertical-align:top}
 .small{color:#555;font-size:12px}
-</style></head><body>
-<h1>VIGIL</h1>
-<p class="sub">%(name)s. Setting up takes about 20 minutes. You need a phone and the Wi-Fi password.</p>
-
-<div class="box"><b>Your setup code</b><br><span class="code">%(code)s</span><br>
-<span class="small">Keep this card. Each family member who wants alerts types this code in the VIGIL app.</span></div>
-
-<h2>1. Put the camera on the Wi-Fi</h2>
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head><body>
+<div class="top">
+  <div id="qr"></div>
+  <div><h1>VIGIL</h1><p class="sub">%(name)s</p>
+  <div class="code">%(code)s</div>
+  <div class="small">Point your iPhone camera at the square to start.<br>Family who want alerts use the same code.</div></div>
+</div>
 <ol>
-<li>Install the <b>Tapo</b> app. Plug in the camera. If it was used before, hold its reset button for 5 seconds until it speaks.</li>
-<li>In the Tapo app tap <b>+</b> and add the camera. Follow the app.</li>
-<li>Then in the Tapo app: tap the camera, the gear (settings), <b>Advanced settings</b>, <b>Camera Account</b>. Type exactly:<br>
-Username: <span class="mono">%(tapo_user)s</span> &nbsp;&nbsp; Password: <span class="mono">%(tapo_pass)s</span></li>
-<li>Fix the camera high in a corner (about 2 metres up) so it sees the whole room, the bed and the floor.</li>
-</ol>
-
-<h2>2. Plug in the VIGIL box</h2>
-<ol>
-<li>Plug the small VIGIL box into a socket in the same room. Wait 3 minutes.</li>
-<li>If its green light <b>stays on</b>: done, go to step 3.</li>
-<li>If it <b>blinks twice, pauses, blinks twice</b>: on your phone open Wi-Fi settings, join <b>VIGIL-Setup</b> (password <span class="mono">vigilsetup</span>). A page opens (or go to <span class="mono">10.42.0.1</span>). Pick your home Wi-Fi, type its password, tap Connect. Wait 3 minutes.</li>
-</ol>
-
-<h2>3. The VIGIL app</h2>
-<ol>
+<li>Plug the <b>VIGIL box</b> in near your Wi-Fi router, and the <b>camera</b> where it will watch.</li>
 <li>Install VIGIL: %(app_link)s</li>
-<li>Tap <b>Get started</b>, then create your account with your email and a password.</li>
-<li>Type the setup code from the top of this card.</li>
-<li>If the app asks about the person being watched (name, height, weight, age), answer.</li>
-<li>The app asks you to mark the bed and the couch on the camera picture. Do it.</li>
-<li>When someone walks in front of the camera, the app shows "Unknown". Tap it and give the name. Do this once for each person in the home, one person at a time.</li>
-<li>Settings, Account: check <b>Email me alerts</b> is on and tap <b>Send me a test email</b>.</li>
+<li>Scan the square with the iPhone camera, or open VIGIL and type the code. The app guides you through everything else, in about 10 minutes.</li>
 </ol>
-
-<h2>The green light</h2>
 <table>
-<tr><td><b>Steady on</b></td><td>Working.</td></tr>
-<tr><td><b>Slow blink</b></td><td>Cannot find the camera. Check the camera is plugged in, its light is on, and it is on the main home Wi-Fi (not a Guest network).</td></tr>
-<tr><td><b>Fast blink</b></td><td>No internet. Check the home Wi-Fi is working.</td></tr>
-<tr><td><b>Two blinks, pause</b></td><td>New Wi-Fi. Do step 2 again.</td></tr>
+<tr><td><b>Light steady</b></td><td>Working.</td></tr>
+<tr><td><b>Two blinks, pause</b></td><td>Ready to set up, or needs Wi-Fi: open VIGIL.</td></tr>
+<tr><td><b>Slow blink</b></td><td>Cannot find the camera: check it is plugged in and on the same Wi-Fi.</td></tr>
+<tr><td><b>Fast blink</b></td><td>No internet: check the home Wi-Fi.</td></tr>
 </table>
-<p>Power cuts are fine: everything starts again by itself. Do not unplug the box or the camera.</p>
-<p><b>Help:</b> %(help)s</p>
-<p class="small">VIGIL is a safety and wellness tool, not a medical device. It does not replace checks by family or staff. No video is stored.</p>
+<p class="small">Power cuts are fine: everything starts again by itself. Help: %(help)s<br>
+VIGIL is a safety and wellness tool, not a medical device. No sound is used and no video is recorded.</p>
+<script>new QRCode(document.getElementById("qr"),{text:"vigil://setup?code=%(code_raw)s",width:300,height:300,correctLevel:QRCode.CorrectLevel.M});</script>
 </body></html>"""
 
 
@@ -351,7 +334,7 @@ def cmd_card(a):
     out = os.path.join(CONF, "card_%s.html" % c["id"])
     _write(out, CARD_HTML % {
         "name": esc(c["name"]), "code": esc(c["setup_code"]),
-        "tapo_user": esc(a.tapo_user) or "________", "tapo_pass": esc(a.tapo_pass) or "________________",
+        "code_raw": esc("".join(ch for ch in c["setup_code"] if ch.isalnum())),
         "app_link": esc(a.app_link) or "the link VIGIL sent you",
         "help": esc(a.help) or "contact the person who gave you VIGIL"}, secret=True)
     print("Setup card: %s  (open it in a browser and print)" % out)

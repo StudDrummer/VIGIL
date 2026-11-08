@@ -46,7 +46,8 @@ threading.Thread(target=site.serve_forever, daemon=True).start()
 
 os.makedirs(os.path.join(TMP, "config"))
 json.dump({"sites": [{"id": "home01", "name": "Nani - bedroom", "api_key": "sitekey", "ntfy_topic": "",
-                      "setup_code": "K7Q2-M9XD", "internal_url": "http://127.0.0.1:5099"}]},
+                      "setup_code": "K7Q2-M9XD", "internal_url": "http://127.0.0.1:5099",
+                      "relay_key_sha256": __import__("hashlib").sha256(b"streampass").hexdigest()}]},
           open(os.path.join(TMP, "config", "sites.json"), "w"))
 os.environ.update(VIGIL_CONFIG=os.path.join(TMP, "config"), VIGIL_DATA=os.path.join(TMP, "data"),
                   VIGIL_WATCHDOG="0", VIGIL_SMTP_HOST="127.0.0.1", VIGIL_SMTP_PORT="8025",
@@ -171,8 +172,23 @@ def test_members_and_account_deletion():
     assert r["my_role"] == "owner" and len(r["members"]) == 1, r                         # home passed to mom
 
 
+def test_relay_reports_setup_progress():
+    """SETUP_LIVE_V1: the box reports how far it got; only members can read it."""
+    tok = C.post("/auth/login", json={"email": "mom@example.com", "password": "good password"}).json["token"]
+    H = {"X-VIGIL-Key": tok}
+    assert C.get("/auth/site/home01/relay", headers=H).json["box_online"] is False
+    assert C.post("/relay/home01/status", json={"state": "no_camera"}, headers={"X-Relay-Key": "wrong"}).status_code == 403
+    assert C.post("/relay/home01/status", json={"state": "no_camera", "wifi": "Sharma Home", "signal_dbm": -61},
+                  headers={"X-Relay-Key": "streampass"}).json["status"] == "ok"
+    r = C.get("/auth/site/home01/relay", headers=H).json
+    assert r["box_online"] and r["state"] == "no_camera" and r["wifi"] == "Sharma Home" and r["signal_dbm"] == -61, r
+    other = C.post("/auth/signup", json={"email": "x@example.com", "password": "good password", "name": "X"}).json["token"]
+    assert C.get("/auth/site/home01/relay", headers={"X-VIGIL-Key": other}).status_code == 403
+
+
 if __name__ == "__main__":
     test_everything()
     test_members_and_account_deletion()
+    test_relay_reports_setup_progress()
     print("ok: %d emails sent" % len(MAIL))
     smtp.stop()

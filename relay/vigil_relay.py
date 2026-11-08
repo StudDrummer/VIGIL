@@ -94,7 +94,50 @@ class Light:
                 self._set(True); time.sleep(p[0]); self._set(False); time.sleep(p[1])
 
 
+_REPORT = {"last": 0.0, "state": None}
+
+
+def wifi_info():
+    try:
+        out = subprocess.run(["iw", "dev", "wlan0", "link"], capture_output=True, text=True, timeout=4).stdout
+        ssid = sig = None
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("SSID:"):
+                ssid = line.split(":", 1)[1].strip()
+            elif line.startswith("signal:"):
+                sig = int(float(line.split()[1]))
+        return ssid, sig
+    except Exception:
+        return None, None
+
+
+def report(kw):
+    """SETUP_LIVE_V1: tell VIGIL Cloud how far the box got, at most every 10 s
+    (at once when the state changes). Never blocks the relay."""
+    cfg = load_env()
+    host, key, cam = cfg.get("VIGIL_CLOUD_HOST"), cfg.get("VIGIL_STREAM_PASS"), cfg.get("VIGIL_CAMERA_ID")
+    now = time.time()
+    if not (host and key and cam) or (kw.get("state") == _REPORT["state"] and now - _REPORT["last"] < 10):
+        return
+    _REPORT.update(last=now, state=kw.get("state"))
+
+    def _go():
+        try:
+            import urllib.request
+            ssid, sig = wifi_info()
+            body = json.dumps({"state": kw.get("state"), "camera": kw.get("camera"), "mode": kw.get("mode"),
+                               "wifi": ssid, "signal_dbm": sig, "version": 2}).encode()
+            req = urllib.request.Request("https://%s/relay/%s/status" % (host, cam), data=body,
+                                         headers={"Content-Type": "application/json", "X-Relay-Key": key})
+            urllib.request.urlopen(req, timeout=8).read()
+        except Exception:
+            pass
+    threading.Thread(target=_go, daemon=True).start()
+
+
 def write_status(**kw):
+    report(kw)
     kw["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -424,6 +467,8 @@ def stream(cfg, ip, mode, light):
     last_err = ""
     while p.poll() is None:
         time.sleep(1)
+        if marked:
+            report({"state": "sending", "camera": ip, "mode": mode})
         if not marked and time.time() - t0 > 8:
             marked = True                      # still running after 8 s: the cloud accepted it
             light.state = "ok"

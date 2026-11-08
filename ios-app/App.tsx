@@ -19,7 +19,7 @@
  */
 
 import React, {useCallback, useEffect, useRef, useState} from 'react';
-import { Share, Linking,
+import { Share, Linking, NativeModules,
   ActivityIndicator,
   Alert,
   Animated,
@@ -387,8 +387,9 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
 }
 
 // ACCOUNTS_V1: add a camera to the account with the code printed on its card.
-function AddCameraCard({cfg,onAdded,onSkip}:{cfg:CloudCfg;onAdded:(cfg:CloudCfg,role?:string)=>void;onSkip?:()=>void}){
-  const [code,setCode]=useState('');
+function AddCameraCard({cfg,onAdded,onSkip,initialCode=''}:{cfg:CloudCfg;onAdded:(cfg:CloudCfg,role?:string)=>void;onSkip?:()=>void;initialCode?:string}){
+  const fmt=(t:string)=>{const c=t.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);return c.length>4?c.slice(0,4)+'-'+c.slice(4):c;};
+  const [code,setCode]=useState(fmt(initialCode));
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState<string|null>(null);
   const clean=code.toUpperCase().replace(/[^A-Z0-9]/g,'');
@@ -402,6 +403,8 @@ function AddCameraCard({cfg,onAdded,onSkip}:{cfg:CloudCfg;onAdded:(cfg:CloudCfg,
     }catch(e:any){setErr(e?.response?.data?.reason||'Could not add the camera. Check the internet connection.');}
     finally{setBusy(false);}
   };
+  const auto=useRef(false);
+  useEffect(()=>{if(!auto.current&&clean.length===8&&initialCode){auto.current=true;add();}},[]);   // scanned from the card: no typing
   return(
     <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
       <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>Add a camera</Text>
@@ -499,20 +502,137 @@ function AccountSection({cfg}:{cfg:CloudCfg}){
   );
 }
 
-// APP_SETUP_V1: the family sets up the box and camera from the VIGIL app alone.
+// APP_SETUP_V1 / SETUP_DELIGHT_V1: the family sets up the box and camera from the
+// VIGIL app alone, the way a new AirPods or iPhone pairs: the device is drawn and
+// moves, its light in the app blinks exactly like the real one, the phone joins
+// the box with one tap, a "found your box" card slides up, every connection
+// lights up as it really happens, and it ends on their own room, live.
 // The Tapo app is only used to put the camera on Wi-Fi (TP-Link allows nothing
-// else), and VIGIL hands them the exact camera account to type there. Then the
-// phone joins the box's own Wi-Fi and sends it the home Wi-Fi and that account.
+// else); VIGIL hands them the exact camera account to type there.
 const BOX_URL='http://10.42.0.1';
 const TAPO_APP='https://apps.apple.com/app/tp-link-tapo/id1472718009';
+const Hotspot:any=(NativeModules as any).VIGILHotspot;
 function genCamPass(){const a='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';let p='';for(let i=0;i<12;i++)p+=a[Math.floor(Math.random()*a.length)];return p;}
+
+type Led='double'|'slow'|'fast'|'steady'|'off';
+// The light on the drawing blinks in the same pattern as the real box.
+function useLed(mode:Led){
+  const v=useRef(new Animated.Value(mode==='steady'?1:0)).current;
+  useEffect(()=>{
+    const on=(d:number)=>Animated.timing(v,{toValue:1,duration:d,useNativeDriver:true});
+    const off=(d:number)=>Animated.timing(v,{toValue:0.08,duration:d,useNativeDriver:true});
+    const w=(d:number)=>Animated.delay(d);
+    let seq:Animated.CompositeAnimation|null=null;
+    if(mode==='double')seq=Animated.loop(Animated.sequence([on(80),w(120),off(80),w(120),on(80),w(120),off(80),w(800)]));
+    else if(mode==='slow')seq=Animated.loop(Animated.sequence([on(200),w(800),off(200),w(800)]));
+    else if(mode==='fast')seq=Animated.loop(Animated.sequence([on(60),w(180),off(60),w(180)]));
+    else v.setValue(mode==='steady'?1:0.08);
+    seq?.start();return()=>seq?.stop();
+  },[mode]);
+  return v;
+}
+function BoxArt({size=150,led='double'}:{size?:number;led?:Led}){
+  const glow=useLed(led);
+  const w=size,k=size/150,h=111*k;
+  return(
+    <View style={{width:w,height:h}}>
+      <Svg width={w} height={h} viewBox="0 0 150 111">
+        <Path d="M14 96 Q75 108 136 96" stroke="#000" strokeOpacity={0.5} strokeWidth={10} fill="none" strokeLinecap="round"/>
+        <Path d="M12 22 Q12 10 24 10 L126 10 Q138 10 138 22 L138 82 Q138 94 126 94 L24 94 Q12 94 12 82 Z" fill="#1C1C21"/>
+        <Path d="M12 22 Q12 10 24 10 L126 10 Q138 10 138 22 L138 30 L12 30 Z" fill="#26262D"/>
+        <Path d="M60 44 L75 72 L90 44" stroke="#32D74B" strokeWidth={7} fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+        <Circle cx={118} cy={80} r={4} fill="#0E3A16"/>
+      </Svg>
+      <Animated.View style={{position:'absolute',left:118*k-5*k,top:80*k-5*k,width:10*k,height:10*k,borderRadius:5*k,
+        backgroundColor:'#32D74B',opacity:glow,shadowColor:'#32D74B',shadowOpacity:1,shadowRadius:7*k,shadowOffset:{width:0,height:0}}}/>
+    </View>);
+}
+function CamArt({size=110}:{size?:number}){
+  return(
+    <Svg width={size} height={size*1.15} viewBox="0 0 100 115">
+      <Path d="M22 108 Q50 116 78 108" stroke="#000" strokeOpacity={0.5} strokeWidth={8} fill="none" strokeLinecap="round"/>
+      <Path d="M26 92 Q26 84 34 84 L66 84 Q74 84 74 92 L74 100 Q74 104 70 104 L30 104 Q26 104 26 100 Z" fill="#E9E9EE"/>
+      <Path d="M44 70 L56 70 L58 86 L42 86 Z" fill="#D4D4DA"/>
+      <Circle cx={50} cy={44} r={34} fill="#F4F4F7"/>
+      <Path d="M18 38 Q50 22 82 38 L82 52 Q50 66 18 52 Z" fill="#141418"/>
+      <Circle cx={50} cy={45} r={11} fill="#232329"/>
+      <Circle cx={50} cy={45} r={6.5} fill="#0A84FF" fillOpacity={0.55}/>
+      <Circle cx={47} cy={42} r={2} fill="#FFFFFF" fillOpacity={0.8}/>
+      <Circle cx={70} cy={45} r={2.2} fill="#32D74B"/>
+    </Svg>);
+}
+// Gentle turntable motion: the device turns a little and floats, like a product page.
+function Turntable({children,amount=22,still=false}:{children:any;amount?:number;still?:boolean}){
+  const t=useRef(new Animated.Value(0)).current;
+  const intro=useRef(new Animated.Value(0)).current;
+  useEffect(()=>{
+    Animated.spring(intro,{toValue:1,friction:6,tension:60,useNativeDriver:true}).start();
+    if(still)return;
+    const loop=Animated.loop(Animated.sequence([
+      Animated.timing(t,{toValue:1,duration:2600,useNativeDriver:true}),
+      Animated.timing(t,{toValue:0,duration:2600,useNativeDriver:true})]));
+    loop.start();return()=>loop.stop();
+  },[still]);
+  return(
+    <Animated.View style={{opacity:intro,transform:[{perspective:700},
+      {scale:intro.interpolate({inputRange:[0,1],outputRange:[0.6,1]})},
+      {rotateY:t.interpolate({inputRange:[0,1],outputRange:[`-${amount}deg`,`${amount}deg`]})},
+      {translateY:t.interpolate({inputRange:[0,0.5,1],outputRange:[0,-6,0]})}]}}>
+      {children}
+    </Animated.View>);
+}
+// Expanding rings behind the success check (the peak moment).
+function Burst({color=C.green}:{color?:string}){
+  const rings=[useRef(new Animated.Value(0)).current,useRef(new Animated.Value(0)).current,useRef(new Animated.Value(0)).current];
+  const pop=useRef(new Animated.Value(0)).current;
+  useEffect(()=>{
+    Animated.spring(pop,{toValue:1,friction:4,tension:80,useNativeDriver:true}).start();
+    rings.forEach((r,i)=>Animated.sequence([Animated.delay(i*180),Animated.timing(r,{toValue:1,duration:1100,useNativeDriver:true})]).start());
+  },[]);
+  return(
+    <View style={{width:180,height:180,alignItems:'center',justifyContent:'center'}}>
+      {rings.map((r,i)=>(
+        <Animated.View key={i} style={{position:'absolute',width:96,height:96,borderRadius:48,borderWidth:3,borderColor:color,
+          opacity:r.interpolate({inputRange:[0,1],outputRange:[0.7,0]}),transform:[{scale:r.interpolate({inputRange:[0,1],outputRange:[1,2]})}]}}/>))}
+      <Animated.View style={{width:96,height:96,borderRadius:48,backgroundColor:color,alignItems:'center',justifyContent:'center',transform:[{scale:pop}]}}>
+        <Svg width={52} height={52} viewBox="0 0 52 52"><Path d="M12 27 L22 37 L41 16" stroke="#000" strokeWidth={6} fill="none" strokeLinecap="round" strokeLinejoin="round"/></Svg>
+      </Animated.View>
+    </View>);
+}
+// One link in the live connection chain: a node that lights up when it is truly reached.
+function ChainNode({label,detail,state}:{label:string;detail?:string;state:'wait'|'work'|'ok'|'bad'}){
+  const pulse=useRef(new Animated.Value(0)).current;
+  useEffect(()=>{
+    if(state!=='work'){pulse.setValue(0);return;}
+    const l=Animated.loop(Animated.sequence([Animated.timing(pulse,{toValue:1,duration:700,useNativeDriver:true}),Animated.timing(pulse,{toValue:0,duration:700,useNativeDriver:true})]));
+    l.start();return()=>l.stop();
+  },[state]);
+  const col=state==='ok'?C.green:state==='bad'?C.orange:state==='work'?C.text:C.muted;
+  return(
+    <View style={{flexDirection:'row',alignItems:'center',paddingVertical:10}}>
+      <Animated.View style={{width:30,height:30,borderRadius:15,alignItems:'center',justifyContent:'center',marginRight:14,
+        backgroundColor:state==='ok'?C.green:'transparent',borderWidth:state==='ok'?0:2,borderColor:col,
+        opacity:state==='work'?pulse.interpolate({inputRange:[0,1],outputRange:[0.45,1]}):1}}>
+        {state==='ok'&&<Text style={{color:'#000',fontWeight:'900',fontSize:15}}>{'✓'}</Text>}
+        {state==='bad'&&<Text style={{color:C.orange,fontWeight:'900',fontSize:15}}>!</Text>}
+      </Animated.View>
+      <View style={{flex:1}}>
+        <Text style={{color:state==='wait'?C.muted:C.text,fontSize:16,fontWeight:'700'}}>{label}</Text>
+        {!!detail&&<Text style={{color:C.sub,fontSize:13,marginTop:2}}>{detail}</Text>}
+      </View>
+    </View>);
+}
+
 function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>void}){
-  const STEPS=['plug','tapo','box','wait'];
+  const STEPS=['plug','tapo','connect','live'];
   const [step,setStep]=useState(0);
   const [camPass,setCamPass]=useState('');
   const [code,setCode]=useState('');
   const [tapoDone,setTapoDone]=useState(false);
-  const [box,setBox]=useState<any>(null);            // /api/info while the phone is on the box's Wi-Fi
+  const [box,setBox]=useState<any>(null);
+  const [foundAt,setFoundAt]=useState(0);
+  const [joinTried,setJoinTried]=useState(false);
+  const [joinFailed,setJoinFailed]=useState(false);
   const [nets,setNets]=useState<{ssid:string;signal:number}[]>([]);
   const [ssid,setSsid]=useState('');
   const [manual,setManual]=useState(false);
@@ -520,168 +640,226 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
   const [showPw,setShowPw]=useState(false);
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState<string|null>(null);
-  const [waitS,setWaitS]=useState(0);
-  const [online,setOnline]=useState(false);
+  const [liveS,setLiveS]=useState(0);
+  const [relay,setRelay]=useState<any>(null);
+  const [first,setFirst]=useState<string|null>(null);
+  const [done,setDone]=useState(false);
+  const sheet=useRef(new Animated.Value(0)).current;
+  const fadeIn=useRef(new Animated.Value(0)).current;
   const KEY='vigil_box_setup_'+cfg.siteId;
   const site=cfg.sites.find(x=>x.id===cfg.siteId);
   const boxSsid=`VIGIL-${cfg.siteId}`;
   const boxPw=code.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
   const cur=STEPS[step];
+  const gh={timeout:8000,headers:{'X-VIGIL-Key':cfg.token}};
   useEffect(()=>{
+    applyCloudHeaders(cfg);
     AsyncStorage.getItem(KEY).then(v=>{const d=v?JSON.parse(v):{};setCamPass(d.camPass||genCamPass());if(d.step)setStep(Math.min(d.step,3));if(d.tapoDone)setTapoDone(true);}).catch(()=>setCamPass(genCamPass()));
-    axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/members`,{timeout:10000,headers:{'X-VIGIL-Key':cfg.token}}).then(r=>setCode(r.data?.setup_code||'')).catch(()=>{});
+    axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/members`,gh).then(r=>setCode(r.data?.setup_code||'')).catch(()=>{});
   },[]);
   const save=(patch:any)=>AsyncStorage.getItem(KEY).then(v=>AsyncStorage.setItem(KEY,JSON.stringify({...(v?JSON.parse(v):{}),camPass,...patch}))).catch(()=>{});
   const go=(n:number)=>{setErr(null);setStep(n);save({step:n,camPass,tapoDone});};
-  useEffect(()=>{                                    // find the box while on its Wi-Fi
-    if(cur!=='box')return;
+  // find the box while the phone is on its Wi-Fi
+  useEffect(()=>{
+    if(cur!=='connect')return;
     let alive=true;
     (async()=>{while(alive){
       try{const r=await axios.get(`${BOX_URL}/api/info`,{timeout:2500});
-        if(alive&&r.data?.box==='vigil-relay'){setBox(r.data);
-          if(!nets.length){const n=await axios.get(`${BOX_URL}/api/networks`,{timeout:4000});if(alive)setNets(n.data?.networks||[]);}}}
-      catch(_e){if(alive)setBox(null);}
-      await new Promise<void>(res=>setTimeout(()=>res(),2000));
+        if(alive&&r.data?.box==='vigil-relay'){
+          setBox((b:any)=>{if(!b){setFoundAt(Date.now());Animated.spring(sheet,{toValue:1,friction:8,tension:55,useNativeDriver:true}).start();}return r.data;});
+          if(!nets.length){try{const n=await axios.get(`${BOX_URL}/api/networks`,{timeout:4000});if(alive){const l=n.data?.networks||[];setNets(l);if(l[0]&&!ssid)setSsid(l[0].ssid);}}catch(_e){}}}}
+      catch(_e){}
+      await new Promise<void>(res=>setTimeout(()=>res(),1500));
     }})();
     return()=>{alive=false;};
   },[cur]);
-  useEffect(()=>{                                    // wait for the first picture to reach VIGIL Cloud
-    if(cur!=='wait')return;
+  const joinBox=async()=>{
+    setJoinTried(true);setJoinFailed(false);setErr(null);
+    if(!Hotspot?.join||!boxPw){setJoinFailed(true);return;}
+    try{await Hotspot.join(boxSsid,boxPw);}
+    catch(_e){setJoinFailed(true);}
+  };
+  // live progress from the box itself, then the first picture
+  useEffect(()=>{
+    if(cur!=='live')return;
     let alive=true;let n=0;
     (async()=>{while(alive){
-      try{const r=await axios.get(`${cfg.gateway}/auth/me`,{timeout:8000,headers:{'X-VIGIL-Key':cfg.token}});
-        const st=(r.data?.sites||[]).find((x:any)=>x.id===cfg.siteId);
-        if(alive&&st?.online){setOnline(true);AsyncStorage.removeItem(KEY).catch(()=>{});break;}}catch(_e){}
-      n+=5;if(alive)setWaitS(n);
-      await new Promise<void>(res=>setTimeout(()=>res(),5000));
+      try{const r=await axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/relay`,gh);if(alive)setRelay(r.data);
+        if(r.data?.site_online){
+          try{const f=await AX.get(`${cloudSiteUrl(cfg)}/camera/snapshot?w=800`,{timeout:8000});if(alive&&f.data?.frame)setFirst(f.data.frame);}catch(_e){}
+          if(alive){setDone(true);AsyncStorage.removeItem(KEY).catch(()=>{});Animated.timing(fadeIn,{toValue:1,duration:900,delay:500,useNativeDriver:true}).start();}
+          break;}}catch(_e){}
+      n+=3;if(alive)setLiveS(n);
+      await new Promise<void>(res=>setTimeout(()=>res(),3000));
     }})();
     return()=>{alive=false;};
   },[cur]);
   const send=async()=>{
     setBusy(true);setErr(null);
     try{
-      await axios.post(`${BOX_URL}/api/setup`,{code:boxPw,ssid:manual?ssid.trim():ssid,wifi_password:wpw,tapo_user:'vigil',tapo_pass:camPass},{timeout:8000});
-      setWaitS(0);setOnline(false);go(3);
-    }catch(e:any){setErr(e?.response?.data?.reason||'Could not reach the VIGIL box. Check this phone is on the '+boxSsid+' Wi-Fi.');}
+      await axios.post(`${BOX_URL}/api/setup`,{code:boxPw,ssid:ssid.trim(),wifi_password:wpw,tapo_user:'vigil',tapo_pass:camPass},{timeout:8000});
+      try{Hotspot?.leave?.(boxSsid);}catch(_e){}
+      setLiveS(0);setRelay(null);setDone(false);go(3);
+    }catch(e:any){setErr(e?.response?.data?.reason||`Could not reach the box. Check this phone is still on ${boxSsid}.`);}
     finally{setBusy(false);}
   };
   const copy=(t:string)=>Share.share({message:t}).catch(()=>{});
-  const H1=({t,sub}:{t:string;sub?:string})=>(<>
-    <Text style={{color:C.text,fontSize:27,fontWeight:'800',letterSpacing:-0.3}}>{t}</Text>
-    {!!sub&&<Text style={{color:C.sub,fontSize:16,marginTop:8,lineHeight:23}}>{sub}</Text>}</>);
-  const Num=({n,children}:{n:number;children:any})=>(
-    <View style={{flexDirection:'row',marginTop:14}}>
-      <View style={{width:26,height:26,borderRadius:13,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center',marginRight:12}}>
-        <Text style={{color:C.green,fontWeight:'800',fontSize:13}}>{n}</Text></View>
-      <View style={{flex:1}}>{children}</View></View>);
+  const Title=({t,sub}:{t:string;sub?:string})=>(<View style={{alignItems:'center',marginTop:6}}>
+    <Text style={{color:C.text,fontSize:28,fontWeight:'800',letterSpacing:-0.4,textAlign:'center'}}>{t}</Text>
+    {!!sub&&<Text style={{color:C.sub,fontSize:16,marginTop:8,lineHeight:23,textAlign:'center',maxWidth:340}}>{sub}</Text>}</View>);
   const Field=({label,value}:{label:string;value:string})=>(
-    <TouchableOpacity onPress={()=>copy(value)} style={{flexDirection:'row',alignItems:'center',marginTop:8,padding:12,borderRadius:10,backgroundColor:C.bg,borderWidth:1,borderColor:C.border}}>
+    <TouchableOpacity onPress={()=>copy(value)} style={{flexDirection:'row',alignItems:'center',marginTop:8,padding:12,borderRadius:12,backgroundColor:C.bg,borderWidth:1,borderColor:C.border}}>
       <Text style={{color:C.sub,fontSize:14,width:84}}>{label}</Text>
       <Text selectable style={{color:C.text,fontSize:18,fontWeight:'700',flex:1,letterSpacing:0.5}}>{value}</Text>
       <Text style={{color:C.blue,fontSize:14}}>Copy</Text></TouchableOpacity>);
+  const Step=({n,children}:{n:number;children:any})=>(
+    <View style={{flexDirection:'row',marginTop:16}}>
+      <View style={{width:26,height:26,borderRadius:13,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center',marginRight:12}}>
+        <Text style={{color:C.green,fontWeight:'800',fontSize:13}}>{n}</Text></View>
+      <View style={{flex:1}}>{children}</View></View>);
   const P=({children}:{children:any})=><Text style={{color:C.sub,fontSize:15,lineHeight:22}}>{children}</Text>;
+  const B=({children}:{children:any})=><Text style={{color:C.text,fontWeight:'700'}}>{children}</Text>;
+
+  // live chain states, all from what the box and cloud actually report
+  const sig=relay?.signal_dbm;
+  const sigTxt=sig==null?'':sig>=-60?'strong signal':sig>=-70?'good signal':'weak signal: move the box closer to the router';
+  const boxOk=!!relay?.box_online||done;
+  const camOk=done||relay?.state==='sending'||!!relay?.camera;
+  const wifiState:'wait'|'work'|'ok'|'bad'=boxOk?'ok':liveS>=90?'bad':'work';
+  const camState:'wait'|'work'|'ok'|'bad'=camOk?'ok':!boxOk?'wait':(relay?.state==='no_camera'&&liveS>=120)?'bad':'work';
+  const cloudState:'wait'|'work'|'ok'|'bad'=done?'ok':!camOk?'wait':relay?.state==='no_internet'?'bad':'work';
+
   const body=()=>{switch(cur){
     case 'plug':return(<>
-      <H1 t="Plug everything in" sub="Two pieces came in the box: the VIGIL box and the camera."/>
-      <Num n={1}><P><Text style={{color:C.text,fontWeight:'700'}}>The VIGIL box:</Text> plug it in near your Wi-Fi router. Its light starts blinking.</P></Num>
-      <Num n={2}><P><Text style={{color:C.text,fontWeight:'700'}}>The camera:</Text> plug it in where it will watch: high in a corner, seeing the floor from wall to wall.</P></Num>
-      <Num n={3}><P>Wait about 2 minutes, until the box light blinks twice, pauses, blinks twice. That means it is ready to be set up.</P></Num>
+      <View style={{flexDirection:'row',alignItems:'flex-end',justifyContent:'center',gap:18,marginTop:10,height:190}}>
+        <Turntable amount={18}><BoxArt size={150} led="double"/></Turntable>
+        <Turntable amount={14}><CamArt size={100}/></Turntable>
+      </View>
+      <Title t="Let's set up VIGIL" sub="Plug the box in near your Wi-Fi router, and the camera where it will watch."/>
+      <View style={[s.card,{marginTop:22}]}>
+        <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>When the box light blinks twice, pauses, blinks twice, like the drawing above, it is ready.</Text>
+        <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:20}}>About 2 minutes after plugging it in. Put the camera high in a corner, seeing the floor wall to wall.</Text>
+      </View>
     </>);
     case 'tapo':return(<>
-      <H1 t="Put the camera on Wi-Fi" sub="The camera's maker only lets its own app do this part. It takes about 5 minutes."/>
-      <Num n={1}><P>Install the free Tapo app and create a Tapo account.</P>
-        <TouchableOpacity onPress={()=>Linking.openURL(TAPO_APP)} style={{marginTop:6}}><Text style={{color:C.blue,fontSize:15}}>Get Tapo from the App Store</Text></TouchableOpacity></Num>
-      <Num n={2}><P>In Tapo tap <Text style={{color:C.text,fontWeight:'700'}}>+</Text>, add the camera, and follow its steps to connect it to your home Wi-Fi.</P></Num>
-      <Num n={3}><P>Open the camera in Tapo, tap the gear for Settings, then <Text style={{color:C.text,fontWeight:'700'}}>Advanced Settings, Camera Account</Text>. Type exactly these (tap to copy):</P>
+      <View style={{alignItems:'center',marginTop:6,height:130,justifyContent:'center'}}><Turntable amount={16}><CamArt size={96}/></Turntable></View>
+      <Title t="Wake up the camera" sub="The camera's maker lets only its own app put it on Wi-Fi. About 5 minutes, then you are back here."/>
+      <Step n={1}><P>Install <B>Tapo</B> and create a Tapo account.</P>
+        <TouchableOpacity onPress={()=>Linking.openURL(TAPO_APP)} style={{marginTop:6}}><Text style={{color:C.blue,fontSize:15,fontWeight:'600'}}>Get Tapo</Text></TouchableOpacity></Step>
+      <Step n={2}><P>Tap <B>+</B>, add the camera, and connect it to your home Wi-Fi.</P></Step>
+      <Step n={3}><P>Open the camera, tap the gear, then <B>Advanced Settings, Camera Account</B>. Use exactly these:</P>
         <Field label="Username" value="vigil"/>
-        <Field label="Password" value={camPass}/></Num>
-      <Num n={4}><P>In Tapo tap <Text style={{color:C.text,fontWeight:'700'}}>Me, Third-Party Services, Third-Party Compatibility</Text> and turn it on.</P></Num>
-      <Num n={5}><P>Recommended: camera Settings, <Text style={{color:C.text,fontWeight:'700'}}>Firmware Update</Text>, turn automatic updates off, so an update cannot interrupt VIGIL.</P></Num>
-      <TouchableOpacity onPress={()=>{setTapoDone(!tapoDone);save({tapoDone:!tapoDone});}} style={[s.card,{marginTop:18,flexDirection:'row',alignItems:'center'}]}>
+        <Field label="Password" value={camPass}/></Step>
+      <Step n={4}><P>In Tapo: <B>Me, Third-Party Services, Third-Party Compatibility</B>: on.</P></Step>
+      <Step n={5}><P>Recommended: camera settings, <B>Firmware Update</B>, automatic updates off.</P></Step>
+      <TouchableOpacity onPress={()=>{setTapoDone(!tapoDone);save({tapoDone:!tapoDone});}} style={[s.card,{marginTop:20,flexDirection:'row',alignItems:'center',borderWidth:2,borderColor:tapoDone?C.green:'transparent'}]}>
         <View style={{width:26,height:26,borderRadius:8,borderWidth:2,borderColor:tapoDone?C.green:C.muted,backgroundColor:tapoDone?C.green:'transparent',alignItems:'center',justifyContent:'center'}}>
           {tapoDone&&<Text style={{color:'#000',fontWeight:'900'}}>{'✓'}</Text>}</View>
-        <Text style={{color:C.text,fontSize:16,marginLeft:12,flex:1}}>The camera shows its picture in Tapo, and I typed the camera account</Text>
+        <Text style={{color:C.text,fontSize:16,marginLeft:12,flex:1}}>I can see the camera's picture in Tapo, and typed the camera account</Text>
       </TouchableOpacity>
     </>);
-    case 'box':return(<>
-      <H1 t="Connect the VIGIL box" sub={box?'Found your VIGIL box. Choose your home Wi-Fi.':'This phone joins the box for a moment to tell it your Wi-Fi.'}/>
+    case 'connect':return(<>
+      <View style={{alignItems:'center',marginTop:10,height:150,justifyContent:'center'}}><Turntable amount={box?0:20} still={!!box}><BoxArt size={160} led={box?'steady':'double'}/></Turntable></View>
       {!box?(<>
-        <Num n={1}><P>Open the iPhone <Text style={{color:C.text,fontWeight:'700'}}>Settings</Text> app, tap <Text style={{color:C.text,fontWeight:'700'}}>Wi-Fi</Text>, and choose:</P>
-          <Field label="Wi-Fi" value={boxSsid}/>
-          <Field label="Password" value={boxPw||'(your setup code)'}/></Num>
-        <Num n={2}><P>If the iPhone says the network has no internet, that is expected. Stay on it and come back to VIGIL.</P></Num>
-        <View style={{flexDirection:'row',alignItems:'center',marginTop:20}}>
-          <ActivityIndicator color={C.green}/><Text style={{color:C.sub,fontSize:15,marginLeft:10}}>Looking for the box...</Text></View>
-        <Text style={{color:C.muted,fontSize:13,marginTop:14,lineHeight:19}}>Not in the list? Check the box light blinks twice and pauses. If it is steady, the box already has Wi-Fi: go back and continue.</Text>
-      </>):(<>
-        {!!box.last_error&&<Text style={{color:C.orange,fontSize:15,marginTop:12,lineHeight:21}}>{box.last_error}</Text>}
-        <View style={[s.card,{marginTop:14,paddingVertical:4}]}>
-          {nets.slice(0,12).map(n=>(
+        <Title t="Connect to your VIGIL box" sub={`Your phone joins the box for a moment to give it your Wi-Fi.`}/>
+        {!joinFailed&&<TouchableOpacity onPress={joinBox} style={[s.btnPrimary,{marginTop:26,paddingVertical:18}]}>
+          <Text style={[s.btnPrimaryTxt,{fontSize:18}]}>{joinTried?'Try again':'Connect'}</Text></TouchableOpacity>}
+        {joinTried&&!joinFailed&&<View style={{flexDirection:'row',alignItems:'center',justifyContent:'center',marginTop:16}}>
+          <ActivityIndicator color={C.green}/><Text style={{color:C.sub,fontSize:15,marginLeft:10}}>Tap Join when your iPhone asks, then wait a moment.</Text></View>}
+        {joinFailed&&(<View style={[s.card,{marginTop:20}]}>
+          <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>Join it in Settings</Text>
+          <Step n={1}><P>Open <B>Settings</B>, <B>Wi-Fi</B>, and choose:</P>
+            <Field label="Wi-Fi" value={boxSsid}/>
+            <Field label="Password" value={boxPw||'(the setup code)'}/></Step>
+          <Step n={2}><P>If it says No Internet Connection, that is expected. Come back to VIGIL.</P></Step>
+          <View style={{flexDirection:'row',alignItems:'center',marginTop:16}}><ActivityIndicator color={C.green}/><Text style={{color:C.sub,fontSize:14,marginLeft:10}}>Looking for the box...</Text></View>
+        </View>)}
+        <Text style={{color:C.muted,fontSize:13,marginTop:18,lineHeight:19,textAlign:'center'}}>Box light steady instead of blinking twice? It already has Wi-Fi: tap Back and Continue.</Text>
+      </>):(<Animated.View style={{opacity:sheet,transform:[{translateY:sheet.interpolate({inputRange:[0,1],outputRange:[60,0]})}]}}>
+        <Title t="VIGIL box found" sub={`${site?.name||cfg.siteId} is ready. Choose your home Wi-Fi, the same one the camera uses.`}/>
+        {!!box.last_error&&<Text style={{color:C.orange,fontSize:15,marginTop:12,lineHeight:21,textAlign:'center'}}>{box.last_error}</Text>}
+        <View style={[s.card,{marginTop:18,paddingVertical:4}]}>
+          {nets.slice(0,10).map(n=>(
             <TouchableOpacity key={n.ssid} onPress={()=>{setSsid(n.ssid);setManual(false);}} style={{flexDirection:'row',alignItems:'center',paddingVertical:13,borderBottomWidth:1,borderBottomColor:C.hair}}>
+              <View style={{flexDirection:'row',alignItems:'flex-end',gap:2,marginRight:12}}>
+                {[0,1,2,3].map(i=><View key={i} style={{width:4,height:5+i*3,borderRadius:1,backgroundColor:n.signal>=i*25?(ssid===n.ssid&&!manual?C.green:C.sub):C.fill}}/>)}</View>
               <Text style={{color:C.text,fontSize:16,flex:1,fontWeight:ssid===n.ssid&&!manual?'700':'400'}}>{n.ssid}</Text>
-              <Text style={{color:C.muted,fontSize:12,marginRight:8}}>{n.signal>=70?'Strong':n.signal>=45?'Good':'Weak'}</Text>
-              {ssid===n.ssid&&!manual&&<Text style={{color:C.green,fontWeight:'900'}}>{'✓'}</Text>}
+              {ssid===n.ssid&&!manual&&<Text style={{color:C.green,fontWeight:'900',fontSize:16}}>{'✓'}</Text>}
             </TouchableOpacity>))}
           <TouchableOpacity onPress={()=>{setManual(true);setSsid('');}} style={{paddingVertical:13}}>
-            <Text style={{color:C.blue,fontSize:15}}>{nets.length?'My Wi-Fi is not listed':'Type the Wi-Fi name'}</Text></TouchableOpacity>
+            <Text style={{color:C.blue,fontSize:15}}>{nets.length?'Other network':'Type the Wi-Fi name'}</Text></TouchableOpacity>
         </View>
         {manual&&<TextInput value={ssid} onChangeText={setSsid} placeholder="Wi-Fi name, exactly" placeholderTextColor={C.muted} autoCapitalize="none" autoCorrect={false}
-          style={{color:C.text,fontSize:17,padding:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:10}}/>}
+          style={{color:C.text,fontSize:17,padding:14,backgroundColor:C.bg,borderRadius:12,borderWidth:1,borderColor:C.border,marginTop:10}}/>}
         {!!ssid&&<>
           <TextInput value={wpw} onChangeText={setWpw} placeholder={`Password for ${ssid}`} placeholderTextColor={C.muted} secureTextEntry={!showPw}
-            autoCapitalize="none" autoCorrect={false} style={{color:C.text,fontSize:17,padding:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:10}}/>
+            autoCapitalize="none" autoCorrect={false} returnKeyType="go" onSubmitEditing={()=>{if(!busy)send();}}
+            style={{color:C.text,fontSize:17,padding:14,backgroundColor:C.bg,borderRadius:12,borderWidth:1,borderColor:C.border,marginTop:10}}/>
           <TouchableOpacity onPress={()=>setShowPw(v=>!v)} style={{alignSelf:'flex-end',paddingTop:8}}><Text style={{color:C.sub,fontSize:13}}>{showPw?'Hide password':'Show password'}</Text></TouchableOpacity>
-          <Text style={{color:C.muted,fontSize:13,marginTop:6,lineHeight:19}}>Use the same Wi-Fi the camera is on.</Text>
-          <TouchableOpacity disabled={busy||!ssid.trim()} onPress={send} style={[s.btnPrimary,{marginTop:14,opacity:(busy||!ssid.trim())?0.5:1}]}>
-            {busy?<ActivityIndicator color="#000"/>:<Text style={s.btnPrimaryTxt}>Connect the box</Text>}</TouchableOpacity>
+          <TouchableOpacity disabled={busy} onPress={send} style={[s.btnPrimary,{marginTop:14,paddingVertical:18,opacity:busy?0.5:1}]}>
+            {busy?<ActivityIndicator color="#000"/>:<Text style={[s.btnPrimaryTxt,{fontSize:18}]}>Connect</Text>}</TouchableOpacity>
         </>}
-      </>)}
+      </Animated.View>)}
     </>);
     default:return(<>
-      <H1 t={online?'VIGIL can see':'Connecting'} sub={online?'The camera picture is reaching VIGIL. Next, tell VIGIL who lives here.':'The box is joining your Wi-Fi and looking for the camera. This phone goes back to your own Wi-Fi by itself.'}/>
-      <View style={{alignItems:'center',marginTop:30}}>
-        {online?(
-          <View style={{width:96,height:96,borderRadius:48,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}>
-            <Svg width={52} height={52} viewBox="0 0 52 52"><Path d="M12 27 L22 37 L41 16" stroke="#000" strokeWidth={6} fill="none" strokeLinecap="round" strokeLinejoin="round"/></Svg></View>
-        ):<ActivityIndicator size="large" color={C.green}/>}
-        {!online&&<Text style={{color:C.sub,fontSize:15,marginTop:16}}>{waitS<60?'Usually 1 to 3 minutes.':`${Math.floor(waitS/60)} min ${waitS%60} s`}</Text>}
-      </View>
-      {!online&&waitS>=180&&(
-        <View style={[s.card,{marginTop:24}]}>
-          <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>Taking longer than usual</Text>
-          <P>{'\n'}Box light blinking twice again: the Wi-Fi password was not right. Tap Try again.{'\n\n'}Light blinking slowly: the box cannot find the camera. Check the camera is on the same Wi-Fi in Tapo, and the camera account is exactly as shown on the camera step.{'\n\n'}Light blinking fast: the Wi-Fi has no internet right now.</P>
-          <TouchableOpacity onPress={()=>{setBox(null);setNets([]);go(2);}} style={[s.btnPrimary,{marginTop:12}]}><Text style={s.btnPrimaryTxt}>Try again</Text></TouchableOpacity>
-          <TouchableOpacity onPress={()=>go(1)} style={{paddingTop:12,alignItems:'center'}}><Text style={{color:C.blue,fontSize:15}}>See the camera step again</Text></TouchableOpacity>
-        </View>)}
+      {done?(<>
+        <View style={{alignItems:'center',marginTop:4}}><Burst/></View>
+        <Title t="VIGIL is watching over your home" sub="This is what it sees right now."/>
+        <Animated.View style={{opacity:fadeIn,transform:[{scale:fadeIn.interpolate({inputRange:[0,1],outputRange:[0.96,1]})}],
+          marginTop:18,borderRadius:16,overflow:'hidden',backgroundColor:'#000',aspectRatio:16/9}}>
+          {first?<Image source={{uri:`data:image/jpeg;base64,${first}`}} style={{width:'100%',height:'100%'}} resizeMode="cover"/>
+            :<View style={{flex:1,alignItems:'center',justifyContent:'center'}}><ActivityIndicator color={C.green}/></View>}
+        </Animated.View>
+        <Text style={{color:C.sub,fontSize:14,marginTop:12,textAlign:'center',lineHeight:20}}>Next: tell VIGIL who lives here.</Text>
+      </>):(<>
+        <View style={{flexDirection:'row',alignItems:'flex-end',justifyContent:'center',gap:18,marginTop:6,height:150}}>
+          <Turntable amount={10}><BoxArt size={120} led={boxOk?(camOk?'steady':'slow'):'double'}/></Turntable>
+          <Turntable amount={10}><CamArt size={80}/></Turntable>
+        </View>
+        <Title t="Bringing VIGIL online" sub="Each step lights up as it happens. Your phone goes back to your own Wi-Fi by itself."/>
+        <View style={[s.card,{marginTop:20,paddingVertical:6}]}>
+          <ChainNode label="Box joins your Wi-Fi" state={wifiState}
+            detail={boxOk?[relay?.wifi,sigTxt].filter(Boolean).join(', '):wifiState==='bad'?'Not online yet. The Wi-Fi password may be wrong.':'Joining...'}/>
+          <ChainNode label="Box finds the camera" state={camState}
+            detail={camOk?'Found it':camState==='bad'?'Cannot find the camera. Check it is on the same Wi-Fi in Tapo, with the camera account exactly as shown.':boxOk?'Looking on your Wi-Fi...':undefined}/>
+          <ChainNode label="Video reaches VIGIL" state={cloudState}
+            detail={cloudState==='bad'?'Your Wi-Fi has no internet right now.':camOk?'Connecting securely...':undefined}/>
+        </View>
+        {(wifiState==='bad'||camState==='bad')&&(
+          <View style={{marginTop:14}}>
+            {wifiState==='bad'&&<TouchableOpacity onPress={()=>{setBox(null);setNets([]);setJoinTried(false);setJoinFailed(false);sheet.setValue(0);go(2);}} style={s.btnPrimary}>
+              <Text style={s.btnPrimaryTxt}>Choose the Wi-Fi again</Text></TouchableOpacity>}
+            {camState==='bad'&&<TouchableOpacity onPress={()=>go(1)} style={s.btnPrimary}><Text style={s.btnPrimaryTxt}>See the camera steps again</Text></TouchableOpacity>}
+          </View>)}
+      </>)}
     </>);
   }};
-  const canNext=cur==='tapo'?tapoDone:cur==='wait'?online:cur!=='box';
+  const canNext=cur==='tapo'?tapoDone:cur==='live'?done:cur!=='connect';
+  const doneSteps=['Account','Camera code'];
   return(
     <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
       <StatusBar barStyle="light-content"/>
       <View style={{paddingHorizontal:20,paddingTop:12}}>
         <View style={{flexDirection:'row',gap:4}}>
-          {STEPS.map((_,i)=><View key={i} style={{flex:1,height:4,borderRadius:2,backgroundColor:i<=step?C.green:C.fill}}/>)}
+          {[...doneSteps,...STEPS].map((_,i)=><View key={i} style={{flex:1,height:4,borderRadius:2,backgroundColor:i<doneSteps.length+step+(done?1:0)?C.green:C.fill}}/>)}
         </View>
-        <Text style={{color:C.muted,fontSize:13,marginTop:6}}>{site?.name||'Your camera'}</Text>
       </View>
       <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
         <ScrollView contentContainerStyle={{padding:20,paddingBottom:24}} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
           {body()}
-          {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:14,lineHeight:20}}>{err}</Text>}
-          {cur!=='wait'&&<TouchableOpacity onPress={onSkip} style={{alignItems:'center',paddingTop:22}}>
-            <Text style={{color:C.muted,fontSize:14}}>The box and camera are already working</Text></TouchableOpacity>}
+          {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:14,lineHeight:20,textAlign:'center'}}>{err}</Text>}
+          {cur!=='live'&&<TouchableOpacity onPress={onSkip} style={{alignItems:'center',paddingTop:24}}>
+            <Text style={{color:C.muted,fontSize:14}}>My box and camera are already working</Text></TouchableOpacity>}
         </ScrollView>
-        {cur!=='box'&&<View style={{flexDirection:'row',gap:12,paddingHorizontal:20,paddingTop:8,paddingBottom:28}}>
-          {step>0&&cur!=='wait'&&<TouchableOpacity onPress={()=>go(step-1)} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
+        {(cur!=='connect'||!box)&&<View style={{flexDirection:'row',gap:12,paddingHorizontal:20,paddingTop:8,paddingBottom:28}}>
+          {step>0&&!done&&<TouchableOpacity onPress={()=>{if(cur==='live'){setBox(null);setNets([]);sheet.setValue(0);}go(step-1);}} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
             <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text></TouchableOpacity>}
-          <TouchableOpacity disabled={!canNext} onPress={cur==='wait'?onDone:()=>go(step+1)}
+          {cur!=='connect'&&<TouchableOpacity disabled={!canNext} onPress={cur==='live'?onDone:()=>go(step+1)}
             style={[s.btnPrimary,{flex:2,paddingVertical:17},!canNext&&{backgroundColor:C.fill,shadowOpacity:0}]}>
-            <Text style={{color:canNext?'#000':C.muted,fontWeight:'700',fontSize:17}}>{cur==='wait'?(online?'Continue':'Waiting for the camera...'):'Continue'}</Text>
-          </TouchableOpacity>
+            <Text style={{color:canNext?'#000':C.muted,fontWeight:'700',fontSize:17}}>
+              {cur==='plug'?'It is blinking':cur==='live'?(done?'Continue':'Connecting...'):'Continue'}</Text>
+          </TouchableOpacity>}
         </View>}
-        {cur==='box'&&<TouchableOpacity onPress={()=>go(1)} style={{alignItems:'center',paddingBottom:28,paddingTop:8}}>
-          <Text style={{color:C.sub,fontSize:16}}>Back</Text></TouchableOpacity>}
       </KeyboardAvoidingView>
     </SafeAreaView>);
 }
@@ -1073,10 +1251,11 @@ const OBField = ({label,value,onChange,placeholder,keyboard='default',note}:any)
   </View>
 );
 
-function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:CloudCfg)=>void}) {
+function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onCloud?:(cfg:CloudCfg)=>void;pendingCode?:string|null}) {
   // SIMPLE_SETUP_V1: most people only sign in. The local monitoring-unit
   // setup is still here, one tap away, and down to three short screens.
-  const [mode,setMode]             = useState<'choose'|'cloud'|'local'>('choose');
+  const [mode,setMode]             = useState<'choose'|'cloud'|'local'>(pendingCode?'cloud':'choose');
+  useEffect(()=>{if(pendingCode)setMode(m=>m==='choose'?'cloud':m);},[pendingCode]);   // APP_SETUP_V1: opened from the card's QR code
   const [step,setStep]             = useState(1);
   const [residentName,setRN]       = useState('');
   const [dob,setDOB]               = useState('');
@@ -1384,10 +1563,15 @@ function OnboardingScreen({onComplete,onDemo,onCloud}:OBProps&{onCloud?:(cfg:Clo
                 Tells you right away if someone falls. Nothing to wear, nothing to press.
               </Text>
             </View>
+            {mode==='cloud'&&!!pendingCode&&!pendingCloud&&(
+              <View style={{marginHorizontal:16,padding:14,borderRadius:14,backgroundColor:C.green+'18',borderWidth:1,borderColor:C.green+'55'}}>
+                <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Setting up your VIGIL camera</Text>
+                <Text style={{color:C.sub,fontSize:14,marginTop:4,lineHeight:20}}>Code {pendingCode.slice(0,4)}-{pendingCode.slice(4)} is ready. Create your account and VIGIL adds the camera for you.</Text>
+              </View>)}
             {mode==='cloud'?(
               <>
                 {pendingCloud?(
-                  <AddCameraCard cfg={pendingCloud}
+                  <AddCameraCard cfg={pendingCloud} initialCode={pendingCode||''}
                     onAdded={(cfg,role)=>{setPendingCloud(null);
                       // HOME_SETUP_V1: the first person sets up the whole home; family who join later choose their alerts.
                       AsyncStorage.setItem('vigil_home_setup_role',JSON.stringify({siteId:cfg.siteId,role:role||'owner'})).catch(()=>{});
@@ -3404,6 +3588,19 @@ export default function App() {
   // ── Boot state ──
   const [booting,setBooting]           = useState(true);
   const [showOnboarding,setOnboarding] = useState(false);
+  const [pendingCode,setPendingCode]   = useState<string|null>(null);   // APP_SETUP_V1: vigil://setup?code=XXXXXXXX
+  useEffect(()=>{
+    const take=(url:string|null)=>{
+      const m=(url||'').match(/^vigil:\/\/setup\?(?:.*&)?code=([A-Za-z0-9-]{8,9})/);
+      if(!m)return;
+      const c=m[1].replace(/-/g,'').toUpperCase();
+      setPendingCode(c);AsyncStorage.setItem('vigil_pending_code',c).catch(()=>{});
+    };
+    Linking.getInitialURL().then(take).catch(()=>{});
+    AsyncStorage.getItem('vigil_pending_code').then(c=>{if(c)setPendingCode(c);}).catch(()=>{});
+    const sub=Linking.addEventListener('url',e=>take(e.url));
+    return()=>sub.remove();
+  },[]);
   const [demoMode,setDemoMode]         = useState(false);
 
   // ── Connection ──
@@ -5059,8 +5256,8 @@ export default function App() {
 
   if(showOnboarding){
     return(
-      <OnboardingScreen onDemo={()=>{setOnboarding(false);enterDemo();}}
-        onCloud={cfg=>{enterCloud(cfg);setOnboarding(false);
+      <OnboardingScreen pendingCode={pendingCode} onDemo={()=>{setOnboarding(false);enterDemo();}}
+        onCloud={cfg=>{enterCloud(cfg);setOnboarding(false);setPendingCode(null);AsyncStorage.removeItem('vigil_pending_code').catch(()=>{});
           // HOME_SETUP_V1: pick up the profile and watch choice the setup just saved
           Promise.all([AsyncStorage.getItem(SK_PROFILE),AsyncStorage.getItem(SK_WATCH_OWNER)]).then(([ps,wo])=>{
             setWatchOwnerS(wo||null);

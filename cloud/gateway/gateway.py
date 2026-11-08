@@ -17,6 +17,7 @@ Config:  $VIGIL_CONFIG/sites.json  (written by vigilctl.py)
 Data:    $VIGIL_DATA/gateway.db    (users, tokens, grants, audit log)
 """
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -556,6 +557,37 @@ def site_member_make_owner(site_id, uid):
     db().commit()
     audit("owner_added:%d" % uid, site_id=site_id)
     return jsonify({"status": "ok"})
+
+
+# SETUP_LIVE_V1: the relay box says how far it got (Wi-Fi, camera found,
+# sending), so the app can show real progress while the family sets it up.
+_RELAY = {}
+
+
+@app.route("/relay/<site_id>/status", methods=["POST"])
+def relay_status_post(site_id):
+    s_ = sites().get(site_id)
+    key = request.headers.get("X-Relay-Key", "")
+    want = (s_ or {}).get("relay_key_sha256")
+    if not s_ or not want or not hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), want):
+        return jsonify({"status": "error"}), 403
+    body = request.get_json(silent=True) or {}
+    _RELAY[site_id] = {k: body.get(k) for k in ("state", "camera", "mode", "wifi", "signal_dbm", "version")}
+    _RELAY[site_id]["at"] = time.time()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/auth/site/<site_id>/relay")
+@require_user
+def relay_status_get(site_id):
+    if not (_role(site_id) or g.is_admin):
+        return jsonify({"status": "error", "reason": "not your camera"}), 403
+    r = dict(_RELAY.get(site_id) or {})
+    age = time.time() - r["at"] if r.get("at") else None
+    st = _STATUS.get(site_id, {})
+    return jsonify({"status": "ok", "box_online": age is not None and age < 45, "box_age_s": age,
+                    "state": r.get("state"), "camera": r.get("camera"), "wifi": r.get("wifi"),
+                    "signal_dbm": r.get("signal_dbm"), "site_online": bool(st.get("online"))})
 
 
 # ACCOUNT_DELETE_V1 (App Store 5.1.1(v)): delete the account from inside the app.
