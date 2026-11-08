@@ -3025,13 +3025,15 @@ def persons_in_view():
         return jsonify({"people": [], "identifying": 0, "fresh": False})
     conn = get_db()
     people, seen = [], set()
-    for pid in ids:
+    tids_all = d.get("tids") or []
+    for i, pid in enumerate(ids):
         if not pid or pid in seen:
             continue
         seen.add(pid)
         row = conn.execute("SELECT name, is_resident FROM persons WHERE id=?", (pid,)).fetchone()
         people.append({"id": pid, "name": (row["name"] if row else None) or None,
-                       "is_resident": int(row["is_resident"] or 0) if row else 0})
+                       "is_resident": int(row["is_resident"] or 0) if row else 0,
+                       "track": tids_all[i] if i < len(tids_all) else None})   # WHO_SHEET_V1: correct this exact body
     conn.close()
     labels = d.get("labels") or []
     tids = d.get("tids") or []

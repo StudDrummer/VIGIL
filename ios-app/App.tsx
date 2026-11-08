@@ -1346,6 +1346,69 @@ const fmtHeight=(cm:number|null|undefined,units:'us'|'metric')=>{
 // camera; the caregiver names them (or confirms the name VIGIL shows). Each tap
 // teaches every identity cue: face, build, height, walk and clothing. Offered
 // once after setup, and any time from Settings, Camera.
+// WHO_SHEET_V1: "Who is this?" for one body the camera sees right now. It
+// corrects that exact track (not everything filed under the wrong name), and
+// can create someone new. Used on Today and in Introduce everyone.
+function WhoIsThisSheet({serverUrl,track,current,people,onDone,onClose}:
+  {serverUrl:string;track:number|null;current:{id:string;name:string|null}|null;
+   people:{id:string;name:string|null}[];onDone:(p:{id:string;name:string},track:number|null)=>void;onClose:()=>void}){
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState<string|null>(null);
+  const [newName,setNewName]=useState('');
+  const [adding,setAdding]=useState(false);
+  const named=people.filter(p=>!!p.name&&p.id!==current?.id);
+  const pick=async(p:{id:string;name:string|null})=>{
+    setBusy(true);setErr(null);
+    try{
+      if(current&&p.id===current.id)await AX.post(`${serverUrl}/persons/${p.id}/confirm`,{},{timeout:8000});
+      else if(track!=null)await AX.post(`${serverUrl}/tracks/${track}/assign`,{target_person_id:p.id},{timeout:8000});
+      else if(current)await AX.post(`${serverUrl}/persons/${current.id}/correct`,{target_person_id:p.id},{timeout:8000});
+      onDone({id:p.id,name:p.name||'them'},track);
+    }catch(e:any){setErr(e?.response?.data?.reason||'Could not reach the camera. Try again.');}
+    finally{setBusy(false);}
+  };
+  const createNew=async()=>{
+    const n=newName.trim();if(!n||track==null)return;
+    setBusy(true);setErr(null);
+    try{const r=await AX.post(`${serverUrl}/tracks/${track}/new`,{name:n,is_resident:false},{timeout:8000});
+      onDone({id:r.data?.person_id,name:n},track);}
+    catch(e:any){setErr(e?.response?.data?.reason||'Could not reach the camera. Try again.');}
+    finally{setBusy(false);}
+  };
+  const row=(p:{id:string;name:string|null},label:string,primary=false)=>(
+    <TouchableOpacity key={p.id+label} disabled={busy} onPress={()=>pick(p)}
+      style={{flexDirection:'row',alignItems:'center',padding:12,borderRadius:12,marginTop:8,backgroundColor:primary?C.green+'22':C.fill,opacity:busy?0.5:1}}>
+      <PersonAvatar personId={p.id} name={p.name} serverUrl={serverUrl} size={36}/>
+      <Text style={{color:C.text,fontSize:16,fontWeight:'600',marginLeft:12,flex:1}}>{label}</Text>
+    </TouchableOpacity>);
+  return(
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView style={{flex:1,justifyContent:'flex-end',backgroundColor:'#000A'}} behavior={Platform.OS==='ios'?'padding':undefined}>
+        <View style={{backgroundColor:C.card,borderTopLeftRadius:20,borderTopRightRadius:20,padding:20,paddingBottom:36,maxHeight:'85%'}}>
+          <Text style={{color:C.text,fontSize:21,fontWeight:'800'}}>{current?.name?`Is this ${current.name}?`:'Who is this?'}</Text>
+          <Text style={{color:C.sub,fontSize:14,marginTop:4,lineHeight:20}}>Only this person on the camera is changed. VIGIL learns from your answer.</Text>
+          <ScrollView style={{marginTop:6}} keyboardShouldPersistTaps="handled">
+            {current?.name&&row(current,`Yes, this is ${current.name}`,true)}
+            {current?.name&&named.length>0&&<Text style={{color:C.muted,fontSize:13,marginTop:14}}>No, it is:</Text>}
+            {named.map(p=>row(p,p.name||'?'))}
+            {track!=null&&(adding?(
+              <View style={{marginTop:10}}>
+                <TextInput value={newName} onChangeText={setNewName} placeholder="Their name" placeholderTextColor={C.muted} autoFocus autoCapitalize="words"
+                  style={{color:C.text,fontSize:17,padding:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border}}/>
+                <TouchableOpacity disabled={busy||!newName.trim()} onPress={createNew} style={[s.btnPrimary,{marginTop:10,opacity:(busy||!newName.trim())?0.5:1}]}>
+                  <Text style={s.btnPrimaryTxt}>Save {newName.trim()||'new person'}</Text></TouchableOpacity>
+              </View>
+            ):(
+              <TouchableOpacity onPress={()=>setAdding(true)} style={{padding:14,borderRadius:12,marginTop:8,borderWidth:1.5,borderStyle:'dashed',borderColor:C.green,alignItems:'center'}}>
+                <Text style={{color:C.green,fontSize:16,fontWeight:'700'}}>+ Someone new</Text></TouchableOpacity>))}
+          </ScrollView>
+          {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:10}}>{err}</Text>}
+          <TouchableOpacity onPress={onClose} style={{alignItems:'center',paddingTop:16}}><Text style={{color:C.sub,fontSize:16}}>Cancel</Text></TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>);
+}
+
 // ENROLL_V1: after someone is named, VIGIL keeps reading them (face, clothing from
 // every side, build, height, walk) and only shows the check once it really has them.
 const EN_PARTS:[string,string][]=[['face','Face'],['front','Clothing, front'],['side','Clothing, side'],
@@ -1353,7 +1416,7 @@ const EN_PARTS:[string,string][]=[['face','Face'],['front','Clothing, front'],['
 const EN_STAGES:[string,string][]=[['still','Stand still'],['turn','Turn around'],['walk','Walk']];
 function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
   {serverUrl:string;personId:string;personName:string;track:number|null;frame:string|null;
-   onDone:(learned:string[])=>void;onCancel:()=>void}){
+   onDone:(learned:string[],another:boolean)=>void;onCancel:()=>void}){
   const [st,setSt]=useState<any>(null);
   const [err,setErr]=useState<string|null>(null);
   const keyRef=useRef<string|null>(null);
@@ -1385,7 +1448,7 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
     return()=>{alive=false;};
   },[serverUrl,personId,track]);
   const cancel=()=>{AX.post(`${serverUrl}/enroll/stop`,{},{timeout:5000}).catch(()=>{});onCancel();};
-  const finish=()=>{AX.post(`${serverUrl}/enroll/stop`,{},{timeout:5000}).catch(()=>{});onDone(st?.learned||[]);};
+  const finish=(another:boolean)=>{AX.post(`${serverUrl}/enroll/stop`,{},{timeout:5000}).catch(()=>{});onDone(st?.learned||[],another);};
   const R=86,SW=10,CIRC=2*Math.PI*R;
   const prog=Math.max(0,Math.min(1,st?.progress??0));
   const parts=st?.parts||{};
@@ -1462,11 +1525,14 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
             <Text style={{color:C.muted,fontSize:13,marginTop:10,lineHeight:19,alignSelf:'flex-start'}}>
               Not fully seen: {missing.join(', ')}. That is fine: VIGIL fills it in as {personName} moves around.
             </Text>)}
-          {done?(
-            <TouchableOpacity onPress={finish} style={[s.btnPrimary,{marginTop:22,alignSelf:'stretch'}]}>
-              <Text style={s.btnPrimaryTxt}>Next person</Text>
+          {done?(<>
+            <TouchableOpacity onPress={()=>finish(false)} style={[s.btnPrimary,{marginTop:22,alignSelf:'stretch'}]}>
+              <Text style={s.btnPrimaryTxt}>Save</Text>
             </TouchableOpacity>
-          ):(
+            <TouchableOpacity onPress={()=>finish(true)} style={{marginTop:12,alignSelf:'stretch',padding:15,borderRadius:14,borderWidth:1,borderColor:C.green,alignItems:'center'}}>
+              <Text style={{color:C.green,fontSize:16,fontWeight:'700'}}>Save and introduce someone else</Text>
+            </TouchableOpacity>
+          </>):(
             <TouchableOpacity onPress={cancel} style={{marginTop:22,padding:12}}>
               <Text style={{color:C.sub,fontSize:15}}>Stop. {personName} stays named, VIGIL learns more over time.</Text>
             </TouchableOpacity>)}
@@ -1476,7 +1542,8 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
 }
 
 function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'metric';onClose:()=>void}){
-  const [named,setNamed]=useState<{id:string;name:string|null}[]>([]);
+  const [named,setNamed]=useState<{id:string;name:string|null;track?:number|null}[]>([]);
+  const [who,setWho]=useState<{track:number|null;current:{id:string;name:string|null}|null}|null>(null);   // WHO_SHEET_V1
   const [others,setOthers]=useState<{label:string;track:number|null}[]>([]);
   const [everyone,setEveryone]=useState<{id:string;name:string|null;height_cm?:number|null}[]>([]);
   const [done,setDone]=useState<string[]>([]);
@@ -1512,10 +1579,10 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
     const a=setInterval(tick,1500),b=setInterval(loadAll,8000);
     return()=>{alive=false;clearInterval(a);clearInterval(b);};
   },[serverUrl]);
-  const learned=(n:string)=>{setDone(d=>d.includes(n)?d:[...d,n]);setMsg(`Learned ${n}. Next person, or Done.`);};
+  const learned=(n:string)=>{setDone(d=>d.includes(n)?d:[...d,n]);setMsg(`Saved ${n}. Next person, or Save.`);};
   const confirm=async(p:{id:string;name:string|null})=>{
     setBusy(true);
-    try{await AX.post(`${serverUrl}/persons/${p.id}/confirm`,{},{timeout:8000});setMsg(null);setEnrolling({id:p.id,name:p.name||'them',track:null});}
+    try{await AX.post(`${serverUrl}/persons/${p.id}/confirm`,{},{timeout:8000});setMsg(null);setEnrolling({id:p.id,name:p.name||'them',track:(p as any).track??null});}
     catch(_e){setMsg('Could not reach the camera. Try again.');}
     finally{setBusy(false);}
   };
@@ -1546,8 +1613,12 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
   const inp={color:C.text,fontSize:16,paddingHorizontal:12,paddingVertical:12,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
   return(
     <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
+      {who&&<WhoIsThisSheet serverUrl={serverUrl} track={who.track} current={who.current}
+        people={everyone} onClose={()=>setWho(null)}
+        onDone={(p,t)=>{setWho(null);setEnrolling({id:p.id,name:p.name,track:t});}}/>}
       {enrolling&&<EnrollRing serverUrl={serverUrl} personId={enrolling.id} personName={enrolling.name} track={enrolling.track}
-        frame={frame} onDone={()=>{const n=enrolling.name;setEnrolling(null);learned(n);}}
+        frame={frame} onDone={(_l,another)=>{const n=enrolling.name;setEnrolling(null);learned(n);
+          if(another)setMsg(`Saved ${n}. Next person: stand in front of the camera, then tap their name below.`);else onClose();}}
         onCancel={()=>{const n=enrolling.name;setEnrolling(null);setDone(d=>d.includes(n)?d:[...d,n]);setMsg(`${n} is named. VIGIL keeps learning them over time.`);}}/>}
       <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
       <ScrollView contentContainerStyle={{padding:20,paddingBottom:60}} keyboardShouldPersistTaps="handled">
@@ -1579,7 +1650,7 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
             <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>VIGIL thinks this is {p.name}</Text>
             <View style={{flexDirection:'row',flexWrap:'wrap'}}>
               {chip(`Yes, ${p.name}`,()=>confirm(p),true)}
-              {chip('No, someone else',()=>setMsg(`Tap ${p.name} in the In view now list on Today, choose who it is.`))}
+              {chip('No, someone else',()=>{setMsg(null);setWho({track:p.track??null,current:p});})}
             </View>
           </View>))}
         {others.map((o,i)=>(
@@ -1606,7 +1677,7 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
           </View>))}
         {done.length>0&&<Text style={{color:C.sub,fontSize:14,marginTop:16}}>Learned so far: {done.join(', ')}</Text>}
         <TouchableOpacity onPress={onClose} style={[s.btnPrimary,{marginTop:24}]}>
-          <Text style={s.btnPrimaryTxt}>{done.length?'Done':'Skip for now'}</Text>
+          <Text style={s.btnPrimaryTxt}>{done.length?'Save':'Skip for now'}</Text>
         </TouchableOpacity>
         <Text style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:10}}>You can do this any time: Settings, Camera, Introduce everyone.</Text>
       </ScrollView>
@@ -3255,7 +3326,8 @@ export default function App() {
     }catch(_e){}
   },[]);
   // IN_VIEW_LIVE_V1: exactly who is in the camera picture right now.
-  const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number}[]>([]);
+  const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number;track?:number|null}[]>([]);
+  const [whoToday,setWhoToday]=useState<{track:number|null;current:{id:string;name:string|null}|null}|null>(null);   // WHO_SHEET_V1
   const [identifying,setIdentifying]=useState(0);
   // IDENTITY_V6_APP
   const [inViewOthers,setInViewOthers]=useState<{label:string;track:number|null}[]>([]);
@@ -4019,27 +4091,9 @@ export default function App() {
                 {inView.map(p=>(
                   <TouchableOpacity key={p.id} activeOpacity={0.7}
                     onPress={()=>{
-                      // CORRECT_PERSON_V1: fix a wrong name on the spot.
-                      const others=persons.filter(o=>!!o.name&&o.id!==p.id);
-                      if(!p.name){
-                        if(others.length===0)return;
-                        Alert.alert('Who is this?','VIGIL will remember this look for them.',[
-                          ...others.slice(0,6).map(o=>({text:`Same as ${o.name}`,onPress:()=>mergePerson(p.id,o.id)})),
-                          {text:'Cancel',style:'cancel' as const},
-                        ]);
-                        return;
-                      }
-                      Alert.alert(`Is this ${p.name}?`,'Confirm to help VIGIL remember this look, or choose who it really is.',[
-                        {text:`Yes, this is ${p.name}`,onPress:()=>{
-                          AX.post(`${urlRef.current||FALLBACK_URL}/persons/${p.id}/confirm`,{},{timeout:8000}).catch(()=>{});
-                        }},
-                        ...others.slice(0,5).map(o=>({text:`No, this is ${o.name}`,onPress:()=>{
-                          AX.post(`${urlRef.current||FALLBACK_URL}/persons/${p.id}/correct`,{target_person_id:o.id},{timeout:8000})
-                            .then(()=>{setTimeout(()=>fetchPersons(),3500);})
-                            .catch(()=>Alert.alert('Could not send the correction','Check the connection to the camera unit.'));
-                        }})),
-                        {text:'Cancel',style:'cancel' as const},
-                      ]);
+                      // WHO_SHEET_V1: fix a wrong name on the spot, for this exact person on camera.
+                      const tr=inViewList.find(v=>v.id===p.id)?.track??null;
+                      setWhoToday({track:tr,current:{id:p.id,name:p.name}});
                     }}
                     style={{flexDirection:'row',alignItems:'center',gap:8,paddingLeft:5,paddingRight:14,paddingVertical:5,borderRadius:30,
                     backgroundColor:p.name?C.green+'18':C.card,borderWidth:1.5,borderColor:p.name?C.green+'66':C.border}}>
@@ -4049,18 +4103,7 @@ export default function App() {
                 ))}
                 {(inViewOthers.length?inViewOthers:Array.from({length:identifying},()=>({label:'Identifying...',track:null}))).map((o,i)=>(
                   <TouchableOpacity key={'o'+i} activeOpacity={0.7}
-                    onPress={()=>{
-                      if(o.track==null)return;
-                      const named=persons.filter(x=>!!x.name);
-                      if(!named.length)return;
-                      Alert.alert(o.label&&o.label.startsWith('Not sure ')?`Who is ${o.label}?`:'Who is this?','VIGIL will name them now and learn their face, build, height and walk.',[
-                        ...named.slice(0,6).map(x=>({text:`This is ${x.name}`,onPress:()=>{
-                          AX.post(`${urlRef.current||FALLBACK_URL}/tracks/${o.track}/assign`,{target_person_id:x.id},{timeout:8000})
-                            .catch(()=>Alert.alert('Could not send','Check the connection to the camera unit.'));
-                        }})),
-                        {text:'Cancel',style:'cancel' as const},
-                      ]);
-                    }}
+                    onPress={()=>{if(o.track!=null)setWhoToday({track:o.track,current:null});}}
                     style={{flexDirection:'row',alignItems:'center',gap:8,paddingHorizontal:14,paddingVertical:10,borderRadius:30,backgroundColor:C.card,borderWidth:1.5,borderColor:o.label==='Visitor'?C.blue+'66':C.border}}>
                     {o.label==='Identifying...'&&<ActivityIndicator size="small" color={C.sub}/>}
                     <Text style={{color:o.label==='Visitor'?C.blue:C.sub,fontWeight:'700',fontSize:14}}>{o.label}</Text>
@@ -4071,6 +4114,10 @@ export default function App() {
         );
       })()}
 
+      {whoToday&&<WhoIsThisSheet serverUrl={urlRef.current||FALLBACK_URL} track={whoToday.track} current={whoToday.current}
+        people={persons} onClose={()=>setWhoToday(null)}
+        onDone={(p)=>{setWhoToday(null);setTimeout(()=>fetchPersons(),3500);
+          Alert.alert(`Saved: ${p.name}`,'VIGIL will use this right away. For the best recognition, run Introduce everyone for them.');}}/>}
       {/* HOME_PEOPLE_V1: pick whose day to show. The resident is the default. */}
       {namedPeople.length>1&&!demoMode&&(
         <>
