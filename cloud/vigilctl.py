@@ -208,6 +208,10 @@ def compose_up(st, quiet=False):
     if not quiet:
         print("$ " + " ".join(cmd))
     subprocess.run(cmd, cwd=HERE, check=False)
+    # MTX_RELOAD_V1: mediamtx does not always notice its settings file changing
+    # through the container mount, so a new camera's path stayed "not configured".
+    subprocess.run(["docker", "compose", "restart", "mediamtx"], cwd=HERE, check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def gw_db():
