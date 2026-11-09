@@ -20,14 +20,15 @@ calls = []
 def fake_sh(*cmd, timeout=30):
     calls.append(cmd)
     if cmd[:4] == ("nmcli", "-t", "-f", "TYPE,STATE"):
-        return 0, "wifi:connected\n" if W["assoc"] else "wifi:disconnected\n"
+        return 0, ("wifi:connected\n" if W["assoc"] else "wifi:disconnected\n") + \
+            ("ethernet:connected\n" if W.get("eth") else "ethernet:unavailable\n")
     if cmd[:4] == ("nmcli", "-t", "-f", "NAME,TYPE"):
         return 0, "".join("%s:802-11-wireless\n" % n for n in W["saved"])
     if cmd[0] == "ping":
         tgt = cmd[-1]
         if tgt in ("1.1.1.1", "8.8.8.8"):
-            return (0 if W["assoc"] and W["internet"] else 1), ""
-        return (0 if W["assoc"] and W["gateway"] else 1), ""
+            return (0 if (W["assoc"] or W.get("eth")) and W["internet"] else 1), ""
+        return (0 if (W["assoc"] or W.get("eth")) and W["gateway"] else 1), ""
     if cmd[:3] == ("ip", "route", "show"):
         return 0, "default via 192.168.12.1 dev wlan0"
     if cmd[:4] == ("nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY"):
@@ -50,7 +51,7 @@ def reset():
     calls.clear()
     ws.NET.update(offline_since=None, level=0, hotspot_since=None)
     ws.NET["retries_fixed"].clear()
-    W.update(assoc=True, internet=True, gateway=True, saved=["LalsT"], visible=["LalsT"], clients=0)
+    W.update(assoc=True, internet=True, gateway=True, saved=["LalsT"], visible=["LalsT"], clients=0, eth=False)
     if os.path.exists(ws.FLAG):
         os.remove(ws.FLAG)
 
@@ -109,6 +110,23 @@ def test_setup_needed():
     W.update(saved=[])
     assert ws.tick(1000) == "setup: no wifi" and os.path.exists(ws.FLAG)
     assert ws.tick(1015) == "hotspot"
+
+
+def test_cable_only_needs_no_wifi():
+    """ETHERNET_V1: a box on a network cable with no Wi-Fi saved just works."""
+    reset()
+    W.update(saved=[], assoc=False, eth=True)
+    got = [ws.tick(t) for t in range(1000, 1000 + 900, 15)]
+    assert set(got) == {"internet"}, set(got)
+    assert not os.path.exists(ws.FLAG) and not did(("modprobe",)) and not did(("systemctl", "reboot"))
+
+
+def test_cable_box_leaves_setup_hotspot():
+    reset()
+    W.update(saved=[], assoc=False, eth=True)
+    open(ws.FLAG, "w").close(); ws.NET["hotspot_since"] = 1000
+    assert ws.tick(1400) == "left hotspot to look for saved Wi-Fi" and not os.path.exists(ws.FLAG)
+    assert ws.tick(1415) == "internet"
 
 
 if __name__ == "__main__":

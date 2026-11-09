@@ -85,9 +85,15 @@ def sh(*cmd, timeout=30):
         return 1, str(e)
 
 
+def wired():
+    """ETHERNET_V1: a network cable to the router is plugged in and working."""
+    rc, out = sh("nmcli", "-t", "-f", "TYPE,STATE", "device")
+    return "ethernet:connected" in out
+
+
 def online():
     rc, out = sh("nmcli", "-t", "-f", "TYPE,STATE", "device")
-    if "wifi:connected" not in out:
+    if "wifi:connected" not in out and "ethernet:connected" not in out:
         return False
     rc, _ = sh("ping", "-c", "1", "-W", "3", "1.1.1.1", timeout=6)
     return rc == 0
@@ -265,7 +271,7 @@ def default_gateway():
 def link_state():
     """'internet', 'local' (router answers, internet does not) or 'down'."""
     rc, out = sh("nmcli", "-t", "-f", "TYPE,STATE", "device")
-    if "wifi:connected" not in out:
+    if "wifi:connected" not in out and "ethernet:connected" not in out:   # ETHERNET_V1
         return "down"
     if sh("ping", "-c", "1", "-W", "3", "1.1.1.1", timeout=6)[0] == 0 or \
             sh("ping", "-c", "1", "-W", "3", "8.8.8.8", timeout=6)[0] == 0:
@@ -332,11 +338,13 @@ def tick(now=None):
     ready = has_camera_account()
     saved = known_wifi()
     if os.path.exists(FLAG):                                    # hotspot is up
-        if ready and saved and now - (NET["hotspot_since"] or now) >= 300 and not hotspot_clients():
+        if ready and (saved or wired()) and now - (NET["hotspot_since"] or now) >= 300 and not hotspot_clients():
             hotspot_off()                                       # step aside and look for the saved Wi-Fi
             NET.update(hotspot_since=None, offline_since=now, level=0)
             return "left hotspot to look for saved Wi-Fi"
         return "hotspot"
+    if not saved and ready and wired():
+        return link_state()                                     # ETHERNET_V1: on a cable, no Wi-Fi needed
     if not saved:
         open_setup("no Wi-Fi saved")
         return "setup: no wifi"

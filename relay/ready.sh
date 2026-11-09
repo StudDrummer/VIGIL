@@ -33,7 +33,8 @@ ENV=/etc/vigil-relay.env
 CAM=$(grep '^VIGIL_CAMERA_ID=' $ENV 2>/dev/null | cut -d= -f2)
 [ -n "$CAM" ] && ok "camera name: $CAM" || bad "no camera settings: run install.sh with this box's relay_<camera>.env"
 MAC=$(grep '^VIGIL_TAPO_MAC=' $ENV 2>/dev/null | cut -d= -f2)
-[ -n "$MAC" ] && ok "camera MAC: $MAC" || bad "camera MAC missing: add VIGIL_TAPO_MAC=xx:xx:xx:xx:xx:xx to $ENV"
+if echo "$MAC" | grep -Eiq '^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$'; then ok "camera MAC: $MAC"
+else bad "camera MAC missing or not real ('$MAC'): sudo bash ~/VIGIL/relay/set_mac.sh"; fi
 grep -q '^VIGIL_TAPO_USER=.\+' $ENV 2>/dev/null && ok "camera account saved" || echo "  [ -- ]  no camera account yet (set in the VIGIL app during setup)"
 systemctl is-active -q vigil-relay && ok "relay running" || bad "relay not running: journalctl -u vigil-relay -n 30"
 systemctl is-active -q vigil-wifi-setup && ok "Wi-Fi helper running (always on)" || bad "Wi-Fi helper not running: journalctl -u vigil-wifi-setup -n 30"
@@ -45,6 +46,7 @@ case "$ST" in
   "") echo "  [ -- ]  state: starting";;
   *) echo "  [ -- ]  state: $ST";;
 esac
+nmcli -t -f TYPE,STATE device 2>/dev/null | grep -q '^ethernet:connected' && ok "network cable plugged in (most reliable)"
 SSID=$(nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}')
 SIG=$(awk 'NR==3{gsub(/\./,"",$4); print $4}' /proc/net/wireless 2>/dev/null)
 if [ -n "$SSID" ]; then
