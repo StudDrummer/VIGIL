@@ -3062,8 +3062,20 @@ def camera_setup_status():
             moved = json.load(f)
     except Exception:
         pass
+    # ZONES_WHEN_LIVE_V1: zones are drawn on the camera's picture, so only ask
+    # once this camera has actually sent one (a camera not set up yet, or
+    # unplugged, is not asked).
+    live = False
+    for _p in ("/dev/shm/vigil_raw.jpg", "/dev/shm/vigil_latest.jpg", "/dev/shm/vigil_live_video.jpg"):
+        try:
+            if time.time() - os.stat(_p).st_mtime < 120:
+                live = True
+                break
+        except OSError:
+            pass
     return jsonify({"status": "ok",
-                    "needs_zones": len(zones) == 0,
+                    "needs_zones": len(zones) == 0 and live,
+                    "camera_live": live,
                     "camera_moved": bool(moved),
                     "moved_at": (moved or {}).get("at"),
                     "zones": len(zones)})

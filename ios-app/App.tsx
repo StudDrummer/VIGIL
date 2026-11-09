@@ -867,7 +867,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
           <ChainNode label="Box joins your Wi-Fi" state={wifiState}
             detail={boxOk?[relay?.wifi,sigTxt].filter(Boolean).join(', '):wifiState==='bad'?'Not online yet. The Wi-Fi password may be wrong.':'Joining...'}/>
           <ChainNode label="Box finds the camera" state={camState}
-            detail={camOk?'Found it':camState==='bad'?'Cannot find the camera. Check it is on the same Wi-Fi in Tapo, with the camera account exactly as shown.':boxOk?'Looking on your Wi-Fi...':undefined}/>
+            detail={camOk?'Found it':camState==='bad'?'Cannot find the camera. Check it is plugged in, shows its picture in Tapo on this same Wi-Fi, and has the camera account exactly as shown.':boxOk?'Looking on your Wi-Fi...':undefined}/>
           <ChainNode label="Video reaches VIGIL" state={cloudState}
             detail={cloudState==='bad'?'Your Wi-Fi has no internet right now.':camOk?'Connecting securely...':undefined}/>
         </View>
