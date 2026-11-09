@@ -847,6 +847,10 @@ def _vigil_small(raw):
 @require_api_key
 def camera_snapshot():
     """Returns the latest camera frame as a base64 JPEG."""
+    _live = _live_jpeg("skeleton" if request.args.get("view") == "skeleton" else "video", 3.0)
+    if _live is not None:   # LIVE_SMOOTH_V1: the live view's newest frame, when someone is watching
+        return jsonify({"frame": __import__("base64").b64encode(_live).decode(), "available": True,
+                        "view": "skeleton" if request.args.get("view") == "skeleton" else "video"})
     if request.args.get("view") == "skeleton":
         try:
             if time.time() - os.stat("/dev/shm/vigil_skeleton.jpg").st_mtime > 30:   # SMOOTH_VIEW_V1
@@ -899,6 +903,95 @@ def camera_stream():
             time.sleep(0.05)   # cap at ~20 fps
     return Response(generate(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+def _live_jpeg(view, max_age):
+    """The live view's newest frame for this view, or None when it is stale or cut off."""
+    p = "/dev/shm/vigil_live_%s.jpg" % view
+    try:
+        if time.time() - os.stat(p).st_mtime > max_age:
+            return None
+        with open(p, "rb") as f:
+            b = f.read()
+        return b if b[:2] == b"\xff\xd8" and b[-2:] == b"\xff\xd9" else None
+    except OSError:
+        return None
+
+
+@app.route("/camera/stream64")
+@require_api_key
+def camera_stream64():
+    """LIVE_SMOOTH_V1: the live view as a stream the app can read without a
+    video player. One line per frame (base64 JPEG). An empty line every two
+    seconds keeps the connection open when nothing changes. The stream ends
+    after max_s seconds and the app reconnects, which keeps its memory small."""
+    view = "skeleton" if request.args.get("view") == "skeleton" else "video"
+    try:
+        max_s = max(5.0, min(60.0, float(request.args.get("max_s", 20))))
+    except ValueError:
+        max_s = 20.0
+    want = "/dev/shm/vigil_live_want_%s" % view
+    path = "/dev/shm/vigil_live_%s.jpg" % view
+    b64 = __import__("base64").b64encode
+
+    def touch():
+        try:
+            with open(want, "a"):
+                pass
+            os.utime(want, None)
+        except OSError:
+            pass
+
+    # something to show at once: the newest analysed frame (read here, inside the request)
+    touch()
+    first = _live_jpeg(view, 3.0)
+    if first is None:
+        try:
+            fp = "/dev/shm/vigil_skeleton.jpg" if view == "skeleton" else "/dev/shm/vigil_latest.jpg"
+            fb = b""
+            if time.time() - os.stat(fp).st_mtime < 15:
+                with open(fp, "rb") as f:
+                    fb = f.read()
+            if fb[:2] == b"\xff\xd8" and fb[-2:] == b"\xff\xd9":
+                import cv2 as _cv
+                import numpy as _np
+                im = _cv.imdecode(_np.frombuffer(fb, _np.uint8), _cv.IMREAD_COLOR)
+                if im is not None:
+                    sc = 640.0 / im.shape[1]
+                    if sc < 1:
+                        im = _cv.resize(im, (640, max(1, int(im.shape[0] * sc))))
+                    ok, enc = _cv.imencode(".jpg", im, [_cv.IMWRITE_JPEG_QUALITY, 62])
+                    first = enc.tobytes() if ok else None
+        except Exception:
+            pass
+
+    def generate():
+        start = last_touch = last_sent = time.time()
+        last_m = 0.0
+        if first is not None:
+            yield b64(first) + b"\n"
+        while time.time() - start < max_s:
+            now = time.time()
+            if now - last_touch > 1.0:
+                touch(); last_touch = now
+            try:
+                m = os.stat(path).st_mtime
+            except OSError:
+                m = 0.0
+            if m and m != last_m:
+                last_m = m
+                fb = _live_jpeg(view, 3.0)
+                if fb is not None:
+                    yield b64(fb) + b"\n"
+                    last_sent = now
+                    continue
+            if now - last_sent > 2.0:
+                yield b"\n"
+                last_sent = now
+            time.sleep(0.03)
+
+    return Response(generate(), mimetype="text/plain",
+                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
 
 @app.route("/camera/snapshot/post", methods=["POST"])
 @require_api_key

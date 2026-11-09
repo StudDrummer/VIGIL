@@ -562,6 +562,11 @@ def site_member_make_owner(site_id, uid):
 # SETUP_LIVE_V1: the relay box says how far it got (Wi-Fi, camera found,
 # sending), so the app can show real progress while the family sets it up.
 _RELAY = {}
+try:
+    with open(os.path.join(DATA_DIR, "relay_status.json")) as _f:
+        _RELAY.update(json.load(_f))
+except Exception:
+    pass
 
 
 @app.route("/relay/<site_id>/status", methods=["POST"])
@@ -572,8 +577,15 @@ def relay_status_post(site_id):
     if not s_ or not want or not hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), want):
         return jsonify({"status": "error"}), 403
     body = request.get_json(silent=True) or {}
-    _RELAY[site_id] = {k: body.get(k) for k in ("state", "camera", "mode", "wifi", "signal_dbm", "version")}
+    _RELAY[site_id] = {k: body.get(k) for k in ("state", "camera", "mode", "wifi", "signal_dbm", "version", "code")}
     _RELAY[site_id]["at"] = time.time()
+    try:                                   # AUTOUPDATE_V1: vigilctl.py boxes reads this
+        tmp = os.path.join(DATA_DIR, ".relay_status.tmp")
+        with open(tmp, "w") as f:
+            json.dump(_RELAY, f)
+        os.replace(tmp, os.path.join(DATA_DIR, "relay_status.json"))
+    except Exception:
+        pass
     return jsonify({"status": "ok"})
 
 
@@ -587,7 +599,8 @@ def relay_status_get(site_id):
     st = _STATUS.get(site_id, {})
     return jsonify({"status": "ok", "box_online": age is not None and age < 45, "box_age_s": age,
                     "state": r.get("state"), "camera": r.get("camera"), "wifi": r.get("wifi"),
-                    "signal_dbm": r.get("signal_dbm"), "site_online": bool(st.get("online"))})
+                    "signal_dbm": r.get("signal_dbm"), "code": r.get("code"),
+                    "site_online": bool(st.get("online"))})
 
 
 # ACCOUNT_DELETE_V1 (App Store 5.1.1(v)): delete the account from inside the app.

@@ -103,6 +103,8 @@ if [ -n "$TS_KEY" ]; then
   tailscale up --authkey="$TS_KEY" --hostname="vigil-relay-$CAM" --ssh
 fi
 
+git -C "$HERE/.." rev-parse HEAD > /opt/vigil-relay/VERSION 2>/dev/null || true
+bash "$HERE/enable_autoupdate.sh"   # AUTOUPDATE_V1
 systemctl daemon-reload
 systemctl enable --now vigil-relay.service vigil-wifi-setup.service vigil-weekly-reboot.timer
 echo

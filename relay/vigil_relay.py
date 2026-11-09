@@ -112,6 +112,15 @@ def wifi_info():
         return None, None
 
 
+def code_version():
+    """AUTOUPDATE_V1: the code this box runs (written by the installer and the updater)."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")) as f:
+            return f.read().strip()[:12]
+    except OSError:
+        return None
+
+
 def report(kw):
     """SETUP_LIVE_V1: tell VIGIL Cloud how far the box got, at most every 10 s
     (at once when the state changes). Never blocks the relay."""
@@ -127,7 +136,7 @@ def report(kw):
             import urllib.request
             ssid, sig = wifi_info()
             body = json.dumps({"state": kw.get("state"), "camera": kw.get("camera"), "mode": kw.get("mode"),
-                               "wifi": ssid, "signal_dbm": sig, "version": 2}).encode()
+                               "wifi": ssid, "signal_dbm": sig, "version": 2, "code": code_version()}).encode()
             req = urllib.request.Request("https://%s/relay/%s/status" % (host, cam), data=body,
                                          headers={"Content-Type": "application/json", "X-Relay-Key": key})
             urllib.request.urlopen(req, timeout=8).read()

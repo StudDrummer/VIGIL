@@ -29,6 +29,7 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONF = os.path.join(HERE, "config")
@@ -448,6 +449,31 @@ def cmd_tune(a):
     print("Each camera may now use %.1f CPU cores." % a.cpus)
 
 
+def cmd_boxes(_a):
+    """AUTOUPDATE_V1: every relay box, what it is doing and which code it runs."""
+    try:
+        raw = subprocess.run(["docker", "compose", "exec", "-T", "gateway", "cat", "/data/relay_status.json"],
+                             cwd=HERE, capture_output=True, text=True, timeout=20).stdout
+        boxes = json.loads(raw or "{}")
+    except Exception:
+        boxes = {}
+    try:
+        stable = subprocess.run(["git", "-C", os.path.dirname(HERE), "rev-parse", "--short=7", "HEAD"],
+                                capture_output=True, text=True).stdout.strip()
+    except Exception:
+        stable = "?"
+    print("Cloud runs %s\n" % stable)
+    print("%-10s %-8s %-20s %-18s %-8s %s" % ("CAMERA", "BOX", "STATE", "WI-FI", "SIGNAL", "CODE"))
+    for c in load().get("cameras", []):
+        b = boxes.get(c["id"]) or {}
+        age = time.time() - b["at"] if b.get("at") else None
+        seen = "online" if age is not None and age < 45 else ("never" if age is None else
+               "%dm ago" % (age // 60) if age < 7200 else "%dh ago" % (age // 3600))
+        print("%-10s %-8s %-20s %-18s %-8s %s" % (
+            c["id"], seen, (b.get("state") or "-")[:20], (b.get("wifi") or "-")[:18],
+            ("%s dBm" % b["signal_dbm"]) if b.get("signal_dbm") is not None else "-", (b.get("code") or "-")[:7]))
+
+
 def cmd_apply(_a):
     st = load()
     render(st)
@@ -486,6 +512,7 @@ def main():
     s.set_defaults(f=cmd_grant)
     sub.add_parser("users").set_defaults(f=cmd_users)
     sub.add_parser("apply").set_defaults(f=cmd_apply)
+    sub.add_parser("boxes").set_defaults(f=cmd_boxes)
     s = sub.add_parser("tune"); s.add_argument("--cpus", type=float, required=True); s.set_defaults(f=cmd_tune)
     a = p.parse_args()
     a.f(a)

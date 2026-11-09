@@ -106,6 +106,39 @@ const CIRC   = 2 * Math.PI * RADIUS;
 
 // LIVE-badge pulse — module scope so the loop needs no component hooks/refs
 const LIVE_PULSE = new Animated.Value(1);
+
+// LIVE_SMOOTH_V1: live frames go straight to the picture, not through the
+// whole screen's state, so 10 frames a second never slows the app down.
+type LiveSub=(f:string)=>void;
+const LIVE={cur:null as string|null,subs:new Set<LiveSub>()};
+function livePush(f:string){LIVE.cur=f;LIVE.subs.forEach(fn=>{try{fn(f);}catch(_e){}});}
+
+// Two pictures stacked: the next frame decodes underneath and only comes to
+// the front once it is ready, so the feed never blinks between frames.
+function LiveImage({style,resizeMode}:{style:any;resizeMode:'cover'|'contain'}){
+  const [ly,setLy]=useState<{a:string|null;b:string|null;front:'a'|'b'}>({a:LIVE.cur,b:null,front:'a'});
+  const lyRef=useRef(ly); lyRef.current=ly;
+  const busy=useRef(0); const pending=useRef<string|null>(null);
+  const load=useCallback((f:string)=>{
+    if(busy.current&&Date.now()-busy.current<1500){pending.current=f;return;}
+    busy.current=Date.now();
+    setLy(l=>l.front==='a'?{...l,b:f}:{...l,a:f});
+  },[]);
+  useEffect(()=>{LIVE.subs.add(load);return()=>{LIVE.subs.delete(load);};},[load]);
+  const settle=(which:'a'|'b',ok:boolean)=>{
+    if(lyRef.current.front===which)return;
+    if(ok)setLy(l=>({...l,front:which}));
+    busy.current=0;
+    const p=pending.current; pending.current=null; if(p)load(p);
+  };
+  const layer=(which:'a'|'b')=>{
+    const f=ly[which]; if(!f)return null;
+    return <Image key={which} source={{uri:`data:image/jpeg;base64,${f}`}} fadeDuration={0} resizeMode={resizeMode}
+      onLoad={()=>settle(which,true)} onError={()=>settle(which,false)}
+      style={[style,{position:'absolute',top:0,left:0,zIndex:ly.front===which?2:1}]}/>;
+  };
+  return <View style={style}>{layer('a')}{layer('b')}</View>;
+}
 Animated.loop(
   Animated.sequence([
     Animated.timing(LIVE_PULSE,{toValue:1.15,duration:600,useNativeDriver:true}),
@@ -3805,9 +3838,11 @@ export default function App() {
   const [privacyView,setPrivacyView] = useState(true);
   const privacyViewRef = useRef(true);
   useEffect(()=>{AsyncStorage.getItem('vigil_privacy_view').then(v=>{if(v==='0'){setPrivacyView(false);privacyViewRef.current=false;}}).catch(()=>{});},[]);
+  const liveKick=useRef<(()=>void)|null>(null);
   const togglePrivacyView=useCallback(()=>{
     const next=!privacyViewRef.current; privacyViewRef.current=next; setPrivacyView(next);
     prevFrame.current=null;   // SMOOTH_VIEW_V1: keep the last picture until the other view arrives
+    liveKick.current?.();     // LIVE_SMOOTH_V1: switch the stream to the other view now
     AsyncStorage.setItem('vigil_privacy_view',next?'1':'0').catch(()=>{});
   },[]);
   const appStateRef   = useRef<AppStateStatus>('active');
@@ -3909,7 +3944,7 @@ export default function App() {
         // Only update if frame actually changed to reduce flicker
         if(r.data.frame!==prevFrame.current){
           prevFrame.current=r.data.frame;
-          setCameraFrame(r.data.frame);
+          const f=r.data.frame as string; livePush(f); setCameraFrame(p=>p??f);
         }
       }
     }catch(_){}
@@ -4133,7 +4168,45 @@ export default function App() {
   },[initialized,jetsonOk]); // eslint-disable-line
 
   useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal)return;fetchCameraStatus();const id=setInterval(()=>{if(!kbOpenRef.current)fetchCameraStatus();},10000);return()=>clearInterval(id);},[jetsonOk,showPersonModal,fetchCameraStatus]);
-  useEffect(()=>{if(!jetsonOk||demoMode||showPersonModal||activeTab!=='today')return;let alive=true;(async()=>{while(alive){try{if(!kbOpenRef.current)await fetchCameraSnapshot();}catch(_e){}await new Promise(r=>setTimeout(r,CLOUD_ACTIVE?400:100));}})();return()=>{alive=false;};},[jetsonOk,showPersonModal,activeTab,fetchCameraSnapshot]);
+  // LIVE_SMOOTH_V1: the server pushes each new frame (about 10 a second) down one
+  // open connection, so there is no wait for a request per picture. Each stream
+  // lasts 20 s and reopens at once. If streaming fails three times in a row the
+  // app falls back to asking for single pictures for 30 s, then tries again.
+  useEffect(()=>{
+    if(!jetsonOk||demoMode||showPersonModal||activeTab!=='today')return;
+    let alive=true; let xhr:XMLHttpRequest|null=null; let fails=0; let pollUntil=0; let lastData=Date.now(); let kicked=false;
+    let timer:ReturnType<typeof setTimeout>|null=null;
+    const later=(ms:number)=>{if(timer)clearTimeout(timer);timer=setTimeout(()=>{timer=null;open();},ms);};
+    const gotFrame=(f:string)=>{if(f===prevFrame.current)return;prevFrame.current=f;livePush(f);setCameraFrame(p=>p??f);};
+    const open=()=>{
+      if(!alive)return;
+      if(Date.now()<pollUntil){fetchCameraSnapshot().catch(()=>{}).finally(()=>later(CLOUD_ACTIVE?350:120));return;}
+      const x=new XMLHttpRequest(); xhr=x; let off=0; let n=0; kicked=false; lastData=Date.now();
+      x.open('GET',`${url()}/camera/stream64?view=${privacyViewRef.current?'skeleton':'video'}&max_s=20`);
+      x.setRequestHeader('X-VIGIL-Key',String((AX.defaults.headers as any)['X-VIGIL-Key']||''));
+      x.onprogress=()=>{
+        if(xhr!==x)return;
+        lastData=Date.now();
+        const t=x.responseText||''; let last:string|null=null; let i:number;
+        while((i=t.indexOf('\n',off))>=0){const line=t.slice(off,i);off=i+1;if(line.length>100)last=line;}
+        if(last){n++;gotFrame(last);}
+      };
+      const done=()=>{
+        if(xhr!==x)return; xhr=null; if(!alive)return;
+        if(kicked){later(0);return;}
+        if(n>0)fails=0; else fails++;
+        if(fails>=3){fails=0;pollUntil=Date.now()+30000;}
+        later(n>0?0:1500);
+      };
+      x.onload=done; x.onerror=done; x.onabort=done; x.ontimeout=done;
+      x.send();
+    };
+    liveKick.current=()=>{if(xhr){kicked=true;const x=xhr;try{x.abort();}catch(_e){}if(xhr===x){xhr=null;later(0);}}};
+    // a connection that goes silent (no frame and no keep-alive for 8 s) is reopened
+    const watch=setInterval(()=>{if(xhr&&Date.now()-lastData>8000){const x=xhr;xhr=null;try{x.abort();}catch(_e){}fails++;later(500);}},2000);
+    open();
+    return()=>{alive=false;liveKick.current=null;clearInterval(watch);if(timer)clearTimeout(timer);if(xhr){const x=xhr;xhr=null;try{x.abort();}catch(_e){}}};
+  },[jetsonOk,showPersonModal,activeTab,fetchCameraSnapshot]);
   // Camera-derived metrics (gait speed / cadence / posture) refresh every 4s so they
   // visibly move while someone is walking in frame — the 60s HealthKit auto-sync
   // (above) is far too slow for this to feel live during a walk-test or demo.
@@ -4309,10 +4382,7 @@ export default function App() {
       <View style={{width:w,height:h,borderRadius:20,overflow:'hidden',borderWidth:1.5,borderColor:camBorder,backgroundColor:C.card}}>
         {cameraFrame?(
           <>
-            <Image
-              source={{uri:`data:image/jpeg;base64,${cameraFrame}`}}
-              style={{width:w,height:h}} resizeMode="cover"
-              fadeDuration={0}/>
+            <LiveImage style={{width:w,height:h}} resizeMode="cover"/>
             <TouchableOpacity
               style={{position:'absolute',top:10,right:10,backgroundColor:'rgba(0,0,0,0.65)',borderRadius:6,flexDirection:'row',alignItems:'center',paddingHorizontal:8,paddingVertical:4,gap:5}}
               onPress={()=>setFullscreen(true)}>
@@ -5316,7 +5386,7 @@ export default function App() {
         <View style={{flex:1,backgroundColor:'#000',alignItems:'center',justifyContent:'center'}}>
           <StatusBar barStyle="light-content" backgroundColor="#000"/>
           {cameraFrame?(
-            <Image source={{uri:`data:image/jpeg;base64,${cameraFrame}`}} style={{width:SW,height:SW*9/16}} resizeMode="contain" fadeDuration={0}/>
+            <LiveImage style={{width:SW,height:SW*9/16}} resizeMode="contain"/>
           ):(
             <Text style={{color:C.muted,fontSize:16}}>No camera feed</Text>
           )}

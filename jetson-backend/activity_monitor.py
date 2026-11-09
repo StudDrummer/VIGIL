@@ -622,61 +622,194 @@ def _vigil_names():
     return _NAME_CACHE[1]
 
 
+def _vigil_labels(results):
+    """[(xyxy, label, known, index)] for every box worth naming, using the
+    same names as In view now. A body drawn twice is labelled once."""
+    out = []
+    if len(results) == 0:
+        return out
+    r = results[0]
+    boxes = getattr(r, "boxes", None)
+    if boxes is None or getattr(boxes, "xyxy", None) is None:
+        return out
+    xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes.xyxy, "cpu") else np.asarray(boxes.xyxy)
+    ids = None
+    if getattr(boxes, "id", None) is not None:
+        _i = boxes.id.cpu().numpy() if hasattr(boxes.id, "cpu") else np.asarray(boxes.id)
+        ids = [int(v) for v in _i]
+    try:
+        import person_hook as _ph
+        t2p = dict(getattr(_ph, "_track_to_pid", {}) or {})
+        st = dict(getattr(_ph, "_trk_status", {}) or {})
+    except Exception:
+        _ph = None
+        t2p = {}
+        st = {}
+    names = _vigil_names()
+    try:                                  # IDENTITY_V8: the same labels as In view now
+        _fl = getattr(_ph, "_FRAME_LABELS", None) or {}
+        fl = _fl.get("by_tid", {}) if time.time() - float(_fl.get("t", 0)) < 1.5 else {}
+    except Exception:
+        fl = {}
+    for i, b in enumerate(xyxy):
+        tid = ids[i] if ids is not None and i < len(ids) else None
+        if tid is not None and tid in fl:
+            pid, lab = fl[tid]
+            if lab == "__dup__":
+                continue                  # one body drawn twice: label it once
+            name = names.get(pid) if pid else None
+            label = name or (lab or "Identifying...") if pid is None else (name or "New person")
+        else:
+            pid = t2p.get(tid) if tid is not None else None
+            name = names.get(pid) if pid else None
+            label = name or ((st.get(tid) or "Identifying...") if pid is None else "New person")
+        out.append((b, label, bool(name), i))
+    return out
+
+
+def _draw_tag(img, x1, y1, label, known, scale=0.9, thick=2):
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    pad = int(9 * scale / 0.9)
+    y0 = max(0, y1 - th - 2 * pad + 2)
+    cv2.rectangle(img, (x1, y0), (x1 + tw + 2 * pad, y0 + th + pad + 5),
+                  (75, 215, 50) if known else (70, 70, 70), -1)
+    cv2.putText(img, label, (x1 + pad, y0 + th + pad - 3), cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (10, 20, 4) if known else (255, 255, 255), thick, cv2.LINE_AA)
+
+
 def _vigil_annotate(results, frame):
     """Skeleton and box, labelled with the person's name instead of
     'id:7 person 0.87'."""
     try:
         if len(results) == 0:
             return frame
-        r = results[0]
-        img = r.plot(labels=False, conf=False)
-        boxes = getattr(r, "boxes", None)
-        if boxes is None or getattr(boxes, "xyxy", None) is None:
-            return img
-        xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes.xyxy, "cpu") else np.asarray(boxes.xyxy)
-        ids = None
-        if getattr(boxes, "id", None) is not None:
-            _i = boxes.id.cpu().numpy() if hasattr(boxes.id, "cpu") else np.asarray(boxes.id)
-            ids = [int(v) for v in _i]
-        try:
-            import person_hook as _ph
-            t2p = dict(getattr(_ph, "_track_to_pid", {}) or {})
-            st = dict(getattr(_ph, "_trk_status", {}) or {})
-        except Exception:
-            t2p = {}
-            st = {}
-        names = _vigil_names()
-        try:                                  # IDENTITY_V8: the same labels as In view now
-            _fl = getattr(_ph, "_FRAME_LABELS", None) or {}
-            fl = _fl.get("by_tid", {}) if time.time() - float(_fl.get("t", 0)) < 1.5 else {}
-        except Exception:
-            fl = {}
-        for i, b in enumerate(xyxy):
-            tid = ids[i] if ids is not None and i < len(ids) else None
-            if tid is not None and tid in fl:
-                pid, lab = fl[tid]
-                if lab == "__dup__":
-                    continue                  # one body drawn twice: label it once
-                name = names.get(pid) if pid else None
-                label = name or (lab or "Identifying...") if pid is None else (name or "New person")
-            else:
-                pid = t2p.get(tid) if tid is not None else None
-                name = names.get(pid) if pid else None
-                label = name or ((st.get(tid) or "Identifying...") if pid is None else "New person")
-            known = bool(name)
-            x1, y1 = int(b[0]), int(b[1])
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-            y0 = max(0, y1 - th - 16)
-            cv2.rectangle(img, (x1, y0), (x1 + tw + 18, y0 + th + 14),
-                          (75, 215, 50) if known else (70, 70, 70), -1)
-            cv2.putText(img, label, (x1 + 9, y0 + th + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
-                        (10, 20, 4) if known else (255, 255, 255), 2, cv2.LINE_AA)
+        img = results[0].plot(labels=False, conf=False)
+        for b, label, known, _i in _vigil_labels(results):
+            _draw_tag(img, int(b[0]), int(b[1]), label, known)
         return img
     except Exception:
         try:
             return results[0].plot()
         except Exception:
             return frame
+
+
+# LIVE_SMOOTH_V1 ---------------------------------------------------------
+# The live view is drawn from the camera's own frames (about 10 a second),
+# not from the analysed frames, which arrive only a few times a second on a
+# cloud CPU. The newest names, boxes and stick figures are drawn on top.
+# Nothing is drawn unless someone is watching, so it costs nothing otherwise.
+LIVE_W = 640
+LIVE_FPS = 10.0
+_LIVE = {"cap": None, "ov": None, "want_t": 0.0, "want_chk": 0.0}
+
+
+def _live_wanted(view=None):
+    """True while the app is watching (the server touches these files)."""
+    now = time.time()
+    names = ("video", "skeleton") if view is None else (view,)
+    for v in names:
+        try:
+            if now - os.stat("/dev/shm/vigil_live_want_%s" % v).st_mtime < 5:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _live_update(results, shape):
+    """Remember the newest boxes, names and joints for the live view."""
+    now = time.time()
+    if now - _LIVE["want_chk"] > 0.5:
+        _LIVE["want_chk"] = now
+        _LIVE["want_t"] = now if _live_wanted() else 0.0
+    if not _LIVE["want_t"]:
+        return
+    items = []
+    try:
+        kd = None
+        if len(results) > 0 and getattr(results[0], "keypoints", None) is not None:
+            kd = results[0].keypoints.data
+            kd = kd.cpu().numpy() if hasattr(kd, "cpu") else np.asarray(kd)
+        gi = getattr(select_all_persons_tracked, "_ghost_idx", set())
+        for b, label, known, i in _vigil_labels(results):
+            if i in gi:
+                continue
+            k = kd[i].copy() if kd is not None and i < len(kd) else None
+            items.append((np.asarray(b, dtype=np.float32).copy(), label, known, k))
+    except Exception:
+        items = []
+    _LIVE["ov"] = {"t": now, "h": shape[0], "w": shape[1], "items": items}
+
+
+def _live_render(src, ov, skeleton):
+    h, w = src.shape[:2]
+    sc = LIVE_W / float(w)
+    H = max(1, int(round(h * sc)))
+    if skeleton:
+        img = np.full((H, LIVE_W, 3), 24, np.uint8)
+    else:
+        img = cv2.resize(src, (LIVE_W, H), interpolation=cv2.INTER_LINEAR)
+    if ov and time.time() - ov["t"] < 1.5:
+        for b, label, known, k in ov["items"]:
+            x1, y1, x2, y2 = [int(v * sc) for v in b[:4]]
+            col = (75, 215, 50) if known else (200, 200, 200)
+            if not skeleton:
+                cv2.rectangle(img, (x1, y1), (x2, y2), col, 2, cv2.LINE_AA)
+            if k is not None:
+                lw = 3 if skeleton else 2
+                for a, c in _SK_EDGES:
+                    if k[a][2] >= 0.3 and k[c][2] >= 0.3:
+                        cv2.line(img, (int(k[a][0] * sc), int(k[a][1] * sc)),
+                                 (int(k[c][0] * sc), int(k[c][1] * sc)), (120, 220, 90), lw, cv2.LINE_AA)
+                if skeleton and k[0][2] >= 0.3:
+                    cv2.circle(img, (int(k[0][0] * sc), int(k[0][1] * sc)), 10, (120, 220, 90), 3, cv2.LINE_AA)
+            _draw_tag(img, x1, max(0, y1), label, known, scale=0.55, thick=1)
+    return img
+
+
+def _live_write(img, path):
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 62])
+    if not ok:
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(buf.tobytes())
+    os.replace(tmp, path)
+
+
+def _live_loop():
+    last_seq = -1
+    period = 1.0 / LIVE_FPS
+    while True:
+        t0 = time.time()
+        try:
+            want_v = _live_wanted("video")
+            want_s = _live_wanted("skeleton")
+            cap = _LIVE.get("cap")
+            if (want_v or want_s) and cap is not None:
+                with cap._lock:
+                    fr, seq = cap._frame, cap._seq
+                    small = None
+                    if fr is not None and seq != last_seq:
+                        last_seq = seq
+                        small = fr  # rendered below; the reader thread replaces, never edits, frames
+                if small is not None:
+                    ov = _LIVE.get("ov")
+                    if want_v:
+                        _live_write(_live_render(small, ov, False), "/dev/shm/vigil_live_video.jpg")
+                    if want_s:
+                        _live_write(_live_render(small, ov, True), "/dev/shm/vigil_live_skeleton.jpg")
+        except Exception as e:
+            _dbg_print("[LIVE] %s" % e)
+        time.sleep(max(0.01, period - (time.time() - t0)) if _LIVE.get("cap") is not None else 0.5)
+
+
+def _live_start():
+    import threading
+    if not _LIVE.get("thread"):
+        _LIVE["thread"] = threading.Thread(target=_live_loop, daemon=True, name="vigil-live")
+        _LIVE["thread"].start()
 
 
 class FallDetector:
@@ -1471,6 +1604,7 @@ def main():
     src=int(args.source) if args.source.isdigit() else args.source
     print(f"[INIT] Opening source: {src}")
     cap=ThreadedCapture(src)
+    _LIVE["cap"] = cap; _live_start()   # LIVE_SMOOTH_V1
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     if not cap.isOpened():
         print(f"[FATAL] Cannot open: {src}"); sys.exit(1)
@@ -1510,7 +1644,7 @@ def main():
             ok, frame = cap.retrieve()
             if not ok:
                 print("[WARN] Frame read failed — retrying"); time.sleep(2)
-                cap.release(); cap=ThreadedCapture(src); cap.set(cv2.CAP_PROP_BUFFERSIZE, 1); continue
+                cap.release(); cap=ThreadedCapture(src); _LIVE["cap"] = cap; cap.set(cv2.CAP_PROP_BUFFERSIZE, 1); continue
 
             try:
                 frame_idx+=1; fps_frames+=1; now=time.time()
@@ -1567,7 +1701,8 @@ def main():
                 try:
                     # Encode the live-stream frame every 2nd iteration. The
                     # MJPEG view stays smooth and ~20 ms per frame is recovered.
-                    if _PF["sk"] % 2 == 0:   # LIVE_VIDEO_V1 (was every 3rd)
+                    _live_update(results, frame.shape)   # LIVE_SMOOTH_V1
+                    if _PF["sk"] % 2 == 0 and not _LIVE["want_t"]:   # LIVE_VIDEO_V1; the live view covers it while watched
                         annotated_frame = _vigil_annotate(results, frame)
                         cv2.imwrite('/dev/shm/vigil_latest.jpg', annotated_frame,
                                     [cv2.IMWRITE_JPEG_QUALITY, 70])
