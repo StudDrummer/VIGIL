@@ -106,6 +106,7 @@ const CIRC   = 2 * Math.PI * RADIUS;
 
 // LIVE-badge pulse — module scope so the loop needs no component hooks/refs
 const LIVE_PULSE = new Animated.Value(1);
+const INSIGHTS_CACHE:Record<string,any>={};   // INSIGHTS_FAST_V1
 
 // LIVE_SMOOTH_V1: live frames go straight to the picture, not through the
 // whole screen's state, so 10 frames a second never slows the app down.
@@ -2879,34 +2880,24 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
       setLoading(false); setRefreshing(false); setError(null);
       return;
     }
-    if(!quiet) setLoading(true);
+    // INSIGHTS_FAST_V1: all six requests at once (not one after another), and the
+    // last result for this camera shows instantly while fresh numbers load.
+    const base=serverUrl||FALLBACK_URL;
+    const apply=(d:any)=>{
+      setResidents(d.ins?.residents ?? []); setDisclaimer(d.ins?.disclaimer ?? ''); setGenAt(d.ins?.generated_at ?? null);
+      setFace(d.face??null); setSig(d.sig??null); setRout(d.rout??null); setPat(d.pat??null); setWeek(d.week??null);
+    };
+    const cached=INSIGHTS_CACHE[base];
+    if(cached){apply(cached);setLoading(false);}
+    else if(!quiet) setLoading(true);
     setError(null);
     try{
-      const r = await AX.get(`${serverUrl||FALLBACK_URL}/insights/latest`,{timeout:8000});
-      setResidents(r.data?.residents ?? []);
-      setDisclaimer(r.data?.disclaimer ?? '');
-      setGenAt(r.data?.generated_at ?? null);
-      try{
-        const f = await AX.get(`${serverUrl||FALLBACK_URL}/face/latest`,{timeout:6000});
-        setFace(f.data ?? null);
-      }catch(_e){ setFace(null); }   // optional: absence must not break insights
-      try{
-        const s = await AX.get(`${serverUrl||FALLBACK_URL}/signals/latest`,{timeout:6000});
-        setSig(s.data ?? null);
-      }catch(_e){ setSig(null); }
-      try{
-        const rt = await AX.get(`${serverUrl||FALLBACK_URL}/routine/latest`,{timeout:6000});
-        setRout(rt.data ?? null);
-      }catch(_e){ setRout(null); }
-      try{
-        const pt = await AX.get(`${serverUrl||FALLBACK_URL}/patterns/latest`,{timeout:6000});
-        setPat(pt.data ?? null);
-      }catch(_e){ setPat(null); }
-      try{
-        const wk = await AX.get(`${serverUrl||FALLBACK_URL}/summary/weekly`,{timeout:6000});
-        setWeek(wk.data ?? null);
-      }catch(_e){ setWeek(null); }
-    }catch(e:any){ setError(e?.message ?? 'Request failed'); }
+      const get=(path:string,t:number)=>AX.get(`${base}${path}`,{timeout:t}).then(r=>r.data??null);
+      const opt=(path:string)=>get(path,8000).catch(()=>null);   // optional: absence must not break insights
+      const [ins,face,sig,rout,pat,week]=await Promise.all([get('/insights/latest',10000),opt('/face/latest'),
+        opt('/signals/latest'),opt('/routine/latest'),opt('/patterns/latest'),opt('/summary/weekly')]);
+      const d={ins,face,sig,rout,pat,week}; INSIGHTS_CACHE[base]=d; apply(d);
+    }catch(e:any){ if(!cached)setError(e?.message ?? 'Request failed'); }
     finally{ setLoading(false); setRefreshing(false); }
   },[serverUrl,demoMode]);
 
@@ -4509,10 +4500,13 @@ export default function App() {
     if(!cloud||siteId===cloud.siteId)return;
     enterCloud({...cloud,siteId});
   };
+  const cloudRef=useRef<CloudCfg|null>(null); cloudRef.current=cloud;   // SITE_SWITCH_FIX_V1
   const refreshCloudSites=useCallback(async()=>{
-    if(!cloud)return;
+    if(!cloudRef.current)return;
     try{
-      const r=await AX.get(`${cloud.gateway}/auth/me`,{timeout:8000});
+      const r=await AX.get(`${cloudRef.current.gateway}/auth/me`,{timeout:8000});
+      const cloud=cloudRef.current;   // the camera chosen now, not when this check started
+      if(!cloud)return;
       const sites:CloudSite[]=r.data?.sites||[];
       if(sites.length){
         const siteId=sites.some(x=>x.id===cloud.siteId)?cloud.siteId:sites[0].id;

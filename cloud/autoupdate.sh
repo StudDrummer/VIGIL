@@ -33,17 +33,22 @@ healthy() {
 if [ "${1:-}" = "--undo" ]; then
   PREV=$(cat "$ST/prev_commit" 2>/dev/null) || { say "no previous version kept"; exit 1; }
   git -C .. rev-parse HEAD > "$ST/bad_version"
-  git -C .. checkout -q -B "$BRANCH" "$PREV" && images prev latest && up && say "back on ${PREV:0:7}"
+  git -C .. checkout -q -B "$BRANCH" "$PREV" && images prev latest && up && echo "$PREV" > "$ST/deployed" && say "back on ${PREV:0:7}"
   exit 0
 fi
 
 git -C .. fetch -q origin "$BRANCH" 2>/dev/null || { say "GitHub not reachable; will try later"; exit 0; }
-NEW=$(git -C .. rev-parse FETCH_HEAD); OLD=$(git -C .. rev-parse HEAD)
-[ "$NEW" = "$OLD" ] && { [ -t 1 ] && echo "Up to date (${NEW:0:7})."; exit 0; }
+NEW=$(git -C .. rev-parse FETCH_HEAD)
+# DEPLOYED_V1: compare with what is actually running, not with the checked-out
+# code, so an update cut short (Ctrl-C, reboot) is finished on the next run.
+DEP=$(cat "$ST/deployed" 2>/dev/null || true)
+OLD=${DEP:-$(git -C .. rev-parse HEAD)}
+[ -n "$DEP" ] && [ "$NEW" = "$DEP" ] && { [ -t 1 ] && echo "Up to date (${NEW:0:7})."; exit 0; }
 [ "$NEW" = "$(cat "$ST/bad_version" 2>/dev/null)" ] && exit 0
 
-say "updating ${OLD:0:7} -> ${NEW:0:7}"
-images latest prev 2>/dev/null
+say "updating ${OLD:0:7} -> ${NEW:0:7} (about 3 minutes; please do not interrupt)"
+[ -f "$ST/deployed" ] && images latest prev 2>/dev/null   # only a known-good version becomes 'prev'
+[ -f "$ST/deployed" ] || echo "(first run with this updater: no earlier version kept)"
 echo "$OLD" > "$ST/prev_commit"
 if ! git -C .. checkout -q -B "$BRANCH" "$NEW"; then
   say "files changed by hand on this server block the update (git -C ~/VIGIL status)"; exit 1
@@ -54,7 +59,7 @@ if ! bash build_images.sh >> "$ST/log" 2>&1; then
   echo "$NEW" > "$ST/bad_version"; git -C .. checkout -q -B "$BRANCH" "$OLD"; images prev latest; exit 1
 fi
 up
-if healthy; then say "running ${NEW:0:7}"; exit 0; fi
+if healthy; then echo "$NEW" > "$ST/deployed"; say "running ${NEW:0:7}"; exit 0; fi
 say "new version unhealthy; going back to ${OLD:0:7}"
 echo "$NEW" > "$ST/bad_version"
 git -C .. checkout -q -B "$BRANCH" "$OLD"; images prev latest; up
