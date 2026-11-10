@@ -714,7 +714,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
     let alive=true;
     (async()=>{while(alive){
       try{const r=await axios.get(`${cfg.gateway}/auth/site/${cfg.siteId}/relay`,gh);
-        if(alive&&r.data?.box_online&&r.data?.state!=='needs_camera_account'){setLiveS(0);setRelay(r.data);setDone(false);go(3);break;}}catch(_e){}
+        if(alive&&r.data?.box_online&&!['needs_camera_account','wifi_setup'].includes(r.data?.state)){setLiveS(0);setRelay(r.data);setDone(false);go(3);break;}}catch(_e){}
       await new Promise<void>(res=>setTimeout(()=>res(),4000));
     }})();
     return()=>{alive=false;};
@@ -4455,7 +4455,8 @@ export default function App() {
         )}
         {cloud&&cloud.sites.length===1&&<Text style={{color:C.muted,fontSize:13,marginTop:6}}>{cloud.sites[0].name}</Text>}
       </View>
-      {!!cloud&&!cloud.sites.length&&<AddCameraCard cfg={cloud} onAdded={cfg=>enterCloud(cfg)}/>}
+      {!!cloud&&!cloud.sites.length&&<AddCameraCard cfg={cloud} onAdded={(cfg,role)=>{enterCloud(cfg);   // ADD_THEN_SETUP_V1: a new camera goes straight to its box setup
+        if((role||'owner')==='owner'&&!cfg.sites.find(x=>x.id===cfg.siteId)?.online)setTimeout(()=>setBoxAgain(true),400);}}/>}
 
       {setupStatus&&(setupStatus.camera_moved||setupStatus.needs_zones)&&!demoMode&&(
         <TouchableOpacity onPress={()=>setZoneEditor(true)}
@@ -5064,9 +5065,6 @@ export default function App() {
           ))}
           {!!cloud.siteId&&<TouchableOpacity onPress={()=>setBoxAgain(true)} style={{paddingTop:12}}>
             <Text style={{color:C.blue,fontSize:15}}>New Wi-Fi or camera? Set up the VIGIL box again</Text></TouchableOpacity>}
-          <Modal visible={boxAgain} animationType="slide" presentationStyle="fullScreen" onRequestClose={()=>setBoxAgain(false)}>
-            {boxAgain&&cloud&&<BoxSetup cfg={cloud} onDone={()=>{setBoxAgain(false);refreshCloudSites();}} onSkip={()=>setBoxAgain(false)}/>}
-          </Modal>
           {!!cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic&&(
             <TouchableOpacity onPress={()=>Share.share({message:cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic||''})}>
               <Text style={{color:C.sub,fontSize:12,marginTop:10,lineHeight:17}}>
@@ -5082,7 +5080,8 @@ export default function App() {
       ):(
         <CloudSignIn startMode="signin" onSignedIn={cfg=>enterCloud(cfg)}/>
       )}
-      {cloud&&<AddCameraCard cfg={cloud} onAdded={cfg=>enterCloud(cfg)}/>}
+      {cloud&&<AddCameraCard cfg={cloud} onAdded={(cfg,role)=>{enterCloud(cfg);   // ADD_THEN_SETUP_V1: a new camera goes straight to its box setup
+        if((role||'owner')==='owner'&&!cfg.sites.find(x=>x.id===cfg.siteId)?.online)setTimeout(()=>setBoxAgain(true),400);}}/>}
       {!cloud&&<Text style={[s.secHeader,{marginTop:20}]}>Local VIGIL server</Text>}
       {!cloud&&<>
       <View style={[s.card,{marginHorizontal:16,marginTop:16,alignItems:'center',paddingVertical:28}]}>
@@ -5381,6 +5380,9 @@ export default function App() {
     <SafeAreaView style={s.root}>
       <StatusBar barStyle="light-content"/>
 
+      <Modal visible={boxAgain} animationType="slide" presentationStyle="fullScreen" onRequestClose={()=>setBoxAgain(false)}>
+        {boxAgain&&cloud&&<BoxSetup cfg={cloud} onDone={()=>{setBoxAgain(false);refreshCloudSites();}} onSkip={()=>setBoxAgain(false)}/>}
+      </Modal>
       {/* Fullscreen camera modal */}
       <Modal visible={fullscreen} animationType="fade" statusBarTranslucent>
         <View style={{flex:1,backgroundColor:'#000',alignItems:'center',justifyContent:'center'}}>
