@@ -1402,6 +1402,8 @@ def _v8_observe(all_persons, track_ids, boxes, frame):
 # height and the walk. Progress goes to vigil_enroll_state.json for the app's
 # ring; only when every part is in does it commit them all to P at once.
 # ---------------------------------------------------------------------------
+CPU_MODE = os.environ.get("VIGIL_CPU_MODE", "0") == "1"      # CPU_BUDGET_V1: set on VIGIL Cloud sites
+_FP_T = {}                                                       # track -> when its fingerprint was last taken
 _ENROLL_REQ = os.environ.get("VIGIL_ENROLL_REQ", "/dev/shm/vigil_enroll.json")
 _ENROLL_OUT = os.environ.get("VIGIL_ENROLL_OUT", "/dev/shm/vigil_enroll_state.json")
 EN_FACES = 8            # face views
@@ -1437,6 +1439,7 @@ def _enroll_reset(req):
                 "track": None, "track_hint": req.get("track"), "stage": "still", "stage_t": 0.0,
                 "last_tick": time.time(), "started": time.time(), "seen_t": 0.0, "faces": [], "face_ids": set(),
                 "fp": {"front": [], "side": [], "back": []}, "body": [], "height": [], "walk": None,
+                "cur_t": None, "carry_body": [], "carry_height": [], "snap_body": [], "snap_height": [],
                 "notes": [], "done": False, "others": 0})
     print("[ENROLL] learning %s (track hint %s)" % (_EN["pid"], _EN["track_hint"]), flush=True)
 
@@ -1570,12 +1573,17 @@ def _enroll_tick(all_persons, track_ids, boxes, fps):
                 _EN["face_ids"].add(id(e))
                 _EN["faces"].append(e)
                 del _EN["faces"][:-20]
-        tq = _PROP_TRK.get(t)
-        if tq:
-            _EN["body"] = list(tq)[-EN_BODY:]
-        th = _V8_TH.get(t)
-        if th:
-            _EN["height"] = list(th)[-EN_HEIGHT:]
+        # ENROLL_V3: samples add up across tracker IDs. When the tracker gives them a new
+        # ID, what the old ID collected is carried over, so build and height never restart.
+        if _EN.get("cur_t") not in (None, t):
+            for key in ("body", "height"):
+                _EN["carry_" + key] = (_EN.get("carry_" + key, []) + _EN.get("snap_" + key, []))[-max(EN_BODY, EN_HEIGHT) * 2:]
+                _EN["snap_" + key] = []
+        _EN["cur_t"] = t
+        for key, src, nmax in (("body", _PROP_TRK.get(t), EN_BODY), ("height", _V8_TH.get(t), EN_HEIGHT)):
+            if src:
+                _EN["snap_" + key] = list(src)[-nmax * 2:]
+            _EN[key] = (_EN.get("carry_" + key, []) + _EN.get("snap_" + key, []))[-nmax:]
         if _V8_WALK is not None:
             try:
                 sig = _V8_WALK.signature(t)
@@ -2248,13 +2256,27 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
         if _VR is not None and _current_frame is not None and track_ids:
             _fp_frame[0] += 1
             _want = []
+            _nowf = time.time()
             for _i, _k in enumerate(all_persons):
                 _t = track_ids[_i] if _i < len(track_ids) else None
                 if _t is None or _is_occluded(_i, _boxes):
                     continue
-                if _t not in _track_to_pid or _fp_frame[0] % 3 == 0 or _t in _V7["pending"] \
+                if CPU_MODE:
+                    # CPU_BUDGET_V1: on a CPU (VIGIL Cloud) the appearance model is the slowest
+                    # step. By the clock, not by frame: twice a second for someone not yet
+                    # named or being introduced, every 2 s for someone already known.
+                    _gap = 0.5 if (_t not in _track_to_pid or _t in _V7["pending"] or _t == _EN["track"]) else 2.0
+                    if _nowf - _FP_T.get(_t, 0.0) >= _gap:
+                        _want.append((_t, _k))
+                elif _t not in _track_to_pid or _fp_frame[0] % 3 == 0 or _t in _V7["pending"] \
                         or _t == _EN["track"]:                     # ENROLL_V1: every frame while learning them
                     _want.append((_t, _k))
+            _want = _want[:2] if CPU_MODE else _want
+            for _t, _k in _want:
+                _FP_T[_t] = _nowf
+            if len(_FP_T) > 400:
+                for _old in list(_FP_T)[:200]:
+                    _FP_T.pop(_old, None)
             if _want:
                 _fps = _fp_for(_want[:4], _current_frame)
         try:                                                     # IDENTITY_V8

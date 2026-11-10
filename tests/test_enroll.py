@@ -136,5 +136,21 @@ def test_lost_and_renamed_midway():
     assert ph._EN["track"] is None and state()["in_view"] is False
 
 
+def test_new_track_keeps_build_and_height():
+    """ENROLL_V3: a slow cloud camera gives the person a new tracker ID every few
+    frames. Build and height must keep adding up, not restart."""
+    import time as _tm
+    with open(os.environ["VIGIL_ENROLL_REQ"], "w") as f:
+        json.dump({"key": "k9", "person_id": "p1", "name": "Shivani", "track": 40, "t": _tm.time()}, f)
+    for tid in (40, 40, 40, 41, 41, 41, 42, 42, 42, 43, 43, 43, 44):
+        ph._PROP_TRK[tid] = ph._PROP_TRK.get(tid, [])
+        ph._V8_TH[tid] = ph._V8_TH.get(tid, [])
+        ph._EN["seen_t"] = _tm.time() - 1.0          # lost a moment ago, one person in view
+        frame("front", t=tid)
+    st = state()
+    assert st["parts"]["body"] == 1.0 and st["parts"]["height"] == 1.0, st["parts"]
+
+
 if __name__ == "__main__":
-    test_learns_every_part_then_commits(); test_stop_request_ends_it(); test_lost_and_renamed_midway(); print("ok")
+    test_learns_every_part_then_commits(); test_stop_request_ends_it(); test_lost_and_renamed_midway()
+    test_new_track_keeps_build_and_height(); print("ok")

@@ -251,14 +251,17 @@ class WalkTracker:
     def signature(self, tid):
         """[steps per second, step length, arm swing] or None if no clear walk."""
         q = list(self.h.get(tid, ()))
-        if len(q) < 24:
+        if len(q) < 14:
             return None
         q = [r for r in q if q[-1][0] - r[0] <= 6.0]
-        if len(q) < 24:
+        if len(q) < 14:                     # WALK_LOWFPS_V1: 14 readings, not 24, so a cloud camera can do it
             return None
         t = np.array([r[0] for r in q])
         dur = t[-1] - t[0]
         if dur < 2.0:
+            return None
+        rate = (len(q) - 1) / dur
+        if rate < 3.5:                      # too few readings a second to count steps honestly
             return None
         leg = float(np.median([r[4] for r in q]))
         moved = abs(q[-1][1] - q[0][1]) / leg
@@ -270,7 +273,7 @@ class WalkTracker:
         if len(crossings) < 3:
             return None
         steps_per_s = len(crossings) / dur      # each sign change is one step
-        if not 0.8 <= steps_per_s <= 3.5:
+        if not 0.8 <= steps_per_s <= min(3.5, rate / 2.0):   # above half the reading rate it would be a guess
             return None
         step_len = float(np.percentile(np.abs(ad), 90))
         wd = [r[3] for r in q if r[3] is not None]
