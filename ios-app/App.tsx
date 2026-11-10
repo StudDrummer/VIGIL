@@ -458,6 +458,111 @@ function AddCameraCard({cfg,onAdded,onSkip,initialCode=''}:{cfg:CloudCfg;onAdded
 }
 
 // ACCOUNTS_V1: the signed-in person's details and alert emails (Settings > Account).
+// APPLE_PUSH_V1: alerts come from the VIGIL app itself (Apple push through VIGIL Cloud).
+const PushMod:any=(NativeModules as any).VIGILPush;
+type PushState='on'|'off'|'ask'|'unavailable'|'busy';
+async function enablePush(cfg:CloudCfg,ask:boolean):Promise<PushState>{
+  if(!PushMod?.enable)return 'unavailable';
+  try{
+    if(!ask){const st=await PushMod.status();if(st!=='on')return st;}
+    const tok:string=await PushMod.enable();
+    await axios.post(`${cfg.gateway}/auth/push-token`,{token:tok,env:__DEV__?'sandbox':'production'},{timeout:12000,headers:{'X-VIGIL-Key':cfg.token}});
+    AsyncStorage.setItem('vigil_push_token',tok).catch(()=>{});
+    return 'on';
+  }catch(e:any){
+    if(e?.code==='denied')return 'off';
+    try{return (await PushMod.status())==='off'?'off':'unavailable';}catch(_e){return 'unavailable';}
+  }
+}
+async function disablePush(cfg:CloudCfg){
+  try{const tok=await AsyncStorage.getItem('vigil_push_token');
+    if(tok)await axios.delete(`${cfg.gateway}/auth/push-token`,{data:{token:tok},timeout:8000,headers:{'X-VIGIL-Key':cfg.token}});
+    await AsyncStorage.removeItem('vigil_push_token');}catch(_e){}
+}
+function AlertsOnCard({cfg}:{cfg:CloudCfg}){
+  const [st,setSt]=useState<PushState>('busy');
+  useEffect(()=>{enablePush(cfg,false).then(setSt);},[cfg.token]);
+  const on=async()=>{setSt('busy');setSt(await enablePush(cfg,true));};
+  const title=st==='on'?'Alerts are on for this phone':'Get alerts on this phone';
+  const sub=st==='on'?'Falls, a long time on the floor, night-time getting up, and the camera going offline arrive here as notifications.'
+    :st==='off'?'Notifications for VIGIL are turned off. Turn them on in Settings so a fall alert can reach you.'
+    :st==='unavailable'?'This copy of VIGIL cannot receive alerts yet. You still get every alert by email.'
+    :'So you hear about a fall the moment it happens, even when VIGIL is closed.';
+  return(
+    <View style={[s.card,{marginHorizontal:16,marginTop:16,flexDirection:'row',alignItems:'center',gap:14}]}>
+      <View style={{width:44,height:44,borderRadius:12,backgroundColor:(st==='on'?C.green:C.orange)+'22',alignItems:'center',justifyContent:'center'}}>
+        <View style={{width:14,height:14,borderRadius:7,backgroundColor:st==='on'?C.green:C.orange}}/></View>
+      <View style={{flex:1}}>
+        <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>{title}</Text>
+        <Text style={{color:C.sub,fontSize:13,marginTop:3,lineHeight:18}}>{sub}</Text>
+        {st==='ask'&&<TouchableOpacity onPress={on} style={[s.btnPrimary,{marginTop:10,paddingVertical:12}]}><Text style={s.btnPrimaryTxt}>Turn on alerts</Text></TouchableOpacity>}
+        {st==='off'&&<TouchableOpacity onPress={()=>PushMod?.openSettings?.()} style={{marginTop:8}}><Text style={{color:C.blue,fontSize:15,fontWeight:'600'}}>Open Settings</Text></TouchableOpacity>}
+        {st==='busy'&&<ActivityIndicator color={C.green} style={{marginTop:8,alignSelf:'flex-start'}}/>}
+      </View>
+    </View>);
+}
+
+// SITE_NAMES_V1 / COPY_PEOPLE_V1: name a camera, put it in a home with others,
+// and copy the same people from another camera.
+function SiteEditSheet({cfg,site,onClose,onSaved}:{cfg:CloudCfg;site:CloudSite;onClose:()=>void;onSaved:(sites:CloudSite[])=>void}){
+  const [name,setName]=useState(site.name);
+  const [home,setHome]=useState(site.home||'');
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState<string|null>(null);
+  const others=cfg.sites.filter(x=>x.id!==site.id);
+  const homes=Array.from(new Set(others.map(x=>x.home).filter(Boolean))) as string[];
+  const h={timeout:15000,headers:{'X-VIGIL-Key':cfg.token}};
+  const save=async()=>{
+    if(!name.trim()){setErr('Type a name, like Nani\'s bedroom.');return;}
+    setBusy(true);setErr(null);
+    try{const r=await axios.post(`${cfg.gateway}/auth/site/${site.id}/settings`,{name:name.trim(),home:home.trim()},h);
+      onSaved(r.data?.sites||cfg.sites);onClose();}
+    catch(e:any){setErr(e?.response?.data?.reason||'Could not save. Check the internet connection.');}
+    finally{setBusy(false);}
+  };
+  const copy=(src:CloudSite)=>Alert.alert(`Same people as ${src.name}?`,`Everyone on ${src.name}, with their photo and details, is added to ${site.name}.`,[
+    {text:'Cancel',style:'cancel'},
+    {text:'Copy them',onPress:async()=>{setBusy(true);setErr(null);
+      try{const r=await axios.post(`${cfg.gateway}/auth/site/${site.id}/copy-people`,{from:src.id},{...h,timeout:60000});
+        const a=r.data?.added||[];Alert.alert(a.length?`Added ${a.join(', ')}`:'Everyone is already there');}
+      catch(e:any){setErr(e?.response?.data?.reason||'Could not copy. Check the internet connection.');}
+      finally{setBusy(false);}}}]);
+  const inp={color:C.text,fontSize:17,backgroundColor:C.bg,borderRadius:12,borderWidth:1,borderColor:C.border,paddingHorizontal:14,paddingVertical:13,marginTop:8};
+  return(
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <KeyboardAvoidingView behavior={Platform.OS==='ios'?'padding':undefined} style={{flex:1,backgroundColor:'rgba(0,0,0,0.55)',justifyContent:'flex-end'}}>
+        <View style={{backgroundColor:C.card,borderTopLeftRadius:22,borderTopRightRadius:22,padding:20,paddingBottom:36}}>
+          <View style={{width:40,height:5,borderRadius:3,backgroundColor:C.fill,alignSelf:'center',marginBottom:14}}/>
+          <Text style={{color:C.text,fontSize:20,fontWeight:'800'}}>Camera details</Text>
+          <Text style={{color:C.sub,fontSize:14,marginTop:16,fontWeight:'600'}}>Name</Text>
+          <TextInput style={inp} value={name} onChangeText={setName} placeholder="e.g. Nani's bedroom" placeholderTextColor={C.muted} autoCapitalize="sentences" maxLength={40}/>
+          <Text style={{color:C.sub,fontSize:14,marginTop:16,fontWeight:'600'}}>Home</Text>
+          <TextInput style={inp} value={home} onChangeText={setHome} placeholder="e.g. Nani's flat, Pune" placeholderTextColor={C.muted} autoCapitalize="words" maxLength={40}/>
+          {homes.length>0&&(
+            <View style={{flexDirection:'row',flexWrap:'wrap',gap:8,marginTop:10}}>
+              {homes.map(x=>(
+                <TouchableOpacity key={x} onPress={()=>setHome(x)} style={{paddingHorizontal:12,paddingVertical:7,borderRadius:16,borderWidth:1,borderColor:home===x?C.green:C.border,backgroundColor:home===x?C.green+'22':'transparent'}}>
+                  <Text style={{color:home===x?C.green:C.text,fontSize:13,fontWeight:'600'}}>Same home: {x}</Text></TouchableOpacity>))}
+            </View>)}
+          <Text style={{color:C.muted,fontSize:12,marginTop:8,lineHeight:17}}>Cameras with the same home are shown together.</Text>
+          {others.length>0&&(<>
+            <Text style={{color:C.sub,fontSize:14,marginTop:18,fontWeight:'600'}}>Same people as another camera</Text>
+            {others.map(o=>(
+              <TouchableOpacity key={o.id} disabled={busy} onPress={()=>copy(o)} style={{paddingVertical:10}}>
+                <Text style={{color:C.blue,fontSize:16}}>Copy everyone from {o.name}</Text></TouchableOpacity>))}
+          </>)}
+          {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:10}}>{err}</Text>}
+          <View style={{flexDirection:'row',gap:10,marginTop:18}}>
+            <TouchableOpacity onPress={onClose} style={{flex:1,padding:15,borderRadius:12,backgroundColor:C.fill,alignItems:'center'}}>
+              <Text style={{color:C.text,fontWeight:'700',fontSize:16}}>Cancel</Text></TouchableOpacity>
+            <TouchableOpacity disabled={busy} onPress={save} style={[s.btnPrimary,{flex:2,opacity:busy?0.5:1}]}>
+              {busy?<ActivityIndicator color="#000"/>:<Text style={s.btnPrimaryTxt}>Save</Text>}</TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>);
+}
+
 function AccountSection({cfg}:{cfg:CloudCfg}){
   const [user,setUser]=useState<any>(null);
   const [name,setName]=useState('');
@@ -914,15 +1019,20 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
 // who lives there (photo, height, who VIGIL looks after), their consent, whose
 // Apple Watch this is, who gets alerts, the camera view, then Introduce everyone.
 // Each step is saved, so closing the app part-way resumes where it stopped.
-type HSPerson={id:string;name:string;resident:boolean;height_cm:number|null;consent:boolean};
-const NTFY_APP='https://apps.apple.com/app/ntfy/id1625396347';
+type HSPerson={id:string;name:string;resident:boolean;height_cm:number|null;consent:boolean;
+  birth_year?:number|null;sex?:string|null;weight_kg?:number|null;emergency_name?:string|null;emergency_phone?:string|null};
+// PERSON_DETAILS_V1: what VIGIL needs to know about someone it looks after.
+type HSForm={id?:string;name:string;resident:boolean;height:string;photo:string|null;
+  birthYear:string;sex:''|'female'|'male'|'other';weight:string;ecName:string;ecPhone:string};
+const emptyForm=(resident:boolean):HSForm=>({name:'',resident,height:'',photo:null,birthYear:'',sex:'',weight:'',ecName:'',ecPhone:''});
 function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void}){
   const owner=role!=='caregiver';
   const STEPS=owner?['people','consent','watch','alerts','camera','meet','done']:['alerts','done'];
   const [step,setStep]=useState(0);
   const [people,setPeople]=useState<HSPerson[]>([]);
   const [units,setUnits]=useState<'us'|'metric'>('us');
-  const [form,setForm]=useState<{id?:string;name:string;resident:boolean;height:string;photo:string|null}|null>(null);
+  const [form,setForm]=useState<HSForm|null>(null);
+  const [copyBusy,setCopyBusy]=useState(false);
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState<string|null>(null);
   const [watch,setWatch]=useState<string|null|undefined>(undefined);   // undefined = not chosen, null = no watch
@@ -940,7 +1050,8 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
     try{
       const r=await AX.get(`${url}/persons`,{timeout:10000});
       const named=(Array.isArray(r.data)?r.data:[]).filter((p:any)=>(p.name||'').trim());
-      setPeople(named.map((p:any)=>({id:p.id,name:p.name,resident:!!p.is_resident,height_cm:p.height_cm??null,consent:!!p.consent_at})));
+      setPeople(named.map((p:any)=>({id:p.id,name:p.name,resident:!!p.is_resident,height_cm:p.height_cm??null,consent:!!p.consent_at,
+        birth_year:p.birth_year??null,sex:p.sex??null,weight_kg:p.weight_kg??null,emergency_name:p.emergency_name??null,emergency_phone:p.emergency_phone??null})));
     }catch(_e){}
   },[url]);
   useEffect(()=>{
@@ -982,14 +1093,21 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
     const n=form.name.trim();if(!n){setErr('Type their name.');return;}
     const h=form.height.trim()?parseHeightCm(form.height):null;
     if(form.height.trim()&&h==null){setErr(units==='us'?'Height like 5\'6" or 66 in.':'Height like 168 cm.');return;}
+    const yr=form.birthYear.trim()?parseInt(form.birthYear.trim(),10):null;
+    if(form.birthYear.trim()&&(!yr||yr<1900||yr>new Date().getFullYear())){setErr('Birth year like 1948.');return;}
+    const wRaw=form.weight.trim()?parseFloat(form.weight.replace(/[^0-9.]/g,'')):null;
+    const wKg=wRaw==null||isNaN(wRaw)?null:units==='us'?Math.round(wRaw*0.4536*10)/10:wRaw;
+    if(form.weight.trim()&&(wKg==null||wKg<20||wKg>300)){setErr(units==='us'?'Weight in pounds, like 130.':'Weight in kg, like 60.');return;}
+    const details=form.resident?{birth_year:yr,sex:form.sex||null,weight_kg:wKg,emergency_name:form.ecName.trim()||null,emergency_phone:form.ecPhone.trim()||null}:{};
     setBusy(true);setErr(null);
     try{
       let id=form.id;
       if(id){
         await AX.post(`${url}/persons/${id}/identify`,{name:n,is_resident:form.resident},{timeout:10000});
         if(h!=null)await AX.post(`${url}/persons/${id}/height`,{height_cm:h},{timeout:10000});
+        if(form.resident)await AX.post(`${url}/persons/${id}/details`,details,{timeout:10000});
       }else{
-        const r=await AX.post(`${url}/persons/new`,{name:n,is_resident:form.resident,height_cm:h},{timeout:10000});
+        const r=await AX.post(`${url}/persons/new`,{name:n,is_resident:form.resident,height_cm:h,...details},{timeout:10000});
         id=r.data?.person_id;
       }
       if(id&&form.photo){await AX.post(`${url}/persons/${id}/photo/set`,{photo_b64:form.photo},{timeout:20000});bumpPhoto(id);}
@@ -997,6 +1115,16 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
     }catch(e:any){setErr(e?.response?.data?.reason||'Could not save. Check the internet connection.');}
     finally{setBusy(false);}
   };
+  // COPY_PEOPLE_V1: the same family on another camera (a second room, or the same home)
+  const others=cfg.sites.filter(x=>x.id!==cfg.siteId);
+  const copyFrom=(src:CloudSite)=>Alert.alert(`Same people as ${src.name}?`,`Everyone added on ${src.name}, with their photo and details, is added here too. VIGIL still learns how they look on this camera.`,[
+    {text:'Cancel',style:'cancel'},
+    {text:'Copy them',onPress:async()=>{setCopyBusy(true);setErr(null);
+      try{const r=await axios.post(`${cfg.gateway}/auth/site/${cfg.siteId}/copy-people`,{from:src.id},{timeout:60000,headers:{'X-VIGIL-Key':cfg.token}});
+        await load();const a=r.data?.added||[];
+        Alert.alert(a.length?`Added ${a.join(', ')}`:'Everyone is already here',a.length?'Check each one below and add anything missing.':'');}
+      catch(e:any){setErr(e?.response?.data?.reason||'Could not copy. Check the internet connection.');}
+      finally{setCopyBusy(false);}}}]);
   const removePerson=(p:HSPerson)=>Alert.alert(`Remove ${p.name}?`,'VIGIL forgets them and everything measured about them.',[
     {text:'Cancel',style:'cancel'},
     {text:'Remove',style:'destructive',onPress:async()=>{try{await AX.post(`${url}/persons/${p.id}/delete`,{},{timeout:10000});load();}catch(_e){setErr('Could not remove. Try again.');}}}]);
@@ -1037,14 +1165,28 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
           <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:10,borderRadius:9,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
             <Text style={{color:units===k?'#000':C.sub,fontSize:14,fontWeight:'700'}}>{l}</Text></TouchableOpacity>))}
       </View>
+      {others.length>0&&!form&&(
+        <View style={[s.card,{marginTop:12}]}>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Same people as another camera?</Text>
+          <Text style={{color:C.sub,fontSize:13,marginTop:3,lineHeight:18}}>If this camera is in the same home, or watches the same family, copy everyone in one tap.</Text>
+          {others.map(o=>(
+            <TouchableOpacity key={o.id} disabled={copyBusy} onPress={()=>copyFrom(o)} style={{flexDirection:'row',alignItems:'center',paddingVertical:10,marginTop:6,borderTopWidth:1,borderTopColor:C.hair}}>
+              <Text style={{color:C.blue,fontSize:15,fontWeight:'600',flex:1}}>Copy from {o.name}</Text>
+              {copyBusy&&<ActivityIndicator color={C.green}/>}
+            </TouchableOpacity>))}
+        </View>)}
       {people.map(p=>(
         <View key={p.id} style={[s.card,{marginTop:12,flexDirection:'row',alignItems:'center'}]}>
           <PersonAvatar personId={p.id} name={p.name} serverUrl={url} size={52} isResident={p.resident}/>
           <View style={{flex:1,marginLeft:14}}>
             <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>{p.name}</Text>
-            <Text style={{color:p.resident?C.green:C.sub,fontSize:13,marginTop:3}}>{p.resident?'VIGIL looks after them':'Lives here'}{p.height_cm?` · ${fmtH(p.height_cm)}`:''}</Text>
+            <Text style={{color:p.resident?C.green:C.sub,fontSize:13,marginTop:3}}>{p.resident?'VIGIL looks after them':'Lives here'}{p.height_cm?` · ${fmtH(p.height_cm)}`:''}{p.birth_year?` · born ${p.birth_year}`:''}</Text>
+            {p.resident&&!p.emergency_phone&&<Text style={{color:C.orange,fontSize:12,marginTop:2}}>Add an emergency contact</Text>}
           </View>
-          <TouchableOpacity onPress={()=>setForm({id:p.id,name:p.name,resident:p.resident,height:p.height_cm?fmtH(p.height_cm):'',photo:null})} style={{padding:8}}>
+          <TouchableOpacity onPress={()=>setForm({id:p.id,name:p.name,resident:p.resident,height:p.height_cm?fmtH(p.height_cm):'',photo:null,
+              birthYear:p.birth_year?String(p.birth_year):'',sex:(p.sex as any)||'',
+              weight:p.weight_kg?(units==='us'?String(Math.round(p.weight_kg/0.4536)):String(p.weight_kg)):'',
+              ecName:p.emergency_name||'',ecPhone:p.emergency_phone||''})} style={{padding:8}}>
             <Text style={{color:C.blue,fontSize:15}}>Edit</Text></TouchableOpacity>
           <TouchableOpacity onPress={()=>removePerson(p)} style={{padding:8}}>
             <Text style={{color:C.muted,fontSize:15}}>Remove</Text></TouchableOpacity>
@@ -1073,6 +1215,25 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
               <Text style={{color:C.sub,fontSize:12,marginTop:2,lineHeight:17}}>Fall alerts, walking and activity trends. Turn off for family who only live there.</Text>
             </View>
           </View>
+          {form.resident&&(<>
+            <Text style={{color:C.text,fontSize:15,fontWeight:'700',marginTop:18}}>About {form.name.trim()||'them'}</Text>
+            <Text style={{color:C.muted,fontSize:12,marginTop:2,lineHeight:17}}>Walking and activity are compared with people of the same age and build. All optional.</Text>
+            <View style={{flexDirection:'row',gap:10}}>
+              <TextInput style={[inp,{flex:1}]} value={form.birthYear} onChangeText={t=>setForm({...form,birthYear:t.replace(/[^0-9]/g,'').slice(0,4)})}
+                placeholder="Birth year" placeholderTextColor={C.muted} keyboardType="number-pad"/>
+              <TextInput style={[inp,{flex:1}]} value={form.weight} onChangeText={t=>setForm({...form,weight:t})}
+                placeholder={units==='us'?'Weight (lb)':'Weight (kg)'} placeholderTextColor={C.muted} keyboardType="decimal-pad"/>
+            </View>
+            <View style={{flexDirection:'row',backgroundColor:C.bg,borderRadius:10,padding:3,marginTop:10,borderWidth:1,borderColor:C.border}}>
+              {([['female','Female'],['male','Male'],['other','Other']] as const).map(([k,l])=>(
+                <TouchableOpacity key={k} onPress={()=>setForm({...form,sex:form.sex===k?'':k})} style={{flex:1,paddingVertical:9,borderRadius:8,alignItems:'center',backgroundColor:form.sex===k?C.green:'transparent'}}>
+                  <Text style={{color:form.sex===k?'#000':C.sub,fontSize:14,fontWeight:'700'}}>{l}</Text></TouchableOpacity>))}
+            </View>
+            <Text style={{color:C.text,fontSize:15,fontWeight:'700',marginTop:18}}>Emergency contact</Text>
+            <Text style={{color:C.muted,fontSize:12,marginTop:2,lineHeight:17}}>Someone nearby who can check on {form.name.trim()||'them'}. Shown on every fall alert, one tap to call.</Text>
+            <TextInput style={inp} value={form.ecName} onChangeText={t=>setForm({...form,ecName:t})} placeholder="Their name, e.g. Ravi (neighbour)" placeholderTextColor={C.muted} autoCapitalize="words"/>
+            <TextInput style={inp} value={form.ecPhone} onChangeText={t=>setForm({...form,ecPhone:t})} placeholder="Phone, e.g. +91 98765 43210" placeholderTextColor={C.muted} keyboardType="phone-pad" textContentType="telephoneNumber"/>
+          </>)}
           <View style={{flexDirection:'row',gap:10,marginTop:16}}>
             <TouchableOpacity onPress={()=>{setForm(null);setErr(null);}} style={{flex:1,padding:15,borderRadius:12,backgroundColor:C.fill,alignItems:'center'}}>
               <Text style={{color:C.text,fontWeight:'700',fontSize:16}}>Cancel</Text></TouchableOpacity>
@@ -1081,7 +1242,7 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
           </View>
         </View>
       ):(
-        <TouchableOpacity onPress={()=>{setErr(null);setForm({name:'',resident:residents.length===0,height:'',photo:null});}}
+        <TouchableOpacity onPress={()=>{setErr(null);setForm(emptyForm(residents.length===0));}}
           style={{marginTop:14,padding:18,borderRadius:14,borderWidth:1.5,borderStyle:'dashed',borderColor:C.green,alignItems:'center'}}>
           <Text style={{color:C.green,fontSize:17,fontWeight:'700'}}>+ Add {people.length?'another person':'a person'}</Text></TouchableOpacity>
       )}
@@ -1129,19 +1290,7 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
     case 'alerts':return(<>
       <H1 t="Who gets alerts" sub={owner?'Falls, a long time on the floor, and the camera going offline. Set up at least one way to hear about them now.':`You joined ${site?.name||'this home'}. Choose how you hear about falls and other alerts.`}/>
       <AccountSection cfg={cfg}/>
-      {!!site?.ntfy_topic&&(
-        <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
-          <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Instant alerts on this phone</Text>
-          <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:20}}>1. Install the free ntfy app.{'\n'}2. In ntfy, tap +, paste this topic, and Subscribe:</Text>
-          <TouchableOpacity onPress={()=>{Share.share({message:site.ntfy_topic||''});}}
-            style={{marginTop:10,padding:12,borderRadius:10,backgroundColor:C.bg,borderWidth:1,borderColor:C.border}}>
-            <Text style={{color:C.green,fontSize:15,fontWeight:'700',textAlign:'center'}}>{site.ntfy_topic}</Text>
-            <Text style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:4}}>Tap to copy</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={()=>Linking.openURL(NTFY_APP)} style={{paddingTop:12}}>
-            <Text style={{color:C.blue,fontSize:15}}>Get ntfy from the App Store</Text></TouchableOpacity>
-          <Text style={{color:C.muted,fontSize:12,marginTop:8,lineHeight:17}}>Keep this topic private: anyone with it receives this home's alerts.</Text>
-        </View>)}
+      <AlertsOnCard cfg={cfg}/>
       {owner&&!!code&&(
         <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
           <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Invite family</Text>
@@ -3766,6 +3915,8 @@ export default function App() {
   // IN_VIEW_LIVE_V1: exactly who is in the camera picture right now.
   const [inViewList,setInViewList]=useState<{id:string;name:string|null;is_resident:number;track?:number|null}[]>([]);
   const [boxAgain,setBoxAgain]=useState(false);   // APP_SETUP_V1: new Wi-Fi or new camera account
+  const [switcher,setSwitcher]=useState(false);   // CAMERA_SWITCHER_V1
+  const [siteEdit,setSiteEdit]=useState<CloudSite|null>(null);   // SITE_NAMES_V1
   const [whoToday,setWhoToday]=useState<{track:number|null;current:{id:string;name:string|null}|null}|null>(null);   // WHO_SHEET_V1
   const [identifying,setIdentifying]=useState(0);
   // IDENTITY_V6_APP
@@ -4356,6 +4507,7 @@ export default function App() {
       }
     }
   },[cloud]);
+  useEffect(()=>{if(cloud)enablePush(cloud,false).catch(()=>{});},[cloud?.token]);   // APPLE_PUSH_V1
   useEffect(()=>{if(!cloud)return;refreshCloudSites();const id=setInterval(refreshCloudSites,60000);return()=>clearInterval(id);},[cloud?.token]);
 
   const reconnect=()=>{
@@ -4442,18 +4594,21 @@ export default function App() {
         </View>
         <Text style={s.pageTitle}>Today</Text>
         <Text style={s.pageSub}>{new Date().toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})}</Text>
-        {cloud&&cloud.sites.length>1&&(
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{marginTop:12}} contentContainerStyle={{gap:8}}>
-            {cloud.sites.map(site=>{const on=site.id===cloud.siteId;return(
-              <TouchableOpacity key={site.id} onPress={()=>switchSite(site.id)}
-                style={{flexDirection:'row',alignItems:'center',gap:6,paddingHorizontal:12,paddingVertical:7,borderRadius:16,
-                  backgroundColor:on?C.green+'22':C.card,borderWidth:1,borderColor:on?C.green:C.border}}>
-                <View style={{width:7,height:7,borderRadius:4,backgroundColor:site.online===false?C.red:site.online?C.green:C.sub}}/>
-                <Text style={{color:on?C.green:C.text,fontSize:13,fontWeight:on?'700':'500'}}>{site.name}</Text>
-              </TouchableOpacity>);})}
-          </ScrollView>
-        )}
-        {cloud&&cloud.sites.length===1&&<Text style={{color:C.muted,fontSize:13,marginTop:6}}>{cloud.sites[0].name}</Text>}
+        {cloud&&cloud.sites.length>0&&(()=>{   // CAMERA_SWITCHER_V1: which camera, and one tap to change it
+          const cur=cloud.sites.find(x=>x.id===cloud.siteId)||cloud.sites[0];
+          const dot=cur.online===false?C.red:cur.online?C.green:C.sub;
+          return(
+            <TouchableOpacity onPress={()=>setSwitcher(true)} activeOpacity={0.7}
+              style={{flexDirection:'row',alignItems:'center',alignSelf:'flex-start',marginTop:14,paddingLeft:12,paddingRight:14,paddingVertical:9,
+                borderRadius:22,backgroundColor:C.card,borderWidth:1,borderColor:C.border,gap:8,maxWidth:'100%'}}>
+              <View style={{width:8,height:8,borderRadius:4,backgroundColor:dot}}/>
+              <View style={{flexShrink:1}}>
+                <Text numberOfLines={1} style={{color:C.text,fontSize:15,fontWeight:'700'}}>{cur.name}</Text>
+                {!!cur.home&&<Text numberOfLines={1} style={{color:C.muted,fontSize:11,marginTop:1}}>{cur.home}</Text>}
+              </View>
+              <Text style={{color:C.green,fontSize:13,fontWeight:'700',marginLeft:4}}>{cloud.sites.length>1?'Switch':'Cameras'}</Text>
+            </TouchableOpacity>);
+        })()}
       </View>
       {!!cloud&&!cloud.sites.length&&<AddCameraCard cfg={cloud} onAdded={(cfg,role)=>{enterCloud(cfg);   // ADD_THEN_SETUP_V1: a new camera goes straight to its box setup
         if((role||'owner')==='owner'&&!cfg.sites.find(x=>x.id===cfg.siteId)?.online)setTimeout(()=>setBoxAgain(true),400);}}/>}
@@ -4504,6 +4659,16 @@ export default function App() {
                 {open.length>1?`I am checking on them (${open.length} open)`:'I am checking on them'}
               </Text>
             </TouchableOpacity>
+            {(()=>{   // PERSON_DETAILS_V1: one tap to the emergency contact
+              const pid=(a as any).person_id||(a as any).payload?.person_id;
+              const res=(persons as any[]).filter(x=>x.is_resident&&x.emergency_phone);
+              const who=res.find(x=>x.id===pid)||res[0];
+              if(!who)return null;
+              return(<TouchableOpacity onPress={()=>Linking.openURL(`tel:${String(who.emergency_phone).replace(/[^0-9+]/g,'')}`)}
+                style={{borderRadius:12,paddingVertical:13,alignItems:'center',marginTop:8,borderWidth:1.5,borderColor:C.red}}>
+                <Text style={{color:C.red,fontWeight:'800',fontSize:15}}>Call {who.emergency_name||'emergency contact'}</Text>
+              </TouchableOpacity>);
+            })()}
           </View>
         );
       })()}
@@ -5046,6 +5211,7 @@ export default function App() {
   const renderServerTab=()=>(
     <ScrollView automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
       {cloud&&<AccountSection cfg={cloud}/>}
+      {cloud&&<AlertsOnCard cfg={cloud}/>}
       {cloud&&<AccessSection cfg={cloud} onDeleted={()=>{AsyncStorage.removeItem(SK_CLOUD).catch(()=>{});AsyncStorage.removeItem(SK_ONBOARDING).catch(()=>{});enterCloud(null);setOnboarding(true);}}/>}
       {cloud?(
         <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
@@ -5061,19 +5227,14 @@ export default function App() {
                 {!!site.home&&site.home!==site.name&&<Text style={{color:C.muted,fontSize:12}}>{site.home}</Text>}
               </View>
               {site.id===cloud.siteId&&<Text style={{color:C.green,fontSize:13,fontWeight:'600'}}>Viewing</Text>}
+              <TouchableOpacity onPress={()=>setSiteEdit(site)} hitSlop={{top:10,bottom:10,left:10,right:10}} style={{marginLeft:14}}>
+                <Text style={{color:C.blue,fontSize:15}}>Edit</Text></TouchableOpacity>
             </TouchableOpacity>
           ))}
           {!!cloud.siteId&&<TouchableOpacity onPress={()=>setBoxAgain(true)} style={{paddingTop:12}}>
             <Text style={{color:C.blue,fontSize:15}}>New Wi-Fi or camera? Set up the VIGIL box again</Text></TouchableOpacity>}
-          {!!cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic&&(
-            <TouchableOpacity onPress={()=>Share.share({message:cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic||''})}>
-              <Text style={{color:C.sub,fontSize:12,marginTop:10,lineHeight:17}}>
-                Alerts for this camera: subscribe to topic <Text style={{color:C.green}}>{cloud.sites.find(x=>x.id===cloud.siteId)?.ntfy_topic}</Text> in the ntfy app (tap to copy).
-              </Text>
-            </TouchableOpacity>
-          )}
           <TouchableOpacity style={[s.btnPrimary,{marginTop:16,backgroundColor:C.card,borderWidth:1,borderColor:C.border}]}
-            onPress={()=>Alert.alert('Sign out of VIGIL Cloud?','The app will go back to your local VIGIL server.',[{text:'Cancel',style:'cancel'},{text:'Sign out',style:'destructive',onPress:()=>{AX.post(`${cloud.gateway}/auth/logout`).catch(()=>{});enterCloud(null);}}])}>
+            onPress={()=>Alert.alert('Sign out of VIGIL Cloud?','The app will go back to your local VIGIL server.',[{text:'Cancel',style:'cancel'},{text:'Sign out',style:'destructive',onPress:()=>{disablePush(cloud).finally(()=>{AX.post(`${cloud.gateway}/auth/logout`).catch(()=>{});enterCloud(null);});}}])}>
             <Text style={[s.btnPrimaryTxt,{color:C.red}]}>Sign out</Text>
           </TouchableOpacity>
         </View>
@@ -5147,8 +5308,9 @@ export default function App() {
         onPress={async()=>{   // TEST_ALERT_V1
           try{
             const r=await AX.post(`${url()}/alert/test`,{},{timeout:10000});
-            if(r.data?.status==='ok')Alert.alert('Test alert sent','Your phone should buzz within a few seconds. If it does not, open the ntfy app and check you are subscribed to this camera.');
-            else Alert.alert('Alerts are not set up',r.data?.reason||'This VIGIL cannot send alerts yet.');
+            const n=r.data?.phones;
+            if(r.data?.status==='ok')Alert.alert('Test alert sent',n?`Sent to ${n} phone${n===1?'':'s'}. It should arrive within a few seconds.`:'It should arrive within a few seconds.');
+            else Alert.alert('No phone has alerts on yet','Turn them on in Settings, Account: "Get alerts on this phone". Everyone on this camera also gets alerts by email.');
           }catch(e:any){Alert.alert('Could not send',e?.message||'Check the connection and try again.');}
         }}>
         <Text style={[s.btnPrimaryTxt,{color:C.text}]}>Send a test alert</Text>
@@ -5383,6 +5545,39 @@ export default function App() {
       <Modal visible={boxAgain} animationType="slide" presentationStyle="fullScreen" onRequestClose={()=>setBoxAgain(false)}>
         {boxAgain&&cloud&&<BoxSetup cfg={cloud} onDone={()=>{setBoxAgain(false);refreshCloudSites();}} onSkip={()=>setBoxAgain(false)}/>}
       </Modal>
+      <Modal visible={switcher} transparent animationType="slide" onRequestClose={()=>setSwitcher(false)}>
+        <TouchableOpacity activeOpacity={1} onPress={()=>setSwitcher(false)} style={{flex:1,backgroundColor:'rgba(0,0,0,0.55)',justifyContent:'flex-end'}}>
+          <TouchableOpacity activeOpacity={1} style={{backgroundColor:C.card,borderTopLeftRadius:22,borderTopRightRadius:22,paddingBottom:34,paddingTop:10,maxHeight:'80%'}}>
+            <View style={{width:40,height:5,borderRadius:3,backgroundColor:C.fill,alignSelf:'center',marginBottom:12}}/>
+            <Text style={{color:C.text,fontSize:20,fontWeight:'800',paddingHorizontal:20,marginBottom:6}}>Cameras</Text>
+            <ScrollView>
+              {cloud&&(()=>{
+                const groups:Record<string,CloudSite[]>={};
+                cloud.sites.forEach(x=>{const k=x.home||'';(groups[k]=groups[k]||[]).push(x);});
+                return Object.keys(groups).sort().map(h=>(
+                  <View key={h||'_'}>
+                    {!!h&&<Text style={{color:C.muted,fontSize:12,fontWeight:'700',letterSpacing:0.8,paddingHorizontal:20,marginTop:14,marginBottom:4}}>{h.toUpperCase()}</Text>}
+                    {groups[h].map(x=>{const on=x.id===cloud.siteId;return(
+                      <TouchableOpacity key={x.id} onPress={()=>{setSwitcher(false);if(!on)switchSite(x.id);}}
+                        style={{flexDirection:'row',alignItems:'center',paddingHorizontal:20,paddingVertical:14,backgroundColor:on?C.green+'14':'transparent'}}>
+                        <View style={{width:10,height:10,borderRadius:5,marginRight:14,backgroundColor:x.online===false?C.red:x.online?C.green:C.sub}}/>
+                        <View style={{flex:1}}>
+                          <Text style={{color:C.text,fontSize:17,fontWeight:on?'700':'500'}}>{x.name}</Text>
+                          <Text style={{color:x.online===false?C.red:C.muted,fontSize:12,marginTop:2}}>{x.online===false?'Offline: check the camera and box are plugged in':x.online?'Watching':'Connecting...'}</Text>
+                        </View>
+                        {on&&<Text style={{color:C.green,fontSize:14,fontWeight:'700'}}>Viewing</Text>}
+                      </TouchableOpacity>);})}
+                  </View>));
+              })()}
+            </ScrollView>
+            <TouchableOpacity onPress={()=>{setSwitcher(false);setActiveTab('settings' as MainTab);setSettingsTab('server');}} style={{paddingHorizontal:20,paddingTop:16}}>
+              <Text style={{color:C.blue,fontSize:16,fontWeight:'600'}}>Rename cameras, add a camera</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+      {siteEdit&&cloud&&<SiteEditSheet cfg={cloud} site={siteEdit} onClose={()=>setSiteEdit(null)}
+        onSaved={sites=>{const c2={...cloud,sites};setCloud(c2);AsyncStorage.setItem(SK_CLOUD,JSON.stringify(c2)).catch(()=>{});}}/>}
       {/* Fullscreen camera modal */}
       <Modal visible={fullscreen} animationType="fade" statusBarTranslucent>
         <View style={{flex:1,backgroundColor:'#000',alignItems:'center',justifyContent:'center'}}>

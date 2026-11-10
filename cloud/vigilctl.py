@@ -132,6 +132,7 @@ def render(st):
       VIGIL_FLOOR_ALERT_S: "{floor_s}"
       VIGIL_FACE_ID: "{face}"
       PYTHONFAULTHANDLER: "1"
+      VIGIL_PUSH_URL: "http://gateway:8080/internal/push/{id}"
       # RTSP_TCP_V1: mediamtx serves the camera inside the server over TCP only; without
       # this OpenCV asks for UDP first (461), stalls 30 s per try, and then crashes.
       OPENCV_FFMPEG_CAPTURE_OPTIONS: "rtsp_transport;tcp|stimeout;10000000"
@@ -474,6 +475,19 @@ def cmd_boxes(_a):
             ("%s dBm" % b["signal_dbm"]) if b.get("signal_dbm") is not None else "-", (b.get("code") or "-")[:7]))
 
 
+def cmd_apns(a):
+    """APPLE_PUSH_V1: switch on alerts straight to the VIGIL app. The key comes from
+    developer.apple.com > Keys > + > Apple Push Notifications service (a .p8 file)."""
+    with open(a.key_file) as f:
+        key = f.read()
+    if "PRIVATE KEY" not in key:
+        sys.exit("That file is not an Apple .p8 key.")
+    _write(os.path.join(CONF, "apns_key.p8"), key, secret=True)
+    _write(os.path.join(CONF, "apns.json"), json.dumps({"key_id": a.key_id, "team_id": a.team_id,
+                                                        "bundle_id": a.bundle_id}, indent=1), secret=True)
+    print("Apple push is on. Phones get alerts from the VIGIL app within a minute.")
+
+
 def cmd_apply(_a):
     st = load()
     render(st)
@@ -513,6 +527,9 @@ def main():
     sub.add_parser("users").set_defaults(f=cmd_users)
     sub.add_parser("apply").set_defaults(f=cmd_apply)
     sub.add_parser("boxes").set_defaults(f=cmd_boxes)
+    s = sub.add_parser("apns"); s.add_argument("--key-file", required=True); s.add_argument("--key-id", required=True)
+    s.add_argument("--team-id", required=True); s.add_argument("--bundle-id", default="com.rushilmohan.vigilapp")
+    s.set_defaults(f=cmd_apns)
     s = sub.add_parser("tune"); s.add_argument("--cpus", type=float, required=True); s.set_defaults(f=cmd_tune)
     a = p.parse_args()
     a.f(a)

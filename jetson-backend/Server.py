@@ -216,7 +216,9 @@ def init_db():
         conn.execute("ALTER TABLE persons ADD COLUMN colour_hist TEXT")
     if 'height_cm' not in persons_existing:                      # HEIGHT_PER_PERSON_V1
         conn.execute("ALTER TABLE persons ADD COLUMN height_cm REAL")
-    for _c, _t in (("consent_at", "TEXT"), ("consent_by", "TEXT")):   # HOUSEHOLD_V1
+    for _c, _t in (("consent_at", "TEXT"), ("consent_by", "TEXT"),    # HOUSEHOLD_V1
+                   ("birth_year", "INTEGER"), ("sex", "TEXT"), ("weight_kg", "REAL"),   # PERSON_DETAILS_V1
+                   ("emergency_name", "TEXT"), ("emergency_phone", "TEXT"), ("relationship", "TEXT")):
         if _c not in persons_existing:
             conn.execute("ALTER TABLE persons ADD COLUMN %s %s" % (_c, _t))
     cfg_existing = {row[1] for row in conn.execute("PRAGMA table_info(config)")}
@@ -1288,14 +1290,84 @@ def new_person():
     if dup:
         conn.close()
         return jsonify({"status": "error", "reason": "%s is already in this home" % name, "person_id": dup[0]}), 409
+    det, bad = _person_details(data)
+    if bad:
+        conn.close()
+        return jsonify({"status": "error", "reason": bad}), 400
     pid = "named_" + uuid.uuid4().hex[:10]
     now = datetime.now().isoformat()
     conn.execute("INSERT INTO persons (id, name, is_resident, height_cm, room_id, first_seen_at, last_seen_at, identified_at) "
                  "VALUES (?,?,?,?,?,?,?,datetime('now'))",
                  (pid, name, 1 if data.get("is_resident") else 0, h, data.get("room_id") or "room_1", now, now))
+    for k, v in det.items():
+        conn.execute("UPDATE persons SET %s=? WHERE id=?" % k, (v, pid))
+    if data.get("photo_b64"):                      # COPY_PEOPLE_V1: a photo comes along when copied
+        conn.execute("UPDATE persons SET photo_b64=? WHERE id=?", (str(data["photo_b64"])[:MAX_PHOTO_B64_BYTES], pid))
     conn.commit()
     conn.close()
-    return jsonify({"status": "ok", "person_id": pid})
+    return jsonify({"status": "ok", "person_id": pid})   # a photo also teaches face matching (PHOTO_SEED_V1)
+
+
+_DETAIL_KEYS = ("birth_year", "sex", "weight_kg", "emergency_name", "emergency_phone", "relationship")
+
+
+def _person_details(data):
+    """PERSON_DETAILS_V1: the extra facts setup asks for. Returns (fields, problem)."""
+    out = {}
+    if data.get("birth_year") not in (None, ""):
+        try:
+            y = int(data["birth_year"])
+        except (TypeError, ValueError):
+            return {}, "birth year should be a year, like 1948"
+        if not 1900 <= y <= datetime.now().year:
+            return {}, "birth year should be between 1900 and this year"
+        out["birth_year"] = y
+    if data.get("sex") not in (None, ""):
+        if data["sex"] not in ("female", "male", "other"):
+            return {}, "sex should be female, male or other"
+        out["sex"] = data["sex"]
+    if data.get("weight_kg") not in (None, ""):
+        try:
+            w = float(data["weight_kg"])
+        except (TypeError, ValueError):
+            return {}, "weight should be a number"
+        if not 20 <= w <= 300:
+            return {}, "weight should be between 20 and 300 kg"
+        out["weight_kg"] = round(w, 1)
+    for k in ("emergency_name", "relationship"):
+        if data.get(k) not in (None,):
+            out[k] = str(data[k]).strip()[:60] or None
+    if data.get("emergency_phone") not in (None,):
+        ph = "".join(ch for ch in str(data["emergency_phone"]) if ch.isdigit() or ch in "+ -()")
+        out["emergency_phone"] = ph.strip()[:24] or None
+    return out, None
+
+
+@app.route("/persons/<person_id>/details", methods=["POST"])
+@require_api_key
+def person_details(person_id):
+    data = request.get_json() or {}
+    det, bad = _person_details(data)
+    if bad:
+        return jsonify({"status": "error", "reason": bad}), 400
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM persons WHERE id=?", (person_id,)).fetchone():
+        conn.close()
+        return jsonify({"status": "error", "reason": "no such person"}), 404
+    if "height_cm" in data:
+        try:
+            h = float(data["height_cm"]) if data["height_cm"] not in (None, "") else None
+        except (TypeError, ValueError):
+            h = -1
+        if h is not None and not 50 <= h <= 230:
+            conn.close()
+            return jsonify({"status": "error", "reason": "height should be between 50 and 230 cm"}), 400
+        det["height_cm"] = h
+    for k, v in det.items():
+        conn.execute("UPDATE persons SET %s=? WHERE id=?" % k, (v, person_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "ok"})
 
 
 @app.route("/persons/<person_id>/consent", methods=["POST"])
@@ -2711,20 +2783,35 @@ _PUSH_TEXT = {
 
 
 def send_push(title, message, priority="default", tags=""):
+    """APPLE_PUSH_V1: to the VIGIL app on every family phone (through VIGIL Cloud),
+    and to the ntfy topic as a fallback while Apple push is being switched on."""
+    import requests as _rq
+    sent = False
+    url = os.environ.get("VIGIL_PUSH_URL")
+    if url:
+        try:
+            r = _rq.post(url, json={"title": title, "message": message, "priority": priority, "kind": tags or "alert"},
+                         headers={"X-VIGIL-Key": os.environ.get("VIGIL_API_KEY", "")}, timeout=15)
+            _PUSH_LAST["phones"] = (r.json() or {}).get("phones", 0) if r.ok else 0
+            sent = sent or bool(_PUSH_LAST["phones"])
+            print("[PUSH] app: %s phone(s): %s" % (_PUSH_LAST["phones"], title), flush=True)
+        except Exception as e:
+            print("[PUSH] app push failed: %s" % e, flush=True)
     topic = os.environ.get("VIGIL_NTFY_TOPIC")
-    if not topic:
-        return False
-    server = os.environ.get("VIGIL_NTFY_SERVER", "https://ntfy.sh").rstrip("/")
-    try:
-        import requests as _rq
-        _rq.post("%s/%s" % (server, topic), data=message.encode("utf-8"),
-                 headers={"Title": title, "Priority": priority, "Tags": tags},
-                 timeout=5)
-        print("[PUSH] sent: %s" % title, flush=True)
-        return True
-    except Exception as e:
-        print("[PUSH] failed: %s" % e, flush=True)
-        return False
+    if topic:
+        server = os.environ.get("VIGIL_NTFY_SERVER", "https://ntfy.sh").rstrip("/")
+        try:
+            _rq.post("%s/%s" % (server, topic), data=message.encode("utf-8"),
+                     headers={"Title": title, "Priority": priority, "Tags": tags},
+                     timeout=5)
+            print("[PUSH] sent: %s" % title, flush=True)
+            sent = True
+        except Exception as e:
+            print("[PUSH] failed: %s" % e, flush=True)
+    return sent
+
+
+_PUSH_LAST = {"phones": None}
 
 
 def _push_loop():
@@ -2821,8 +2908,8 @@ if os.environ.get("VIGIL_LOCAL_WATCHDOG", "1") == "1" and os.environ.get("WERKZE
 @require_api_key
 def alert_test():
     ok = send_push("VIGIL: test alert", "This is a test. Real alerts will look like this.", "high", "bell")
-    return jsonify({"status": "ok" if ok else "error",
-                    "reason": None if ok else "alerts are not set up on this VIGIL (no ntfy topic)"})
+    return jsonify({"status": "ok" if ok else "error", "phones": _PUSH_LAST.get("phones"),
+                    "reason": None if ok else "no phone has alerts turned on for this camera yet"})
 
 
 

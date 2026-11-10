@@ -97,6 +97,11 @@ def init_db():
         site_id TEXT PRIMARY KEY, last_alert_id INTEGER);
     CREATE TABLE IF NOT EXISTS verify_codes (
         user_id INTEGER PRIMARY KEY, code_hash TEXT, expires REAL, tries INTEGER DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS push_tokens (
+        token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, env TEXT DEFAULT 'production',
+        created REAL, last_ok REAL);
+    CREATE TABLE IF NOT EXISTS site_names (
+        site_id TEXT PRIMARY KEY, name TEXT, home TEXT);
     """)
     cols = {r[1] for r in c.execute("PRAGMA table_info(users)")}
     for col, typ in (("phone", "TEXT"), ("email_alerts", "INTEGER DEFAULT 1")):   # ACCOUNTS_V1
@@ -170,9 +175,21 @@ def user_sites(user_id, is_admin):
     return [all_sites[i] for i in ids if i in all_sites]
 
 
-def public_site(s):
+def _site_names():
+    """SITE_NAMES_V1: names and homes the family chose in the app (override vigilctl's)."""
+    try:
+        c = sqlite3.connect(DB_PATH, timeout=10)
+        rows = {r[0]: (r[1], r[2]) for r in c.execute("SELECT site_id, name, home FROM site_names")}
+        c.close()
+        return rows
+    except Exception:
+        return {}
+
+
+def public_site(s, _names=None):
     st = _STATUS.get(s["id"], {})
-    return {"id": s["id"], "name": s.get("name", s["id"]), "home": s.get("home", ""),
+    nm, hm = (_names if _names is not None else _site_names()).get(s["id"], (None, None))
+    return {"id": s["id"], "name": nm or s.get("name", s["id"]), "home": hm if hm is not None else s.get("home", ""),
             "room": s.get("room", ""), "timezone": s.get("timezone", ""),
             "ntfy_topic": s.get("ntfy_topic", ""), "online": st.get("online"),
             "last_seen": st.get("last_seen"), "url_path": "/s/%s" % s["id"]}
@@ -589,6 +606,67 @@ def relay_status_post(site_id):
     return jsonify({"status": "ok"})
 
 
+@app.route("/auth/site/<site_id>/settings", methods=["POST"])
+@require_user
+def site_settings(site_id):
+    """SITE_NAMES_V1: an owner renames a camera, or puts it in a home with others."""
+    if not (_role(site_id) == "owner" or g.is_admin):
+        return jsonify({"status": "error", "reason": "only the owner can change this"}), 403
+    body = request.get_json(silent=True) or {}
+    cur = _site_names().get(site_id, (None, None))
+    name = body["name"].strip()[:40] if isinstance(body.get("name"), str) else cur[0]
+    home = body["home"].strip()[:40] if isinstance(body.get("home"), str) else cur[1]
+    if name is not None and not name:
+        return jsonify({"status": "error", "reason": "type a name"}), 400
+    db().execute("INSERT OR REPLACE INTO site_names (site_id, name, home) VALUES (?,?,?)", (site_id, name, home))
+    db().commit()
+    audit("rename", site_id=site_id)
+    return jsonify({"status": "ok", "site": public_site(sites()[site_id]),
+                    "sites": [public_site(x) for x in user_sites(g.user_id, g.is_admin)]})
+
+
+@app.route("/auth/site/<site_id>/copy-people", methods=["POST"])
+@require_user
+def copy_people(site_id):
+    """COPY_PEOPLE_V1: the same family on two cameras. Copies each person (name,
+    who lives there, height, details, photo) from another camera this owner has;
+    the photo teaches the new camera their face. People already there are kept."""
+    src = (request.get_json(silent=True) or {}).get("from")
+    if not (_role(site_id) == "owner" or g.is_admin) or not (_role(src) == "owner" or g.is_admin):
+        return jsonify({"status": "error", "reason": "you need to own both cameras"}), 403
+    a, b = sites().get(src), sites().get(site_id)
+    if not a or not b or src == site_id:
+        return jsonify({"status": "error", "reason": "choose another camera"}), 400
+    try:
+        people = requests.get("%s/persons" % a["internal_url"].rstrip("/"), headers={"X-VIGIL-Key": a["api_key"]},
+                              timeout=20).json()
+    except Exception:
+        return jsonify({"status": "error", "reason": "the other camera's server is not responding"}), 502
+    added, skipped = [], []
+    keys = ("is_resident", "height_cm", "birth_year", "sex", "weight_kg", "emergency_name", "emergency_phone", "relationship")
+    for p in people if isinstance(people, list) else []:
+        name = (p.get("name") or "").strip()
+        if not name:
+            continue                                         # unnamed visitors stay where they were seen
+        body = {k: p.get(k) for k in keys if p.get(k) is not None}
+        body["name"] = name
+        ph = p.get("photo_b64")
+        if ph and len(ph) <= 200 * 1024:
+            body["photo_b64"] = ph
+        try:
+            r = requests.post("%s/persons/new" % b["internal_url"].rstrip("/"), json=body,
+                              headers={"X-VIGIL-Key": b["api_key"]}, timeout=20)
+            (added if r.status_code == 200 else skipped).append(name)
+            if r.status_code == 200 and p.get("consent_at"):
+                requests.post("%s/persons/%s/consent" % (b["internal_url"].rstrip("/"), r.json()["person_id"]),
+                              json={"given": True, "by": p.get("consent_by") or "copied"},
+                              headers={"X-VIGIL-Key": b["api_key"]}, timeout=20)
+        except Exception:
+            skipped.append(name)
+    audit("copy people from %s" % src, site_id=site_id)
+    return jsonify({"status": "ok", "added": added, "already_there": skipped})
+
+
 @app.route("/auth/site/<site_id>/relay")
 @require_user
 def relay_status_get(site_id):
@@ -620,6 +698,7 @@ def delete_account():
             if nxt:
                 db().execute("UPDATE grants SET role='owner' WHERE site_id=? AND user_id=?", (sid, nxt[0]))
     for sql in ("DELETE FROM tokens WHERE user_id=?", "DELETE FROM grants WHERE user_id=?",
+                "DELETE FROM push_tokens WHERE user_id=?",
                 "DELETE FROM verify_codes WHERE user_id=?", "DELETE FROM users WHERE id=?"):
         db().execute(sql, (uid,))
     db().execute("DELETE FROM reset_codes WHERE email=?", (u["email"],))
@@ -669,6 +748,133 @@ def _push(topic, title, message, priority="high"):
                       headers={"Title": title, "Priority": priority, "Tags": "warning"}, timeout=10)
     except requests.RequestException:
         pass
+
+
+# APPLE_PUSH_V1 ------------------------------------------------------------
+# Alerts go straight to the VIGIL app through Apple's push service. Needs
+# /config/apns.json {"key_id", "team_id", "bundle_id"} and /config/apns_key.p8
+# (written by vigilctl.py apns). Until then this is a no-op and ntfy carries on.
+APNS_CFG = os.path.join(CONFIG_DIR, "apns.json")
+APNS_KEY = os.path.join(CONFIG_DIR, "apns_key.p8")
+_APNS = {"jwt": None, "at": 0.0, "client": None}
+
+
+def apns_config():
+    try:
+        with open(APNS_CFG) as f:
+            c = json.load(f)
+        with open(APNS_KEY) as f:
+            c["key"] = f.read()
+        return c if c.get("key_id") and c.get("team_id") else None
+    except Exception:
+        return None
+
+
+def _apns_jwt(c):
+    if _APNS["jwt"] and time.time() - _APNS["at"] < 2400:      # Apple wants a fresh one at least hourly
+        return _APNS["jwt"]
+    import jwt                                                  # PyJWT with cryptography (ES256)
+    _APNS["jwt"] = jwt.encode({"iss": c["team_id"], "iat": int(time.time())}, c["key"],
+                              algorithm="ES256", headers={"kid": c["key_id"]})
+    _APNS["at"] = time.time()
+    return _APNS["jwt"]
+
+
+def _apns_client():
+    if _APNS["client"] is None:
+        import httpx
+        _APNS["client"] = httpx.Client(http2=True, timeout=10)
+    return _APNS["client"]
+
+
+def send_apns(user_ids, title, body, site_id=None, kind="alert", urgent=False):
+    """Push to every phone of these users. Returns how many phones accepted it."""
+    c = apns_config()
+    if not c or not user_ids:
+        return 0
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    q = ",".join("?" * len(user_ids))
+    rows = con.execute("SELECT token, env FROM push_tokens WHERE user_id IN (%s)" % q, list(user_ids)).fetchall()
+    payload = {"aps": {"alert": {"title": title, "body": body}, "sound": "default",
+                       "interruption-level": "time-sensitive" if urgent else "active"},
+               "site": site_id, "kind": kind}
+    ok = 0
+    hdr = {"apns-topic": c.get("bundle_id", "com.rushilmohan.vigilapp"), "apns-push-type": "alert",
+           "apns-priority": "10"}
+    for token, env in rows:
+        # A phone running a build from Xcode uses Apple's sandbox; TestFlight and the
+        # App Store use production. Try the remembered one, then the other.
+        order = ["sandbox", "production"] if env == "sandbox" else ["production", "sandbox"]
+        try:
+            for i, e in enumerate(order):
+                host = "api.sandbox.push.apple.com" if e == "sandbox" else "api.push.apple.com"
+                r = _apns_client().post("https://%s/3/device/%s" % (host, token), json=payload,
+                                        headers=dict(hdr, authorization="bearer " + _apns_jwt(c)))
+                if r.status_code == 200:
+                    ok += 1
+                    con.execute("UPDATE push_tokens SET last_ok=?, env=? WHERE token=?", (time.time(), e, token))
+                    break
+                if r.status_code == 400 and "BadDeviceToken" in r.text and i == 0:
+                    continue                                    # wrong environment for this build
+                if r.status_code == 410 or (r.status_code == 400 and "BadDeviceToken" in r.text):
+                    con.execute("DELETE FROM push_tokens WHERE token=?", (token,))   # app deleted
+                else:
+                    print("[APNS] %s %s" % (r.status_code, r.text[:200]), flush=True)
+                break
+        except Exception as e:
+            print("[APNS] %s" % e, flush=True)
+    con.commit()
+    con.close()
+    return ok
+
+
+def _site_user_ids(site_id):
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    ids = [r[0] for r in con.execute("""SELECT DISTINCT u.id FROM users u LEFT JOIN grants g
+                                        ON g.user_id=u.id AND g.site_id=?
+                                        WHERE u.disabled=0 AND (g.site_id IS NOT NULL OR u.is_admin=1)""", (site_id,))]
+    con.close()
+    return ids
+
+
+def _alert_site(s, title, message, priority="high"):
+    _push(s.get("ntfy_topic"), title, message, priority)
+    try:
+        send_apns(_site_user_ids(s["id"]), title, message, site_id=s["id"], kind="status",
+                  urgent=priority == "urgent")
+    except Exception as e:
+        print("[APNS] %s" % e, flush=True)
+
+
+@app.route("/auth/push-token", methods=["POST", "DELETE"])
+@require_user
+def push_token():
+    body = request.get_json(silent=True) or {}
+    tok = "".join(ch for ch in str(body.get("token") or "") if ch in "0123456789abcdefABCDEF")
+    if len(tok) < 32:
+        return jsonify({"status": "error", "reason": "no token"}), 400
+    if request.method == "DELETE":
+        db().execute("DELETE FROM push_tokens WHERE token=? AND user_id=?", (tok, g.user_id))
+    else:
+        env = "sandbox" if body.get("env") == "sandbox" else "production"
+        db().execute("INSERT OR REPLACE INTO push_tokens (token, user_id, env, created) VALUES (?,?,?,?)",
+                     (tok, g.user_id, env, time.time()))
+    db().commit()
+    return jsonify({"status": "ok", "push_ready": bool(apns_config())})
+
+
+@app.route("/internal/push/<site_id>", methods=["POST"])
+def internal_push(site_id):
+    """A camera's own alerts (falls, night, stillness) reach its family's phones."""
+    s_ = sites().get(site_id)
+    if not s_ or not hmac.compare_digest(request.headers.get("X-VIGIL-Key", ""), s_.get("api_key", "")):
+        return jsonify({"status": "error"}), 403
+    body = request.get_json(silent=True) or {}
+    title = str(body.get("title") or "VIGIL")[:120]
+    msg = str(body.get("message") or "")[:400]
+    n = send_apns(_site_user_ids(site_id), title, msg, site_id=site_id, kind=str(body.get("kind") or "alert")[:20],
+                  urgent=body.get("priority") in ("urgent", "high"))
+    return jsonify({"status": "ok", "phones": n})
 
 
 def _site_emails(site_id):
@@ -786,11 +992,11 @@ def watchdog_loop():
             now = time.time()
             st = {"online": online, "checked": now, "age_s": age,
                   "last_seen": (now - age) if (age is not None) else prev.get("last_seen")}
-            name = s.get("name", s["id"])
+            name = (_site_names().get(s["id"], (None,))[0]) or s.get("name", s["id"])   # SITE_NAMES_V1
             if prev.get("online") is True and not online:
                 st["offline_since"] = now
                 st["last_push"] = now
-                _push(s.get("ntfy_topic"), "VIGIL: monitoring offline",
+                _alert_site(s, "VIGIL: monitoring offline",
                       "The camera '%s' stopped sending data. Falls will not be detected until it is back. "
                       "Check its power and Wi-Fi." % name, priority="urgent")
                 _email_site(s, "VIGIL: camera offline (%s)" % name,
@@ -803,7 +1009,7 @@ def watchdog_loop():
                 st["last_push"] = prev.get("last_push", now)
                 if now - st["last_push"] > 3600:
                     st["last_push"] = now
-                    _push(s.get("ntfy_topic"), "VIGIL: still offline",
+                    _alert_site(s, "VIGIL: still offline",
                           "The camera '%s' has been offline for %d minutes." %
                           (name, (now - st["offline_since"]) / 60))
             elif not online and prev.get("online") is None:
@@ -813,13 +1019,13 @@ def watchdog_loop():
                     st["online"] = False
                     st["offline_since"] = st["first_check"]
                     st["last_push"] = now
-                    _push(s.get("ntfy_topic"), "VIGIL: camera not connected",
+                    _alert_site(s, "VIGIL: camera not connected",
                           "The camera '%s' has not sent any data. Falls will not be detected until it does. "
                           "Check its power, Wi-Fi and RTMP settings." % name, priority="urgent")
                 else:
                     st["online"] = None
             elif online and prev.get("online") is False:
-                _push(s.get("ntfy_topic"), "VIGIL: monitoring restored",
+                _alert_site(s, "VIGIL: monitoring restored",
                       "The camera '%s' is back online." % name, priority="default")
                 _email_site(s, "VIGIL: camera back online (%s)" % name,
                             "The camera '%s' is working again.\n\n- VIGIL" % name)

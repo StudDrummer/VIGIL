@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
-RUN pip install "flask>=3.0" "requests>=2.31" "gunicorn>=22"
+RUN pip install "flask>=3.0" "requests>=2.31" "gunicorn>=22" "httpx[http2]>=0.27" "pyjwt[crypto]>=2.8"
 WORKDIR /app
 COPY gateway.py .
 EXPOSE 8080
