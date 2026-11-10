@@ -112,6 +112,10 @@ const LIVE_PULSE = new Animated.Value(1);
 type LiveSub=(f:string)=>void;
 const LIVE={cur:null as string|null,subs:new Set<LiveSub>()};
 function livePush(f:string){LIVE.cur=f;LIVE.subs.forEach(fn=>{try{fn(f);}catch(_e){}});}
+// LIVE_BOTH_V1: the newest frame of each view, kept per camera, so switching view or
+// camera shows a picture at once while the stream catches up.
+const LIVE_LAST:Record<string,{v:string|null;s:string|null}>={};
+const liveLast=(site:string)=>(LIVE_LAST[site]=LIVE_LAST[site]||{v:null,s:null});
 
 // Two pictures stacked: the next frame decodes underneath and only comes to
 // the front once it is ready, so the feed never blinks between frames.
@@ -3990,10 +3994,14 @@ export default function App() {
   const privacyViewRef = useRef(true);
   useEffect(()=>{AsyncStorage.getItem('vigil_privacy_view').then(v=>{if(v==='0'){setPrivacyView(false);privacyViewRef.current=false;}}).catch(()=>{});},[]);
   const liveKick=useRef<(()=>void)|null>(null);
+  const liveSiteRef=useRef<string>('local');
+  const liveOldRef=useRef(false);   // the server sends one view per stream (not updated yet)
   const togglePrivacyView=useCallback(()=>{
     const next=!privacyViewRef.current; privacyViewRef.current=next; setPrivacyView(next);
     prevFrame.current=null;   // SMOOTH_VIEW_V1: keep the last picture until the other view arrives
-    liveKick.current?.();     // LIVE_SMOOTH_V1: switch the stream to the other view now
+    const f=liveLast(liveSiteRef.current)[next?'s':'v'];
+    if(f){prevFrame.current=f;livePush(f);}   // LIVE_BOTH_V1: instant, no trip to the server
+    if(liveOldRef.current||!f)liveKick.current?.();   // older server, or nothing yet: reopen for the other view
     AsyncStorage.setItem('vigil_privacy_view',next?'1':'0').catch(()=>{});
   },[]);
   const appStateRef   = useRef<AppStateStatus>('active');
@@ -4323,8 +4331,12 @@ export default function App() {
   // open connection, so there is no wait for a request per picture. Each stream
   // lasts 20 s and reopens at once. If streaming fails three times in a row the
   // app falls back to asking for single pictures for 30 s, then tries again.
+  // CLOUD: start at once (the camera's state comes from VIGIL Cloud); local: after the unit answers.
+  // A health check finishing does not restart a stream that is already running.
+  const liveAllowed=(cloud?jetsonOk!==false:!!jetsonOk)&&!demoMode&&!showPersonModal&&activeTab==='today';
   useEffect(()=>{
-    if(!jetsonOk||demoMode||showPersonModal||activeTab!=='today')return;
+    if(!liveAllowed)return;
+    const site=cloud?cloud.siteId:'local'; liveSiteRef.current=site; liveOldRef.current=false;
     let alive=true; let xhr:XMLHttpRequest|null=null; let fails=0; let pollUntil=0; let lastData=Date.now(); let kicked=false;
     let timer:ReturnType<typeof setTimeout>|null=null;
     const later=(ms:number)=>{if(timer)clearTimeout(timer);timer=setTimeout(()=>{timer=null;open();},ms);};
@@ -4333,13 +4345,20 @@ export default function App() {
       if(!alive)return;
       if(Date.now()<pollUntil){fetchCameraSnapshot().catch(()=>{}).finally(()=>later(CLOUD_ACTIVE?350:120));return;}
       const x=new XMLHttpRequest(); xhr=x; let off=0; let n=0; kicked=false; lastData=Date.now();
-      x.open('GET',`${url()}/camera/stream64?view=${privacyViewRef.current?'skeleton':'video'}&max_s=20`);
+      const opened:'both'|'v'|'s'=liveOldRef.current?(privacyViewRef.current?'s':'v'):'both';
+      x.open('GET',`${url()}/camera/stream64?view=${opened==='both'?'both':opened==='s'?'skeleton':'video'}&max_s=20`);
       x.setRequestHeader('X-VIGIL-Key',String((AX.defaults.headers as any)['X-VIGIL-Key']||''));
       x.onprogress=()=>{
         if(xhr!==x)return;
         lastData=Date.now();
         const t=x.responseText||''; let last:string|null=null; let i:number;
-        while((i=t.indexOf('\n',off))>=0){const line=t.slice(off,i);off=i+1;if(line.length>100)last=line;}
+        const L=liveLast(site); const want=privacyViewRef.current?'s':'v';
+        while((i=t.indexOf('\n',off))>=0){const line=t.slice(off,i);off=i+1;
+          if(line.length<=100)continue;
+          if(line[1]===':'&&(line[0]==='v'||line[0]==='s')){const k=line[0] as 'v'|'s';L[k]=line.slice(2);if(k===want)last=L[k];}
+          else{   // older server: one view per stream (and 'both' means video)
+            liveOldRef.current=true;const k=opened==='both'?'v':opened;L[k]=line;
+            if(k===want)last=line;else if(!kicked){kicked=true;setTimeout(()=>{try{x.abort();}catch(_e){}},0);}}}
         if(last){n++;gotFrame(last);}
       };
       const done=()=>{
@@ -4357,7 +4376,7 @@ export default function App() {
     const watch=setInterval(()=>{if(xhr&&Date.now()-lastData>8000){const x=xhr;xhr=null;try{x.abort();}catch(_e){}fails++;later(500);}},2000);
     open();
     return()=>{alive=false;liveKick.current=null;clearInterval(watch);if(timer)clearTimeout(timer);if(xhr){const x=xhr;xhr=null;try{x.abort();}catch(_e){}}};
-  },[jetsonOk,showPersonModal,activeTab,fetchCameraSnapshot]);
+  },[liveAllowed,fetchCameraSnapshot,cloud?.siteId]);
   // Camera-derived metrics (gait speed / cadence / posture) refresh every 4s so they
   // visibly move while someone is walking in frame — the 60s HealthKit auto-sync
   // (above) is far too slow for this to feel live during a walk-test or demo.
@@ -4467,14 +4486,15 @@ export default function App() {
   },[jetsonOk,demoMode,cloud?.siteId]);
 
   // CLOUD_V1: switch the whole app to another camera, or in and out of the cloud.
-  const resetSiteData=()=>{
+  const resetSiteData=(nextSite?:string)=>{
     Object.keys(PHOTO_CACHE).forEach(k=>delete PHOTO_CACHE[k]);
-    prevFrame.current=null;setCameraFrame(null);
+    const cached=nextSite?liveLast(nextSite)[privacyViewRef.current?'s':'v']:null;   // LIVE_BOTH_V1
+    prevFrame.current=cached;if(cached)livePush(cached);setCameraFrame(cached);
     setPersons([]);setAlerts([]);setRooms([]);
     setJetsonOk(null);
   };
   const enterCloud=async(cfg:CloudCfg|null)=>{
-    applyCloudHeaders(cfg);setCloud(cfg);resetSiteData();
+    applyCloudHeaders(cfg);setCloud(cfg);resetSiteData(cfg?.siteId);
     if(cfg){
       urlRef.current=cloudSiteUrl(cfg);
       await AsyncStorage.setItem(SK_CLOUD,JSON.stringify(cfg));
@@ -4604,7 +4624,7 @@ export default function App() {
               <View style={{width:8,height:8,borderRadius:4,backgroundColor:dot}}/>
               <View style={{flexShrink:1}}>
                 <Text numberOfLines={1} style={{color:C.text,fontSize:15,fontWeight:'700'}}>{cur.name}</Text>
-                {!!cur.home&&<Text numberOfLines={1} style={{color:C.muted,fontSize:11,marginTop:1}}>{cur.home}</Text>}
+                {!!cur.home&&cur.home!==cur.name&&<Text numberOfLines={1} style={{color:C.muted,fontSize:11,marginTop:1}}>{cur.home}</Text>}
               </View>
               <Text style={{color:C.green,fontSize:13,fontWeight:'700',marginLeft:4}}>{cloud.sites.length>1?'Switch':'Cameras'}</Text>
             </TouchableOpacity>);

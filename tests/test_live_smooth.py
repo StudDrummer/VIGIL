@@ -134,5 +134,24 @@ check("skeleton view streams a dark stick-figure frame", sk is not None and sk.m
       "" if sk is None else "(mean %.0f)" % sk.mean())
 s = c.get("/camera/snapshot?w=800", headers={"X-VIGIL-Key": os.environ["VIGIL_API_KEY"]}).get_json()
 check("snapshot serves the live frame", s.get("available") and s.get("view") == "video")
+# 5. LIVE_BOTH_V1: one stream carries both views, each line tagged
+r = c.get("/camera/stream64?view=both&max_s=5", headers={"X-VIGIL-Key": os.environ["VIGIL_API_KEY"]}, buffered=False)
+kinds = {"v": 0, "s": 0}; buf = b""; t0 = time.time()
+for chunk in r.response:
+    buf += chunk
+    while b"\n" in buf:
+        line, buf = buf.split(b"\n", 1)
+        if line[:2] in (b"v:", b"s:"):
+            jpg = base64.b64decode(line[2:])
+            assert jpg[:2] == b"\xff\xd8"
+            kinds[line[:1].decode()] += 1
+    am._live_update([R()], (1296, 2304, 3))
+    if time.time() - t0 > 3:
+        break
+r.close()
+el = time.time() - t0
+check("both views stream together", kinds["v"] / el >= 6 and kinds["s"] / el >= 6, "(%.1f video/s, %.1f stick/s)" % (kinds["v"] / el, kinds["s"] / el))
+sk_sz = os.path.getsize("/dev/shm/vigil_live_skeleton.jpg")
+check("stick-figure frames are tiny", sk_sz < 15000, "(%d bytes)" % sk_sz)
 print("ALL PASS" if not fails else "%d FAILED" % fails)
 sys.exit(1 if fails else 0)

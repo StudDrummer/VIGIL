@@ -926,22 +926,26 @@ def camera_stream64():
     video player. One line per frame (base64 JPEG). An empty line every two
     seconds keeps the connection open when nothing changes. The stream ends
     after max_s seconds and the app reconnects, which keeps its memory small."""
+    # LIVE_BOTH_V1: view=both sends video and stick-figure frames together, each
+    # line marked "v:" or "s:", so the app switches between them instantly.
+    both = request.args.get("view") == "both"
     view = "skeleton" if request.args.get("view") == "skeleton" else "video"
     try:
         max_s = max(5.0, min(60.0, float(request.args.get("max_s", 20))))
     except ValueError:
         max_s = 20.0
-    want = "/dev/shm/vigil_live_want_%s" % view
-    path = "/dev/shm/vigil_live_%s.jpg" % view
+    views = ("video", "skeleton") if both else (view,)
     b64 = __import__("base64").b64encode
 
     def touch():
-        try:
-            with open(want, "a"):
+        for v in views:
+            w = "/dev/shm/vigil_live_want_%s" % v
+            try:
+                with open(w, "a"):
+                    pass
+                os.utime(w, None)
+            except OSError:
                 pass
-            os.utime(want, None)
-        except OSError:
-            pass
 
     # something to show at once: the newest analysed frame (read here, inside the request)
     touch()
@@ -966,26 +970,38 @@ def camera_stream64():
         except Exception:
             pass
 
+    tag = {"video": b"v:", "skeleton": b"s:"}
+    if both:   # the other view's newest frame too, so the first switch is instant
+        other = _live_jpeg("skeleton" if view == "video" else "video", 3.0)
+    else:
+        other = None
+
     def generate():
         start = last_touch = last_sent = time.time()
-        last_m = 0.0
+        last_m = {v: 0.0 for v in views}
         if first is not None:
-            yield b64(first) + b"\n"
+            yield (tag[view] if both else b"") + b64(first) + b"\n"
+        if other is not None:
+            yield tag["skeleton" if view == "video" else "video"] + b64(other) + b"\n"
         while time.time() - start < max_s:
             now = time.time()
             if now - last_touch > 1.0:
                 touch(); last_touch = now
-            try:
-                m = os.stat(path).st_mtime
-            except OSError:
-                m = 0.0
-            if m and m != last_m:
-                last_m = m
-                fb = _live_jpeg(view, 3.0)
-                if fb is not None:
-                    yield b64(fb) + b"\n"
-                    last_sent = now
-                    continue
+            sent = False
+            for v in views:
+                try:
+                    m = os.stat("/dev/shm/vigil_live_%s.jpg" % v).st_mtime
+                except OSError:
+                    m = 0.0
+                if m and m != last_m[v]:
+                    last_m[v] = m
+                    fb = _live_jpeg(v, 3.0)
+                    if fb is not None:
+                        yield (tag[v] if both else b"") + b64(fb) + b"\n"
+                        sent = True
+            if sent:
+                last_sent = now
+                continue
             if now - last_sent > 2.0:
                 yield b"\n"
                 last_sent = now
