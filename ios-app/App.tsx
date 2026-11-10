@@ -85,7 +85,7 @@ const AX = axios.create({
 // existing request works unchanged against the cloud.
 const SK_CLOUD      = '@vigil_cloud_v1';
 const DEFAULT_CLOUD = 'https://api.vigilhealth.me';
-type CloudSite = {id:string;name:string;home?:string;room?:string;online?:boolean|null;ntfy_topic?:string};
+type CloudSite = {id:string;name:string;home?:string;room?:string;online?:boolean|null;ntfy_topic?:string;last_seen?:number|null};
 type CloudCfg  = {gateway:string;token:string;email:string;sites:CloudSite[];siteId:string};
 let CLOUD_ACTIVE = false;
 function applyCloudHeaders(cfg:CloudCfg|null){
@@ -4508,7 +4508,7 @@ export default function App() {
     }
   },[cloud]);
   useEffect(()=>{if(cloud)enablePush(cloud,false).catch(()=>{});},[cloud?.token]);   // APPLE_PUSH_V1
-  useEffect(()=>{if(!cloud)return;refreshCloudSites();const id=setInterval(refreshCloudSites,60000);return()=>clearInterval(id);},[cloud?.token]);
+  useEffect(()=>{if(!cloud)return;refreshCloudSites();const id=setInterval(refreshCloudSites,30000);return()=>clearInterval(id);},[cloud?.token]);
 
   const reconnect=()=>{
     const u=`http://${serverIp}:${serverPort}`;
@@ -4632,7 +4632,12 @@ export default function App() {
             `${initError}\n\nVIGIL's camera monitoring does not depend on it. Apple Health only adds Apple Watch heart rate and sleep.`,
             [{text:'Try again',onPress:()=>startHealthKit()},{text:'OK',style:'cancel'}]);}}>
           <View style={[s.pillDot,{backgroundColor:initialized?C.green:initError?C.orange:C.sub}]}/><Text style={s.pillTxt}>{initialized?'Apple Health':initError?'Health off':'Starting'}</Text></TouchableOpacity>
-        <View style={s.pill}><View style={[s.pillDot,{backgroundColor:demoMode||jetsonOk===true?C.green:jetsonOk===false?C.red:C.sub}]}/><Text style={s.pillTxt}>{demoMode?'Demo unit':jetsonOk===true?'Monitoring unit':jetsonOk===false?'Unit offline':'Checking'}</Text></View>
+        {cloud?(()=>{   // CLOUD_STATE_V1: the camera's real state from VIGIL Cloud, not one missed reply
+          const cs=cloud.sites.find(x=>x.id===cloud.siteId);
+          const st=cs?.online===false?'off':(jetsonOk===true||cs?.online)?'on':'wait';
+          return <View style={s.pill}><View style={[s.pillDot,{backgroundColor:st==='on'?C.green:st==='off'?C.red:C.sub}]}/><Text style={s.pillTxt}>{st==='on'?'Watching':st==='off'?'Camera offline':'Connecting'}</Text></View>;
+        })():(
+        <View style={s.pill}><View style={[s.pillDot,{backgroundColor:demoMode||jetsonOk===true?C.green:jetsonOk===false?C.red:C.sub}]}/><Text style={s.pillTxt}>{demoMode?'Demo unit':jetsonOk===true?'Monitoring unit':jetsonOk===false?'Unit offline':'Checking'}</Text></View>)}
         {jetsonOk===true&&<View style={s.pill}><View style={[s.pillDot,{backgroundColor:syncing?C.orange:C.green}]}/><Text style={s.pillTxt}>{syncing?'Syncing':'Synced'}</Text></View>}
         {cameraStatus?.online&&<View style={s.pill}><View style={[s.pillDot,{backgroundColor:C.green}]}/><Text style={s.pillTxt}>{String(cameraStatus.fps?.toFixed(0)??'?')} fps</Text></View>}
       </View>
@@ -4675,7 +4680,23 @@ export default function App() {
 
       {/* Demo entry: the only path an App Store reviewer has, since they
           have no Jetson, no camera and no VPN. */}
-      {!demoMode&&jetsonOk===false&&(
+      {!demoMode&&cloud&&(()=>{   // CLOUD_STATE_V1: say what is wrong and what to do; never offer demo mode
+        const cs=cloud.sites.find(x=>x.id===cloud.siteId);
+        if(cs?.online===false)return(
+          <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.red+'14',borderRadius:16,padding:16,borderWidth:1,borderColor:C.red+'55'}}>
+            <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>{cs.name} is offline</Text>
+            <Text style={{color:C.sub,fontSize:13,lineHeight:19,marginTop:6}}>
+              {`The camera stopped sending${cs.last_seen?` ${timeAgo(new Date(cs.last_seen*1000).toISOString())}`:''}. Check the camera and the VIGIL box next to the router are plugged in. If the box light is off, unplug it for 10 seconds and plug it back in. You will get an alert when it is back.`}
+            </Text>
+          </View>);
+        if(jetsonOk===false)return(
+          <View style={{marginHorizontal:16,marginBottom:12,flexDirection:'row',alignItems:'center',gap:10,padding:12,borderRadius:12,backgroundColor:C.card}}>
+            <ActivityIndicator color={C.green}/>
+            <Text style={{color:C.sub,fontSize:13,flex:1,lineHeight:18}}>Reconnecting. If this phone has no internet, VIGIL still watches and alerts by email.</Text>
+          </View>);
+        return null;
+      })()}
+      {!demoMode&&!cloud&&jetsonOk===false&&(
         <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.card,
                       borderRadius:16,padding:16,borderWidth:1,borderColor:C.border}}>
           <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>No monitoring unit connected</Text>
@@ -5430,6 +5451,19 @@ export default function App() {
 
   const renderSupportTab=()=>(
     <ScrollView automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
+      {/* STORE_READY_V1: support, privacy and the safety note, reachable from inside the app */}
+      <View style={[s.card,{marginHorizontal:16,marginTop:16,backgroundColor:C.red+'12',borderWidth:1,borderColor:C.red+'44'}]}>
+        <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>In an emergency, call your local emergency number</Text>
+        <Text style={{color:C.sub,fontSize:13,marginTop:4,lineHeight:19}}>VIGIL is a safety and wellness tool, not a medical device. It tells family about a possible fall; it does not call for help.</Text>
+      </View>
+      <Text style={s.secHeader}>Help</Text>
+      <View style={s.settGrp}>
+        {([['Contact support','mailto:hello@vigilhealth.me?subject=VIGIL%20help'],['Privacy Policy','https://vigilhealth.me/privacy.html'],
+           ['Terms of Service','https://vigilhealth.me/terms.html'],['vigilhealth.me','https://vigilhealth.me']] as const).map(([t,u],i)=>(
+          <TouchableOpacity key={t} onPress={()=>Linking.openURL(u)} style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:i?1:0,borderTopColor:C.hair}}>
+            <Text style={{color:C.text,fontSize:15}}>{t}</Text><Text style={{color:C.muted,fontSize:15}}>{'›'}</Text>
+          </TouchableOpacity>))}
+      </View>
       <Text style={s.secHeader}>App Info</Text>
       <View style={s.settGrp}>
         <View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14}}><Text style={{color:C.text,fontSize:15}}>App Version</Text><Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>VIGIL v1.0.0</Text></View>

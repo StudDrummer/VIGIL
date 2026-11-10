@@ -35,7 +35,7 @@ CONFIG_DIR = os.environ.get("VIGIL_CONFIG", "/config")
 DATA_DIR = os.environ.get("VIGIL_DATA", "/data")
 SITES_FILE = os.path.join(CONFIG_DIR, "sites.json")
 DB_PATH = os.path.join(DATA_DIR, "gateway.db")
-TOKEN_DAYS = int(os.environ.get("VIGIL_TOKEN_DAYS", "90"))
+TOKEN_DAYS = int(os.environ.get("VIGIL_TOKEN_DAYS", "365"))
 NTFY_SERVER = os.environ.get("VIGIL_NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 OFFLINE_AFTER_S = int(os.environ.get("VIGIL_OFFLINE_AFTER_S", "180"))
 
@@ -163,6 +163,11 @@ def require_user(f):
             return jsonify({"status": "error", "reason": "session expired, sign in again"}), 401
         g.user_id = row["user_id"]
         g.is_admin = bool(row["is_admin"])
+        # SLIDING_SESSION_V1: a phone that keeps using VIGIL stays signed in; only
+        # one unused for the whole period has to sign in again.
+        if row["expires_at"] - time.time() < (TOKEN_DAYS - 1) * 86400:
+            db().execute("UPDATE tokens SET expires_at=? WHERE token_hash=?", (time.time() + TOKEN_DAYS * 86400, _h(tok)))
+            db().commit()
         return f(*a, **kw)
     return inner
 

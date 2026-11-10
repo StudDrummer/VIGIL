@@ -3,6 +3,76 @@
 
 #import <React/RCTBundleURLProvider.h>
 #import <React/RCTLinkingManager.h>
+#import <React/RCTBridgeModule.h>
+#import <UserNotifications/UserNotifications.h>
+
+// APPLE_PUSH_V1: alerts arrive as notifications from the VIGIL app itself.
+// Needs the Push Notifications capability (paid Apple Developer team). Without
+// it, register() rejects and the app keeps working, just without app alerts.
+static NSString *gPushToken = nil;
+static NSMutableArray *gPushWaiters = nil;
+
+static NSObject *VIGILPushLock(void) {
+  static NSObject *lock; static dispatch_once_t once;
+  dispatch_once(&once, ^{ lock = [NSObject new]; gPushWaiters = [NSMutableArray new]; });
+  return lock;
+}
+
+static void VIGILPushDeliver(NSString *token, NSError *err) {
+  NSArray *waiters;
+  @synchronized (VIGILPushLock()) {
+    if (token) gPushToken = token;
+    waiters = [gPushWaiters copy];
+    [gPushWaiters removeAllObjects];
+  }
+  for (NSArray *w in waiters) {
+    if (token) ((RCTPromiseResolveBlock)w[0])(token);
+    else ((RCTPromiseRejectBlock)w[1])(@"push", err.localizedDescription ?: @"no token", err);
+  }
+}
+
+@interface VIGILPush : NSObject <RCTBridgeModule>
+@end
+
+@implementation VIGILPush
+RCT_EXPORT_MODULE();
++ (BOOL)requiresMainQueueSetup { return NO; }
+
+RCT_EXPORT_METHOD(enable:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  UNAuthorizationOptions opts = UNAuthorizationOptionAlert | UNAuthorizationOptionSound | UNAuthorizationOptionBadge;
+  [[UNUserNotificationCenter currentNotificationCenter] requestAuthorizationWithOptions:opts
+      completionHandler:^(BOOL granted, NSError *error) {
+    if (!granted) { reject(@"denied", @"Notifications are turned off for VIGIL", error); return; }
+    @synchronized (VIGILPushLock()) {
+      [gPushWaiters addObject:@[[resolve copy], [reject copy]]];
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [[UIApplication sharedApplication] registerForRemoteNotifications];
+    });
+  }];
+}
+
+RCT_EXPORT_METHOD(status:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  [[UNUserNotificationCenter currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *st) {
+    UNAuthorizationStatus a = st.authorizationStatus;
+    resolve(a == UNAuthorizationStatusAuthorized || a == UNAuthorizationStatusProvisional ? @"on"
+            : a == UNAuthorizationStatusDenied ? @"off" : @"ask");
+  }];
+}
+
+RCT_EXPORT_METHOD(openSettings)
+{
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [[UIApplication sharedApplication] openURL:[NSURL URLWithString:UIApplicationOpenSettingsURLString]
+                                       options:@{} completionHandler:nil];
+  });
+}
+@end
+
+@interface AppDelegate () <UNUserNotificationCenterDelegate>
+@end
 
 @implementation AppDelegate
 
@@ -15,7 +85,29 @@
 
   
   [VIGILObserver enableBackgroundDelivery];
+  [UNUserNotificationCenter currentNotificationCenter].delegate = self;   // APPLE_PUSH_V1: show alerts while VIGIL is open too
   return [super application:application didFinishLaunchingWithOptions:launchOptions];
+}
+
+- (void)application:(UIApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken
+{
+  const unsigned char *b = (const unsigned char *)deviceToken.bytes;
+  NSMutableString *hex = [NSMutableString stringWithCapacity:deviceToken.length * 2];
+  for (NSUInteger i = 0; i < deviceToken.length; i++) { [hex appendFormat:@"%02x", b[i]]; }
+  VIGILPushDeliver(hex, nil);
+}
+
+- (void)application:(UIApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error
+{
+  VIGILPushDeliver(nil, error);
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler
+{
+  completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList |
+                    UNNotificationPresentationOptionSound);
 }
 
 - (NSURL *)sourceURLForBridge:(RCTBridge *)bridge
