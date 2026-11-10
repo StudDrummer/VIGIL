@@ -33,6 +33,8 @@ def fake_sh(*cmd, timeout=30):
         return 0, "default via 192.168.12.1 dev wlan0"
     if cmd[:4] == ("nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY"):
         return 0, "".join("%s:70:WPA2\n" % n for n in W["visible"])
+    if cmd[:6] == ("nmcli", "-t", "-f", "NAME", "connection", "show"):
+        return 0, "vigil-setup\n" if (os.path.exists(ws.FLAG) and not W.get("hotspot_dead")) else "LalsT\n"
     if cmd[:4] == ("iw", "dev", "wlan0", "station"):
         return 0, "Station aa:bb\n" * W["clients"]
     return 0, ""
@@ -51,7 +53,7 @@ def reset():
     calls.clear()
     ws.NET.update(offline_since=None, level=0, hotspot_since=None)
     ws.NET["retries_fixed"].clear()
-    W.update(assoc=True, internet=True, gateway=True, saved=["LalsT"], visible=["LalsT"], clients=0, eth=False)
+    W.update(assoc=True, internet=True, gateway=True, saved=["LalsT"], visible=["LalsT"], clients=0, eth=False, hotspot_dead=False)
     if os.path.exists(ws.FLAG):
         os.remove(ws.FLAG)
 
@@ -127,6 +129,17 @@ def test_cable_box_leaves_setup_hotspot():
     open(ws.FLAG, "w").close(); ws.NET["hotspot_since"] = 1000
     assert ws.tick(1400) == "left hotspot to look for saved Wi-Fi" and not os.path.exists(ws.FLAG)
     assert ws.tick(1415) == "internet"
+
+
+def test_failed_hotspot_is_opened_again():
+    """HOTSPOT_CHECK_V1: the setup Wi-Fi flag is set but the hotspot never came up."""
+    reset()
+    W.update(saved=[])
+    assert ws.tick(1000) == "setup: no wifi"
+    W.update(hotspot_dead=True)
+    assert ws.tick(1015) == "hotspot reopened" and os.path.exists(ws.FLAG)
+    W.update(hotspot_dead=False)
+    assert ws.tick(1030) == "hotspot"
 
 
 if __name__ == "__main__":

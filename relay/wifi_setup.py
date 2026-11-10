@@ -323,6 +323,11 @@ def do_reboot(now, why):
     sh("systemctl", "reboot")
 
 
+def hotspot_active():
+    rc, out = sh("nmcli", "-t", "-f", "NAME", "connection", "show", "--active")
+    return rc != 0 or "vigil-setup" in out.split()     # if nmcli itself fails, do not churn
+
+
 def open_setup(why):
     NETWORKS[:] = scan()
     print("[wifi-setup] %s; opening %s" % (why, ssid_name()), flush=True)
@@ -337,6 +342,13 @@ def tick(now=None):
         return "joining"
     ready = has_camera_account()
     saved = known_wifi()
+    if os.path.exists(FLAG) and not hotspot_active():           # HOTSPOT_CHECK_V1: it failed or was dropped: open it again
+        print("[wifi-setup] setup Wi-Fi is not actually on; opening it again", flush=True)
+        os.remove(FLAG)
+        if not (ready and saved):
+            open_setup("setup Wi-Fi was down")
+            return "hotspot reopened"
+        NET.update(hotspot_since=None)
     if os.path.exists(FLAG):                                    # hotspot is up
         if ready and (saved or wired()) and now - (NET["hotspot_since"] or now) >= 300 and not hotspot_clients():
             hotspot_off()                                       # step aside and look for the saved Wi-Fi
