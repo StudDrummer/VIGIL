@@ -776,8 +776,10 @@ def apns_config():
 
 
 def _apns_jwt(c):
-    if _APNS["jwt"] and time.time() - _APNS["at"] < 2400:      # Apple wants a fresh one at least hourly
+    ident = (c["key_id"], c["team_id"], hashlib.sha256(c["key"].encode()).hexdigest())
+    if _APNS["jwt"] and _APNS.get("ident") == ident and time.time() - _APNS["at"] < 2400:   # fresh at least hourly
         return _APNS["jwt"]
+    _APNS["ident"] = ident                                      # new key or IDs: never reuse the old token
     import jwt                                                  # PyJWT with cryptography (ES256)
     _APNS["jwt"] = jwt.encode({"iss": c["team_id"], "iat": int(time.time())}, c["key"],
                               algorithm="ES256", headers={"kid": c["key_id"]})
@@ -821,6 +823,10 @@ def send_apns(user_ids, title, body, site_id=None, kind="alert", urgent=False):
                     break
                 if r.status_code == 400 and "BadDeviceToken" in r.text and i == 0:
                     continue                                    # wrong environment for this build
+                if r.status_code == 403 and "ProviderToken" in r.text:
+                    _APNS["jwt"] = None                         # wrong key or IDs: rebuild next time
+                    print("[APNS] Apple refused the key: check the Key ID and Team ID (vigilctl.py apns)", flush=True)
+                    break
                 if r.status_code == 410 or (r.status_code == 400 and "BadDeviceToken" in r.text):
                     con.execute("DELETE FROM push_tokens WHERE token=?", (token,))   # app deleted
                 else:
