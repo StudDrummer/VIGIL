@@ -842,6 +842,35 @@ class FallDetector:
         self.floor_since = None
         self.floor_last = 0.0
         self.floor_alerted = False
+        # FALL_V5: body height and hip level over time, for falls the torso angle cannot see
+        self.hist = deque(maxlen=90)          # (t, hip_y, top_y, bottom_y, box_h, compact)
+        self.seat_since = None                # dropped fast onto the floor and stayed sitting
+        self.seat_last = 0.0
+        self.seat_alerted = False
+        self.reason = ""
+
+    # FALL_V5 thresholds (fractions of the person's own standing height)
+    SEAT_DROP = 0.17          # hips drop at least this far ...
+    SEAT_RATE = 0.22          # ... at least this fast per second, over at most SEAT_WIN (falls ~0.3+, sitting down ~0.1-0.2)
+    SEAT_WIN = 1.5
+    SEAT_HOLD_S = 15.0        # and they stay sitting on the floor this long
+    SEAT_LEVEL = 0.16         # hips within this of the ankles' level = sitting on the floor
+    FLAT_RATIO = 0.38         # lying seen end-on: shorter than this share of standing height
+    FLAT_HIP = 0.17           # with the hips this close to the lowest point
+
+    def _standing_h(self, now):
+        hs = [h for (t, _hy, _ty, _by, h, c) in self.hist if c and now - t <= 20.0]
+        return max(hs) if len(hs) >= 2 else None
+
+    @staticmethod
+    def _hip_y(kp):
+        ys = [float(kp[i][1]) for i in (11, 12) if float(kp[i][2]) >= 0.3]
+        return sum(ys) / len(ys) if ys else None
+
+    @staticmethod
+    def _ankle_y(kp):
+        ys = [float(kp[i][1]) for i in (15, 16) if float(kp[i][2]) >= 0.25]
+        return sum(ys) / len(ys) if ys else None
 
     @staticmethod
     def _load_zones():
@@ -935,8 +964,8 @@ class FallDetector:
         except Exception:
             return False
 
-    def update(self, kp, frame_shape=None):
-        now = time.time()
+    def update(self, kp, frame_shape=None, now=None):
+        now = time.time() if now is None else now      # FALL_LAB_V1: replays pass their own clock
         try:
             pts = kp[kp[:, 2] >= CONF_THRESHOLD]
         except Exception:
@@ -970,10 +999,47 @@ class FallDetector:
             down = ang >= self.DOWN_TORSO_DEG and aspect >= self.DOWN_ASPECT_WITH_TORSO
         else:
             down = aspect >= self.DOWN_ASPECT_NO_TORSO
-        if down and self._legs_standing(kp, frame_shape):
+        legs_up = self._legs_standing(kp, frame_shape)
+        _Hr = self._standing_h(now)
+        if legs_up and _Hr and h < 0.42 * _Hr:
+            legs_up = False          # FALL_V5: tiny "standing" legs are a body lying end-on, not legs
+        if down and legs_up:
             down = False            # FALL_V43: bending over, still on their feet
             self.last_up_t = now    # a fall is timed from the last moment on their feet
+        # FALL_V5: what the torso angle cannot see
+        top, bot = float(pts[:, 1].min()), float(pts[:, 1].max())
+        hip_y = self._hip_y(kp)
+        H_ref = self._standing_h(now)
+        flat = False
+        seated_floor = False
+        if H_ref and hip_y is not None and not legs_up:
+            # lying along the camera's line of sight: short, and the hips are at the bottom
+            flat = h < self.FLAT_RATIO * H_ref and (bot - hip_y) < self.FLAT_HIP * H_ref
+            ank = self._ankle_y(kp)
+            seated_floor = ank is not None and abs(ank - hip_y) < self.SEAT_LEVEL * H_ref and h < 0.62 * H_ref
+        if flat:
+            compact = False                      # short and "upright"-angled, but lying end-on
+        self.hist.append((now, hip_y, top, bot, h, bool(compact)))
+        if flat and not down:
+            down = True
+            self.reason = "lying, seen end-on"
+        elif down:
+            self.reason = "lying"
         in_zone = self._in_zone(pts, frame_shape)
+        if seated_floor and not in_zone:
+            if self.seat_since is None and self._fast_drop(now, H_ref):
+                self.seat_since = now
+            if self.seat_since is not None:
+                self.seat_last = now
+        elif self.seat_since is not None and now - self.seat_last > 3.0:
+            self.seat_since = None
+            self.seat_alerted = False
+        if (self.seat_since is not None and not self.seat_alerted and now - self.seat_since >= self.SEAT_HOLD_S
+                and now - self.last_alert > FALL_COOLDOWN_SEC):
+            self.seat_alerted = True
+            self.last_alert = now
+            self.reason = "dropped onto the floor and stayed sitting"
+            return True
         if down and not in_zone:
             if self.floor_since is None:
                 self.floor_since = now
@@ -982,6 +1048,9 @@ class FallDetector:
             self.floor_since = None          # brief lost points do not restart the clock
             self.floor_alerted = False
 
+        if compact and H_ref and h >= 0.8 * H_ref:
+            self.seat_since = None               # back on their feet
+            self.seat_alerted = False
         if compact:
             self.last_up_t = now
             if self.state == "falling":
@@ -1028,11 +1097,28 @@ class FallDetector:
         return False
 
 
-    def floor_alert_due(self, after_s):
+    def _fast_drop(self, now, H_ref):
+        """FALL_V5: the hips fell at least SEAT_DROP of standing height, at least SEAT_RATE per second."""
+        if not H_ref:
+            return False
+        pts = [(t, hy) for (t, hy, _a, _b, _h, _c) in self.hist if hy is not None and now - t <= 4.0]
+        if len(pts) >= 2:          # the drop must happen within SEAT_WIN seconds
+            pts = [p for p in pts if pts[-1][0] - p[0] <= self.SEAT_WIN + 0.01] or pts[-2:]
+        if len(pts) < 2:
+            return False
+        t_end, y_end = pts[-1]
+        for t, y in pts[:-1]:
+            dy = (y_end - y) / H_ref
+            dt = max(t_end - t, 1e-3)
+            if dy >= self.SEAT_DROP and dy / dt >= self.SEAT_RATE:
+                return True
+        return False
+
+    def floor_alert_due(self, after_s, now=None):
         """FLOOR_V1: True once per stay on the floor, after `after_s` seconds."""
         if after_s <= 0 or self.floor_since is None or self.floor_alerted:
             return False
-        if time.time() - self.floor_since >= after_s:
+        if (time.time() if now is None else now) - self.floor_since >= after_s:
             self.floor_alerted = True
             return True
         return False
@@ -1172,9 +1258,13 @@ _FALL_SOLO = [None, 0.0]   # FALL_V45
 _PROBE_CHK = [0.0]
 
 
+_PROBE_SHAPE = [None]
+
+
 def _replay_push_tid(tid, kp, shape):
     try:
         now = time.time()
+        _PROBE_SHAPE[0] = [int(shape[0]), int(shape[1])]
         q = _REPLAY_BY_TID.setdefault(tid, deque(maxlen=200))
         if q and now - q[-1][0] < 0.2:
             return
@@ -1263,7 +1353,12 @@ def _probe_check():
         os.remove(flag)
         d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fall_probes")
         os.makedirs(d, exist_ok=True)
-        out = {"label": label, "t": now, "tracks": {
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fall_zones.json")) as _zf:
+                _zones = _js.load(_zf)
+        except Exception:
+            _zones = []
+        out = {"label": label, "t": now, "shape": _PROBE_SHAPE[0], "zones": _zones, "tracks": {
             str(t): [f for f in list(q) if f[0] >= now - 40] for t, q in _REPLAY_BY_TID.items()}}
         with open(os.path.join(d, label + ".json"), "w") as f:
             _js.dump(out, f)

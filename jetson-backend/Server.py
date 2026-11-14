@@ -2804,6 +2804,12 @@ def send_push(title, message, priority="default", tags=""):
     import requests as _rq
     sent = False
     url = os.environ.get("VIGIL_PUSH_URL")
+    if not url:                     # REMOTE_SITE_V1: the home Jetson keeps it in a file next to Server.py
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "push_url.txt")) as _pf:
+                url = _pf.read().strip() or None
+        except OSError:
+            url = None
     if url:
         try:
             r = _rq.post(url, json={"title": title, "message": message, "priority": priority, "kind": tags or "alert"},

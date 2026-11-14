@@ -87,7 +87,12 @@ def render(st):
               "setup_code": c.get("setup_code", ""),
               # SETUP_LIVE_V1: the relay box reports its setup progress with its stream password
               "relay_key_sha256": hashlib.sha256(c["stream_pass"].encode()).hexdigest(),
-              "internal_url": "http://site-%s:5001" % c["id"]} for c in cams]
+              # REMOTE_SITE_V1: a camera whose server runs elsewhere (the home Jetson, over Tailscale)
+              "internal_url": c.get("remote_url") or "http://site-%s:5001" % c["id"]} for c in cams]
+    for site, c in zip(sites, cams):
+        if c.get("remote_url"):
+            site["api_key"] = c["remote_key"]
+            site["remote"] = True
     _write(os.path.join(CONF, "sites.json"), json.dumps({"sites": sites}, indent=2), secret=True)
 
     # mediamtx: each camera may publish only to its own path; sites may only read.
@@ -97,6 +102,8 @@ def render(st):
                  % st["reader_pass"])
     paths = []
     for c in cams:
+        if c.get("remote_url"):
+            continue                       # REMOTE_SITE_V1: no video comes through the cloud
         if c.get("pull_url"):
             paths.append("  %s:\n    source: %s\n    sourceOnDemand: no\n" % (c["id"], c["pull_url"]))
         else:
@@ -117,6 +124,8 @@ def render(st):
     # docker compose
     svc = []
     for c in cams:
+        if c.get("remote_url"):
+            continue                       # REMOTE_SITE_V1: its server runs elsewhere
         svc.append("""
   site-{id}:
     image: vigil-site:latest
@@ -492,6 +501,27 @@ def cmd_apns(a):
     print("Apple push is on. Phones get alerts from the VIGIL app within a minute.")
 
 
+def cmd_add_remote(a):
+    """REMOTE_SITE_V1: put a camera that already has its own VIGIL server (the home
+    Jetson) behind VIGIL Cloud: same accounts, app, alerts by email and push."""
+    st = load()
+    if any(c["id"] == a.id for c in st["cameras"] if not c.get("removed")):
+        sys.exit("A camera called %s already exists." % a.id)
+    c = {"id": a.id, "name": a.name, "home": a.home or "", "room": "", "tz": a.tz or "",
+         "api_key": secrets.token_urlsafe(24), "stream_user": "cam_" + a.id,
+         "stream_pass": secrets.token_urlsafe(18), "ntfy_topic": "vigil-" + secrets.token_hex(12),
+         "setup_code": new_setup_code(st), "srt_passphrase": secrets.token_hex(16),
+         "remote_url": a.url.rstrip("/"), "remote_key": a.key}
+    st["cameras"].append(c)
+    save(st)
+    render(st)
+    compose_up(st)
+    print("Added %s (%s) at %s" % (a.id, a.name, c["remote_url"]))
+    print("Setup code: %s   (in the app: Settings, Account, Add a camera)" % c["setup_code"])
+    print("Alerts from it reach the app if that server has this push address:")
+    print("  https://%s/internal/push/%s" % (st["domain"], a.id))
+
+
 def cmd_apply(_a):
     st = load()
     render(st)
@@ -531,6 +561,10 @@ def main():
     sub.add_parser("users").set_defaults(f=cmd_users)
     sub.add_parser("apply").set_defaults(f=cmd_apply)
     sub.add_parser("boxes").set_defaults(f=cmd_boxes)
+    s = sub.add_parser("add-remote"); s.add_argument("--id", required=True); s.add_argument("--name", required=True)
+    s.add_argument("--url", required=True, help="e.g. http://100.107.17.113:5001")
+    s.add_argument("--key", required=True, help="that server's VIGIL_API_KEY")
+    s.add_argument("--home"); s.add_argument("--tz"); s.set_defaults(f=cmd_add_remote)
     s = sub.add_parser("apns"); s.add_argument("--key-file", required=True); s.add_argument("--key-id", required=True)
     s.add_argument("--team-id", required=True); s.add_argument("--bundle-id", default="com.rushilmohan.vigilapp")
     s.set_defaults(f=cmd_apns)
