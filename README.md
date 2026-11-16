@@ -183,7 +183,7 @@ and does not follow anyone.
 ## Repository
 
 ```
-ios-app/          React Native app (TypeScript): App.tsx plus the native iOS modules
+ios-app/          React Native app (TypeScript): App.tsx and the full Xcode project (see ios-app/README.md)
 jetson-backend/   camera pipeline, REST API, nightly analysis jobs
 cloud/            VIGIL Cloud: gateway, per-camera containers, vigilctl.py, auto-update
 relay/            the Raspberry Pi relay box that sits next to a camera
