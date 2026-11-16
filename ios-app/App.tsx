@@ -64,6 +64,7 @@ import {launchImageLibrary,launchCamera} from 'react-native-image-picker';  // P
 // ─────────────────────────────────────────────
 const DEFAULT_IP    = 'your-jetson-ip';
 const DEFAULT_PORT  = '5001';
+const APP_VERSION   = '1.0 (3)';   // keep in step with MARKETING_VERSION (CURRENT_PROJECT_VERSION) in the Xcode project
 const TIMEOUT_MS    = 10_000;
 const AUTO_SYNC_SEC = 60;
 const VIGIL_KEY     = 'YOUR_VIGIL_API_KEY';   // must match VIGIL_API_KEY on the monitoring unit
@@ -372,7 +373,7 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
   const btn={signup:'Create account',signin:'Sign in',forgot:'Email me a code',reset:'Save and sign in',verify:'Confirm'}[mode];
   return(
     <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
-      <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>{title}</Text>
+      <Text onLongPress={()=>setAdv(v=>!v)} style={{color:C.text,fontSize:22,fontWeight:'700'}}>{title}</Text>
       <Text style={{color:C.sub,fontSize:15,marginTop:6,lineHeight:21}}>{sub}</Text>
       {note&&<Text style={{color:C.green,fontSize:14,marginTop:10,lineHeight:20}}>{note}</Text>}
       {mode==='signup'&&<TextInput style={inp} value={name} onChangeText={setName} placeholder="Your name" placeholderTextColor={C.muted}
@@ -412,9 +413,6 @@ function CloudSignIn({onSignedIn,startMode='signup'}:{onSignedIn:(cfg:CloudCfg)=
       </>}
       {(mode==='forgot'||mode==='reset')&&<TouchableOpacity onPress={()=>{setMode('signin');setErr(null);setNote(null);}} style={{alignItems:'center',paddingTop:16}}>
         <Text style={{color:C.sub,fontSize:15}}>Back to sign in</Text></TouchableOpacity>}
-      <TouchableOpacity onPress={()=>setAdv(v=>!v)} style={{alignSelf:'center',paddingTop:14}}>
-        <Text style={{color:C.muted,fontSize:12}}>{adv?'Hide server address':'Server address'}</Text>
-      </TouchableOpacity>
     </View>
   );
 }
@@ -1003,7 +1001,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
             <Text style={{color:C.muted,fontSize:14}}>My box and camera are already working</Text></TouchableOpacity>}
         </ScrollView>
         {(cur!=='connect'||!box)&&<View style={{flexDirection:'row',gap:12,paddingHorizontal:20,paddingTop:8,paddingBottom:28}}>
-          {step>0&&cur!=='live'&&<TouchableOpacity onPress={()=>go(step-1)} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
+          {step>0&&cur!=='live'&&<TouchableOpacity onPress={()=>go(step-1)} style={{flex:1,backgroundColor:C.fill,borderRadius:100,padding:17,alignItems:'center'}}>
             <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text></TouchableOpacity>}
           {cur!=='connect'&&<TouchableOpacity disabled={!canNext} onPress={cur==='live'?onDone:()=>go(step+1)}
             style={[s.btnPrimary,{flex:2,paddingVertical:17},!canNext&&{backgroundColor:C.fill,shadowOpacity:0}]}>
@@ -1350,7 +1348,7 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
           {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:14,lineHeight:20}}>{err}</Text>}
         </ScrollView>
         <View style={{flexDirection:'row',gap:12,paddingHorizontal:20,paddingTop:8,paddingBottom:28}}>
-          {step>0&&cur!=='done'&&<TouchableOpacity onPress={back} style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:17,alignItems:'center'}}>
+          {step>0&&cur!=='done'&&<TouchableOpacity onPress={back} style={{flex:1,backgroundColor:C.fill,borderRadius:100,padding:17,alignItems:'center'}}>
             <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text></TouchableOpacity>}
           <TouchableOpacity disabled={!canNext} onPress={cur==='done'?finish:next}
             style={[s.btnPrimary,{flex:2,paddingVertical:17},!canNext&&{backgroundColor:C.fill,shadowOpacity:0}]}>
@@ -1630,7 +1628,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
                 using sample data, with no hardware required.
               </Text>
               <TouchableOpacity onPress={onDemo}
-                style={{backgroundColor:C.green,borderRadius:12,paddingVertical:12,
+                style={{backgroundColor:C.green,borderRadius:100,paddingVertical:13,
                         alignItems:'center'}}>
                 <Text style={{color:'#000',fontWeight:'700',fontSize:15}}>Open Demo Mode</Text>
               </TouchableOpacity>
@@ -1728,7 +1726,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
   };
 
   const legal=(
-    <Text style={{color:C.muted,fontSize:13,lineHeight:19,textAlign:'center',marginTop:18}}>
+    <Text style={{color:C.muted,fontSize:12,lineHeight:17,textAlign:'center',marginTop:8}}>
       VIGIL is a safety and wellness tool, not a medical device. By continuing you agree to the{' '}
       <Text style={{color:C.blue}} onPress={()=>Linking.openURL('https://vigilhealth.me/terms.html')}>Terms</Text> and{' '}
       <Text style={{color:C.blue}} onPress={()=>Linking.openURL('https://vigilhealth.me/privacy.html')}>Privacy Policy</Text>.
@@ -1747,21 +1745,22 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
       <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
         <StatusBar barStyle="light-content"/>
         <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
-          <ScrollView contentContainerStyle={{padding:24,paddingTop:48}} keyboardShouldPersistTaps="handled">
-            <View style={{alignItems:'center',marginBottom:28}}>
-              <Image source={{uri:'LaunchLogo'}} style={{width:84,height:84,borderRadius:20,marginBottom:18}}/>
-              <Text style={{color:C.text,fontSize:34,fontWeight:'700',letterSpacing:-0.5}}>VIGIL</Text>
-              <Text style={{color:C.sub,fontSize:17,textAlign:'center',lineHeight:24,marginTop:8}}>
-                Tells you right away if someone falls. Nothing to wear, nothing to press.
-              </Text>
-            </View>
+          <ScrollView contentContainerStyle={{flexGrow:1,paddingHorizontal:24,paddingTop:mode==='cloud'?8:24,paddingBottom:16}} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            {mode==='cloud'?(
+              <>
+                <TouchableOpacity onPress={()=>setMode('choose')} hitSlop={{top:12,bottom:12,left:12,right:24}} style={{alignSelf:'flex-start',paddingVertical:10}}>
+                  <Text style={{color:C.green,fontSize:17}}>{'\u2039'} Back</Text>
+                </TouchableOpacity>
+                <View style={{flexDirection:'row',alignItems:'center',gap:12,marginTop:8,marginBottom:8}}>
+                  <Image source={{uri:'LaunchLogo'}} style={{width:44,height:44,borderRadius:12}}/>
+                  <Text style={{color:C.text,fontSize:22,fontWeight:'700'}}>VIGIL</Text>
+                </View>
             {mode==='cloud'&&!!pendingCode&&!pendingCloud&&(
-              <View style={{marginHorizontal:16,padding:14,borderRadius:14,backgroundColor:C.green+'18',borderWidth:1,borderColor:C.green+'55'}}>
+              <View style={{marginTop:8,padding:14,borderRadius:14,backgroundColor:C.green+'18',borderWidth:1,borderColor:C.green+'55'}}>
                 <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Setting up your VIGIL camera</Text>
                 <Text style={{color:C.sub,fontSize:14,marginTop:4,lineHeight:20}}>Code {pendingCode.slice(0,4)}-{pendingCode.slice(4)} is ready. Create your account and VIGIL adds the camera for you.</Text>
               </View>)}
-            {mode==='cloud'?(
-              <>
+                <View style={{marginHorizontal:-16}}>
                 {pendingCloud?(
                   <AddCameraCard cfg={pendingCloud} initialCode={pendingCode||''}
                     onAdded={(cfg,role)=>{setPendingCloud(null);
@@ -1780,27 +1779,45 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
                         setHomeSetup({cfg:c2,role:v.role});return;}}catch(_e){}
                     onCloud&&onCloud(cfg);}}/>
                 )}
-                <TouchableOpacity onPress={()=>setMode('choose')} style={{alignItems:'center',paddingVertical:16}}>
-                  <Text style={{color:C.sub,fontSize:16}}>Back</Text>
-                </TouchableOpacity>
+                </View>
+                {legal}
               </>
             ):(
               <>
-                <TouchableOpacity style={[s.btnPrimary,{paddingVertical:18}]} onPress={()=>setMode('cloud')}>
-                  <Text style={[s.btnPrimaryTxt,{fontSize:18}]}>Get started</Text>
+                <View style={{flex:1,justifyContent:'center',paddingVertical:12}}>
+                  <View style={{alignItems:'center',marginBottom:32}}>
+                    <Image source={{uri:'LaunchLogo'}} style={{width:96,height:96,borderRadius:22,marginBottom:20}}/>
+                    <Text style={{color:C.text,fontSize:34,fontWeight:'700',letterSpacing:0.3}}>VIGIL</Text>
+                    <Text style={{color:C.sub,fontSize:17,textAlign:'center',lineHeight:24,marginTop:8,paddingHorizontal:8}}>
+                      Tells you right away if someone falls. Nothing to wear, nothing to press.
+                    </Text>
+                  </View>
+                  {([['bell','Alerts on your phone','A notification and an email the moment VIGIL sees a fall.'],
+                     ['eye','A camera does the watching','No pendant to charge and no button to remember.'],
+                     ['lock','Private by design','Video is never recorded. The live view shows stick figures unless you ask for video.']] as const).map(([g,h,d])=>(
+                    <View key={h} style={{flexDirection:'row',alignItems:'center',gap:16,paddingVertical:10,paddingHorizontal:4}}>
+                      <View style={{width:44,height:44,borderRadius:22,backgroundColor:C.green+'1F',alignItems:'center',justifyContent:'center'}}><Glyph name={g}/></View>
+                      <View style={{flex:1}}>
+                        <Text style={{color:C.text,fontSize:16,fontWeight:'600'}}>{h}</Text>
+                        <Text style={{color:C.sub,fontSize:14,lineHeight:20,marginTop:2}}>{d}</Text>
+                      </View>
+                    </View>))}
+                </View>
+                <TouchableOpacity style={[s.btnPrimary,{paddingVertical:17}]} onPress={()=>setMode('cloud')}>
+                  <Text style={[s.btnPrimaryTxt,{fontSize:17}]}>Get started</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={()=>{setMode('local');setStep(1);}}
-                  style={{marginTop:14,paddingVertical:16,borderRadius:14,borderWidth:1,borderColor:C.border,alignItems:'center'}}>
-                  <Text style={{color:C.text,fontSize:16,fontWeight:'600'}}>I have a VIGIL box at home</Text>
-                </TouchableOpacity>
-                {!!onDemo&&(
-                  <TouchableOpacity onPress={onDemo} style={{alignItems:'center',paddingVertical:18}}>
-                    <Text style={{color:C.blue,fontSize:16}}>Just looking? Try the demo</Text>
+                <View style={{flexDirection:'row',justifyContent:'center',gap:28,paddingTop:6}}>
+                  {!!onDemo&&(
+                    <TouchableOpacity onPress={onDemo} style={{paddingVertical:14}}>
+                      <Text style={{color:C.green,fontSize:16}}>Try the demo</Text>
+                    </TouchableOpacity>)}
+                  <TouchableOpacity onPress={()=>{setMode('local');setStep(1);}} style={{paddingVertical:14}}>
+                    <Text style={{color:C.sub,fontSize:16}}>Use a local unit</Text>
                   </TouchableOpacity>
-                )}
+                </View>
+                {legal}
               </>
             )}
-            {legal}
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -1826,7 +1843,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
           {renderStep()}
         </ScrollView>
         <View style={{flexDirection:'row',gap:12,padding:20,paddingBottom:32}}>
-          <TouchableOpacity style={{flex:1,backgroundColor:C.fill,borderRadius:14,padding:18,alignItems:'center'}} onPress={goBack}>
+          <TouchableOpacity style={{flex:1,backgroundColor:C.fill,borderRadius:100,padding:18,alignItems:'center'}} onPress={goBack}>
             <Text style={{color:C.text,fontWeight:'700',fontSize:17}}>Back</Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -2349,7 +2366,7 @@ function BaselineView({name,measures,groups}:{name:string;measures:BLMeasure[];g
     :`${off.length} of ${ready.length} ${off.length===1?'measure is':'measures are'} outside ${name}'s normal`;
   const sub=learning
     ?`VIGIL needs ${BL_MIN_DAYS} days of ${name} walking in view before it can say what is normal for them. ${days} so far.`
-    :`Compared with ${name}'s own usual range from up to ${Math.min(30,days)} earlier days, never with other people. AI Insights explains what a change may mean.`;
+    :`Compared with ${name}'s own usual range from up to ${Math.min(30,days)} earlier days, never with other people. Insights explains what a change may mean.`;
   const byKey:Record<string,BLMeasure>={};shown.forEach(m=>{byKey[m.key]=m;});
   const sections=groups||[{title:'',keys:shown.map(m=>m.key)}];
   return(
@@ -2485,18 +2502,18 @@ function PersonDetailScreen({
           ):(
             <>
               <Text style={s.secHeader}>Walking</Text>
-              <PTrendBar data={wk.map(t=>t.avg_speed)} label="Walking Speed" unit="m/s" color={C.teal} dec={2}/>
-              <PTrendBar data={wk.map(t=>t.avg_cadence)} label="Cadence" unit="spm" color={C.blue} dec={0}/>
-              <PTrendBar data={wk.map(t=>t.avg_posture)} label="Posture Score" unit="/100" color={C.purple} dec={0}/>
-              <PTrendBar data={wk.map(t=>t.avg_asymmetry)} label="Gait Asymmetry" unit="%" color={C.orange} dec={1}/>
+              <PTrendBar data={wk.map(t=>t.avg_speed)} label="Walking speed" unit="m/s" color={C.teal} dec={2}/>
+              <PTrendBar data={wk.map(t=>t.avg_cadence)} label="Steps per minute" unit="steps/min" color={C.blue} dec={0}/>
+              <PTrendBar data={wk.map(t=>t.avg_posture)} label="Posture" unit="/100" color={C.purple} dec={0}/>
+              <PTrendBar data={wk.map(t=>t.avg_asymmetry)} label="Step evenness" unit="% uneven" color={C.orange} dec={1}/>
             </>
           )}
           {watchWk.length>0&&(
             <>
               <Text style={s.secHeader}>Apple Watch</Text>
               <PTrendBar data={watchWk.map(r=>r.step_count)} label="Steps" unit="steps" color={C.green} dec={0}/>
-              <PTrendBar data={watchWk.map(r=>r.resting_hr)} label="Resting HR" unit="bpm" color={C.red} dec={0}/>
-              <PTrendBar data={watchWk.map(r=>r.hrv_sdnn)} label="HRV" unit="ms" color={C.purple} dec={1}/>
+              <PTrendBar data={watchWk.map(r=>r.resting_hr)} label="Resting heart rate" unit="bpm" color={C.red} dec={0}/>
+              <PTrendBar data={watchWk.map(r=>r.hrv_sdnn)} label="Heart rate variability" unit="ms" color={C.purple} dec={1}/>
               <PTrendBar data={watchWk.map(r=>r.sleep_hours)} label="Sleep" unit="h" color={C.orange} dec={1}/>
             </>
           )}
@@ -2575,7 +2592,7 @@ function PersonDetailScreen({
                     const color=neutral?C.sub:up?C.green:C.red;
                     return(
                       <View key={item.label} style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-                        <Text style={{color:C.sub,fontSize:13}}>{item.label}</Text>
+                        <Text style={{color:C.sub,fontSize:13}}>{plainLabel(item.label)}</Text>
                         <Text style={{color,fontSize:14,fontWeight:'700'}}>{up?'+':''}{item.val.toFixed(1)}%</Text>
                       </View>
                     );
@@ -2591,11 +2608,11 @@ function PersonDetailScreen({
               </View>
             ):(
               <>
-                <Text style={s.secHeader}>Gait & Posture — Last 14 Days</Text>
-                <PTrendBar data={trends.map(t=>t.avg_speed)} label="Walking Speed" unit="m/s" color={C.teal} dec={2}/>
-                <PTrendBar data={trends.map(t=>t.avg_cadence)} label="Cadence" unit="spm" color={C.blue} dec={0}/>
-                <PTrendBar data={trends.map(t=>t.avg_posture)} label="Posture Score" unit="/100" color={C.purple} dec={0}/>
-                <PTrendBar data={trends.map(t=>t.avg_asymmetry)} label="Gait Asymmetry" unit="%" color={C.orange} dec={1}/>
+                <Text style={s.secHeader}>Walking, last 14 days</Text>
+                <PTrendBar data={trends.map(t=>t.avg_speed)} label="Walking speed" unit="m/s" color={C.teal} dec={2}/>
+                <PTrendBar data={trends.map(t=>t.avg_cadence)} label="Steps per minute" unit="steps/min" color={C.blue} dec={0}/>
+                <PTrendBar data={trends.map(t=>t.avg_posture)} label="Posture" unit="/100" color={C.purple} dec={0}/>
+                <PTrendBar data={trends.map(t=>t.avg_asymmetry)} label="Step evenness" unit="% uneven" color={C.orange} dec={1}/>
               </>
             )}
             <View style={{height:40}}/>
@@ -2806,6 +2823,11 @@ const METRIC_INFO:{[k:string]:{what:string;up:string;down:string}} = {
   longest_stillness_min:{what:"The longest stretch without moving while in view of the camera.",up:"longer",down:"shorter"},
 };
 
+const PLAIN_LABEL:{[k:string]:string}={'Walking Speed':'Walking speed','Gait Speed':'Walking speed','Cadence':'Steps per minute',
+  'Posture Score':'Posture','Gait Asymmetry':'Step evenness','Asymmetry':'Step evenness','Resting HR':'Resting heart rate','Resting Heart Rate':'Resting heart rate',
+  'HRV':'Heart rate variability','Blood Oxygen':'Blood oxygen','SpO2':'Blood oxygen','Night Activity':'Night activity','Night Time Active':'Time active at night',
+  'Morning Start':'Morning start','Longest Daytime Absence':'Longest daytime absence','Stride Variability':'Walking steadiness','Activity Level':'Time moving'};
+const plainLabel=(l:any):string=>PLAIN_LABEL[String(l)]??String(l??'');
 function metricWhat(key:string):string{
   return METRIC_INFO[key]?.what ?? '';
 }
@@ -2911,16 +2933,12 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>}>
 
       <View style={{paddingHorizontal:20,paddingTop:20,paddingBottom:12}}>
-        <Text style={{color:C.text,fontSize:34,fontWeight:'700'}}>AI Insights</Text>
-        <Text style={{color:C.sub,fontSize:14,marginTop:2}}>
-          Measured against each resident's own baseline
-        </Text>
+        <Text style={s.pageTitle}>Insights</Text>
+        <Text style={s.pageSub}>Compared with each person's own normal</Text>
       </View>
       <PersonChips people={named} selectedId={selId} serverUrl={serverUrl} allLabel="Everyone"
         onPick={p=>setPick(p?p.id:null)}/>
-      <Text style={{color:C.muted,fontSize:12,lineHeight:17,marginHorizontal:20,marginBottom:12}}>
-        Health measures below belong to the person you pick. Routine, signals and the weekly summary further down describe the whole room.
-      </Text>
+      <View style={{height:12}}/>
 
       {residents.length===0 && (
         <View style={{alignItems:'center',padding:32}}>
@@ -2939,7 +2957,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
 
         return (
           <View key={res.person_id} style={{marginBottom:18}}>
-            <View style={{flexDirection:'row',alignItems:'center',gap:12,marginHorizontal:20,marginBottom:10}}>
+            {selId===null&&<View style={{flexDirection:'row',alignItems:'center',gap:12,marginHorizontal:20,marginBottom:10}}>
               <PersonAvatar personId={res.person_id} name={res.name} serverUrl={serverUrl} size={40}
                 isResident={!!people.find(p=>p.id===res.person_id)?.is_resident}/>
               <View>
@@ -2948,7 +2966,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                   {people.find(p=>p.id===res.person_id)?.is_resident?'Resident':'Visitor'}
                 </Text>
               </View>
-            </View>
+            </View>}
 
             {res.status==='building' && (
               <View style={{marginHorizontal:16,backgroundColor:C.card,borderRadius:16,padding:18}}>
@@ -2992,9 +3010,9 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                   const arrow = it.direction==='up' ? '\u2191' : '\u2193';
                   return (
                     <View key={it.metric} style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,
-                                                  borderRadius:16,padding:16,borderLeftWidth:3,borderLeftColor:col}}>
+                                                  borderRadius:16,padding:16,borderWidth:1,borderColor:it.severity==='normal'||!it.severity?C.border:col+'66'}}>
                       <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
-                        <Text style={{color:C.text,fontSize:15,fontWeight:'700',flex:1,marginRight:8}}>{it.label}</Text>
+                        <Text style={{color:C.text,fontSize:15,fontWeight:'700',flex:1,marginRight:8}}>{plainLabel(it.label)}</Text>
                         <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
                                       paddingHorizontal:8,paddingVertical:3,borderRadius:8}}>
                           <Text style={{color:col,fontSize:11,fontWeight:'700',letterSpacing:0.5}}>
@@ -3019,8 +3037,8 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                       )}
 
                       <View style={{height:1,backgroundColor:C.border,marginVertical:12}}/>
-                      <Text style={{color:C.text,fontSize:12,lineHeight:18,marginBottom:6}}>{metricWhat(it.metric)}</Text>
-                      <Text style={{color:C.sub,fontSize:12,lineHeight:18}}>{it.note}</Text>
+                      <Text style={{color:C.sub,fontSize:13,lineHeight:19}}>{metricWhat(it.metric)}</Text>
+                      {(it.severity==='attention'||it.severity==='watch')&&!!it.note&&<Text style={{color:C.muted,fontSize:12,lineHeight:18,marginTop:6}}>{it.note}</Text>}
                     </View>
                   );
                 })}
@@ -3148,7 +3166,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
               return (
                 <View key={it.label} style={{marginBottom:12,paddingBottom:12,
                                              borderBottomWidth:1,borderBottomColor:C.border}}>
-                  <Text style={{color:C.muted,fontSize:14,fontWeight:'600'}}>{it.label}</Text>
+                  <Text style={{color:C.muted,fontSize:14,fontWeight:'600'}}>{plainLabel(it.label)}</Text>
                   <Text style={{color:C.muted,fontSize:11,marginTop:4}}>
                     Learning this pattern \u2014 {it.days_of_history} of {it.days_needed} days
                   </Text>
@@ -3164,7 +3182,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                                            borderBottomWidth:1,borderBottomColor:C.border}}>
                 <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
                   <Text style={{color:low?C.muted:C.text,fontSize:14,fontWeight:'600',flex:1,marginRight:8}}>
-                    {it.label}
+                    {plainLabel(it.label)}
                   </Text>
                   {it.severity!=='normal'&&(
                     <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
@@ -3342,7 +3360,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
 // hardware a reviewer does not have. Values below mirror this system's
 // real measured output so the demo is representative, not invented.
 // ─────────────────────────────────────────────
-const DEMO_RESIDENT = 'Margaret (Demo Resident)';
+const DEMO_RESIDENT = 'Margaret';
 
 function demoDate(back:number):string{
   const d=new Date(); d.setHours(12,0,0,0); d.setDate(d.getDate()-back);
@@ -3615,6 +3633,17 @@ const KInput=React.memo(function KInput({value,onChange,onSubmit,liveRef,style,.
 });
 
 // Drawn tab-bar icons (match the website's line icons).
+function Glyph({name,color=C.green,size=22}:{name:'bell'|'eye'|'lock'|'check'|'chevron';color?:string;size?:number}){
+  const P:any={stroke:color,strokeWidth:1.8,fill:'none',strokeLinecap:'round',strokeLinejoin:'round'};
+  return(
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      {name==='bell'&&<><Path d="M12 3.5a5 5 0 0 0-5 5v3.2L5.2 15h13.6L17 11.7V8.5a5 5 0 0 0-5-5z" {...P}/><Path d="M10 18.2a2 2 0 0 0 4 0" {...P}/></>}
+      {name==='eye'&&<><Path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z" {...P}/><Circle cx={12} cy={12} r={2.8} {...P}/></>}
+      {name==='lock'&&<><Path d="M7.5 11V8.3a4.5 4.5 0 0 1 9 0V11" {...P}/><Path d="M6 11h12v8.5H6z" {...P}/></>}
+      {name==='check'&&<Path d="M5 12.5l4.5 4.5L19 7.5" {...P}/>}
+      {name==='chevron'&&<Path d="M9 5l7 7-7 7" {...P}/>}
+    </Svg>);
+}
 function TabIcon({name,color}:{name:string;color:string}){
   const p={stroke:color,strokeWidth:2,fill:'none',strokeLinecap:'round' as const,strokeLinejoin:'round' as const};
   return(
@@ -3815,6 +3844,7 @@ export default function App() {
 
   // Demo Mode: populate every screen from canned data and stop all polling.
   // No request is issued at all, so there is nothing to time out or fail.
+  const bootRef=useRef(Date.now());   // 'Connecting' is only believable for a few seconds
   const enterDemo = useCallback(()=>{
     setDemoMode(true);
     setToday(DEMO_TODAY);
@@ -3828,6 +3858,7 @@ export default function App() {
   },[]);
 
   const exitDemo = useCallback(()=>{
+    bootRef.current=Date.now();
     setDemoMode(false);
     setToday(null); setHistory([]); setAlerts([]);
     setPersons([]); setCameraStatus(null); setRooms([]);
@@ -4555,14 +4586,16 @@ export default function App() {
           </>
         ):(
           <View style={{flex:1,alignItems:'center',justifyContent:'center',gap:6}}>
-            <Text style={{color:C.muted,fontSize:14}}>
-              {demoMode?'Live View \u2014 Demo':'Live View Unavailable'}
-            </Text>
-            <Text style={{color:C.muted,fontSize:11,textAlign:'center',paddingHorizontal:28,lineHeight:16}}>
-              {demoMode
-                ?'Live video needs the VIGIL camera unit. Everything else on this screen is sample data.'
-                :(cameraStatus?.online?'Camera starting...':'Camera offline')}
-            </Text>
+            {(()=>{   // one honest state at a time, matching the status card above
+              const wait=!demoMode&&jetsonOk!==false&&(cameraStatus?.online||(cameraStatus==null&&Date.now()-bootRef.current<15000));
+              const head=demoMode?'No live view in the demo':wait?(cameraStatus?.online?'Starting the camera':'Connecting'):'Camera offline';
+              const sub=demoMode?'Everything else on this screen is sample data.':wait?'':'Live view returns when the camera reconnects.';
+              return(<>
+                {wait&&<ActivityIndicator color={C.sub} style={{marginBottom:4}}/>}
+                <Text style={{color:C.sub,fontSize:15,fontWeight:'600'}}>{head}</Text>
+                {!!sub&&<Text style={{color:C.muted,fontSize:12,textAlign:'center',paddingHorizontal:28,lineHeight:17}}>{sub}</Text>}
+              </>);
+            })()}
           </View>
         )}
       </View>
@@ -4588,12 +4621,8 @@ export default function App() {
   const renderToday=()=>(
     <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>} showsVerticalScrollIndicator={false}>
       <View style={s.pageHead}>
-        <View style={{flexDirection:'row',alignItems:'center',gap:10,marginBottom:16}}>
-          <Image source={{uri:'LaunchLogo'}} style={{width:30,height:30,borderRadius:8}}/>
-          <Text style={{color:C.text,fontSize:15,fontWeight:'700',letterSpacing:2.4}}>VIGIL</Text>
-        </View>
+        <Text style={{color:C.sub,fontSize:13,fontWeight:'600',letterSpacing:0.4,marginBottom:2}}>{new Date().toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'}).toUpperCase()}</Text>
         <Text style={s.pageTitle}>Today</Text>
-        <Text style={s.pageSub}>{new Date().toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})}</Text>
         {cloud&&cloud.sites.length>0&&(()=>{   // CAMERA_SWITCHER_V1: which camera, and one tap to change it
           const cur=cloud.sites.find(x=>x.id===cloud.siteId)||cloud.sites[0];
           const dot=cur.online===false?C.red:cur.online?C.green:C.sub;
@@ -4630,18 +4659,21 @@ export default function App() {
         const cs=cloud?cloud.sites.find(x=>x.id===cloud.siteId):null;
         // a frame arriving is proof the camera is up; no status yet means still checking, not offline
         const online=demoMode||!!cameraFrame||(cloud?(cs?.online!==false&&(jetsonOk===true||!!cs?.online||!!cameraStatus?.online)):!!cameraStatus?.online);
-        const checking=!demoMode&&!online&&(cloud?cs?.online==null&&jetsonOk!==false:(jetsonOk==null||(jetsonOk===true&&cameraStatus==null)));
+        const fresh=Date.now()-bootRef.current<15000;
+        const checking=!demoMode&&!online&&fresh&&(cloud?cs?.online==null&&jetsonOk!==false:(jetsonOk==null||(jetsonOk===true&&cameraStatus==null)));
         const openFall=alerts.some(a=>a.alert_type==='fall'&&!a.seen);
         if(openFall)return null;   // the fall card below is the status
-        const tone=openFall?C.red:checking?C.sub:!online?C.red:C.green;
+        if(!cloud&&!demoMode&&jetsonOk===false)return null;   // the 'No monitoring unit connected' card below says it
+        const tone=checking?C.sub:!online?(!cloud&&jetsonOk!==true?C.orange:C.red):C.green;
         const who=inViewNames||((cameraStatus?.person_count??0)>1?`${cameraStatus?.person_count} people`:'Someone');
-        const head=openFall?'Needs attention':checking?'Connecting':!online?'Camera offline':someoneInView?`${who} in view`:'Room is quiet';
-        const sub=openFall?'A fall has not been acknowledged yet.':checking?'Checking the camera.':!online?'Alerts are paused until it reconnects.':someoneInView?'Watching. You will be alerted if anyone falls.':'Watching. No one in view right now.';
+        const unreachable=!cloud&&!demoMode&&!online&&!checking&&jetsonOk!==true;   // this phone cannot see the unit; the unit itself may be fine
+        const head=checking?'Connecting':unreachable?'Cannot reach VIGIL':!online?'Camera offline':someoneInView?`${who} in view`:'Room is quiet';
+        const sub=checking?'Checking the camera.':unreachable?'This phone cannot reach the monitoring unit. It keeps watching on its own.':!online?'Alerts are paused until it reconnects.':someoneInView?'Watching. You will be alerted if anyone falls.':'Watching. No one in view right now.';
         return(
           <View style={[s.card,{marginHorizontal:16,marginBottom:12,flexDirection:'row',alignItems:'center',gap:14}]}>
             <View style={{width:44,height:44,borderRadius:22,backgroundColor:tone+'22',alignItems:'center',justifyContent:'center'}}>
               {checking?<ActivityIndicator color={C.sub}/>:
-                <Animated.View style={{width:14,height:14,borderRadius:8,backgroundColor:tone,transform:[{scale:online&&!openFall?LIVE_PULSE:1}]}}/>}
+                <Animated.View style={{width:14,height:14,borderRadius:8,backgroundColor:tone,transform:[{scale:online?LIVE_PULSE:1}]}}/>}
             </View>
             <View style={{flex:1}}>
               <Text numberOfLines={1} style={{color:C.text,fontSize:18,fontWeight:'700',letterSpacing:-0.3}}>{head}</Text>
@@ -4673,7 +4705,7 @@ export default function App() {
               Check on them, then confirm here so everyone knows it is handled.
             </Text>
             <TouchableOpacity onPress={()=>acknowledgeAlert(a.id)}
-              style={{backgroundColor:C.red,borderRadius:12,paddingVertical:13,
+              style={{backgroundColor:C.red,borderRadius:100,paddingVertical:13,
                       alignItems:'center',marginTop:12}}>
               <Text style={{color:'#fff',fontWeight:'700',fontSize:15}}>
                 {open.length>1?`I am checking on them (${open.length} open)`:'I am checking on them'}
@@ -4685,7 +4717,7 @@ export default function App() {
               const who=res.find(x=>x.id===pid)||res[0];
               if(!who)return null;
               return(<TouchableOpacity onPress={()=>Linking.openURL(`tel:${String(who.emergency_phone).replace(/[^0-9+]/g,'')}`)}
-                style={{borderRadius:12,paddingVertical:13,alignItems:'center',marginTop:8,borderWidth:1.5,borderColor:C.red}}>
+                style={{borderRadius:100,paddingVertical:13,alignItems:'center',marginTop:8,borderWidth:1.5,borderColor:C.red}}>
                 <Text style={{color:C.red,fontWeight:'700',fontSize:15}}>Call {who.emergency_name||'emergency contact'}</Text>
               </TouchableOpacity>);
             })()}
@@ -4720,7 +4752,7 @@ export default function App() {
             works without hardware, open Demo Mode.
           </Text>
           <TouchableOpacity onPress={enterDemo}
-            style={{backgroundColor:C.green,borderRadius:12,paddingVertical:12,
+            style={{backgroundColor:C.green,borderRadius:100,paddingVertical:13,
                     alignItems:'center',marginTop:14}}>
             <Text style={{color:'#000',fontWeight:'700',fontSize:15}}>Open Demo Mode</Text>
           </TouchableOpacity>
@@ -4801,14 +4833,14 @@ export default function App() {
 
       {/* Camera metrics */}
       <Text style={s.secHeader}>Walking</Text>
-      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Today's typical values for {dayName||'the resident'}, from times they walked. Changes from their own normal show in AI Insights.</Text>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Today's typical values for {dayName||'the resident'}, from times they walked. Changes from their own normal show in Insights.</Text>
       <View style={s.grid}>
         {[
-          {label:'Speed (est.)',val:fmt(dayData?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:false},
+          {label:'Walking speed',val:fmt(dayData?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:false},
           {label:'Posture',val:fmt(dayData?.posture_score,0),unit:'/100',color:C.purple,warn:false},
           {label:'Step evenness',val:fmt(dayData?.camera_asymmetry_pct,1),unit:'% uneven',color:C.orange,warn:false},
-          {label:'Cadence',val:fmt(dayData?.camera_cadence_spm,0),unit:'steps/min',color:C.blue,warn:false},
-          {label:'Longest still',val:fmt(dayData?.longest_stillness_min,0),unit:'min',color:C.orange,warn:false},
+          {label:'Steps per minute',val:fmt(dayData?.camera_cadence_spm,0),unit:'steps/min',color:C.blue,warn:false},
+          {label:'Longest still period',val:fmt(dayData?.longest_stillness_min,0),unit:'min',color:C.orange,warn:false},
           {label:'Time in view',val:fmt(((dayData?.active_minutes??0)+(dayData?.still_minutes??0))/60||null,1),unit:'hours',color:C.teal,warn:false},
         ].map(m=>(
           <View key={m.label} style={s.metCard}>
@@ -4844,10 +4876,10 @@ export default function App() {
           <View style={s.grid}>
             {[
               {label:'Steps',val:fmtLarge(today?.step_count),unit:'steps',color:C.green,warn:false},
-              {label:'Resting HR',val:fmt(today?.resting_hr,0),unit:'bpm',color:C.blue,warn:false},
-              {label:'HRV',val:fmt(today?.hrv_sdnn,1),unit:'ms',color:C.blue,warn:false},
+              {label:'Resting heart rate',val:fmt(today?.resting_hr,0),unit:'bpm',color:C.blue,warn:false},
+              {label:'Heart rate variability',val:fmt(today?.hrv_sdnn,1),unit:'ms',color:C.blue,warn:false},
               {label:'Calories',val:fmtLarge(today?.active_calories),unit:'kcal',color:C.orange,warn:false},
-              {label:'SpO2',val:fmt(today?.spo2_avg,1),unit:'%',color:C.purple,warn:(today?.spo2_avg??100)<95&&today?.spo2_avg!=null},
+              {label:'Blood oxygen',val:fmt(today?.spo2_avg,1),unit:'%',color:C.purple,warn:(today?.spo2_avg??100)<95&&today?.spo2_avg!=null},
               {label:'Sleep',val:fmt(today?.sleep_hours,1),unit:'hrs',color:C.orange,warn:false},
             ].map(m=>(
               <View key={m.label} style={s.metCard}>
@@ -4994,9 +5026,9 @@ export default function App() {
             <>
               <Text style={s.secHeader}>Everyone at home</Text>
               <Text style={{color:C.muted,fontSize:12,lineHeight:17,marginHorizontal:16,marginTop:-4,marginBottom:8}}>Movement and stillness are measured for the whole room, not one person.</Text>
-              <TrendBar data={week('activity_level_pct')} label="Activity Level" unit="%" color={C.green}/>
-              <TrendBar data={week('active_minutes')} label="Active Minutes" unit="min" color={C.green}/>
-              <TrendBar data={week('longest_stillness_min')} label="Longest Stillness" unit="min" color={C.orange}/>
+              <TrendBar data={week('activity_level_pct')} label="Time moving" unit="%" color={C.green}/>
+              <TrendBar data={week('active_minutes')} label="Active minutes" unit="min" color={C.green}/>
+              <TrendBar data={week('longest_stillness_min')} label="Longest still period" unit="min" color={C.orange}/>
             </>
           )}
           </>
@@ -5005,22 +5037,22 @@ export default function App() {
         ):(
           <>
             <Text style={s.secHeader}>Activity</Text>
-            <TrendBar data={week('activity_level_pct')} label="Activity Level" unit="%" color={C.green}/>
-            <TrendBar data={week('active_minutes')} label="Active Minutes" unit="min" color={C.green}/>
-            <TrendBar data={week('longest_stillness_min')} label="Longest Stillness" unit="min" color={C.orange}/>
+            <TrendBar data={week('activity_level_pct')} label="Time moving" unit="%" color={C.green}/>
+            <TrendBar data={week('active_minutes')} label="Active minutes" unit="min" color={C.green}/>
+            <TrendBar data={week('longest_stillness_min')} label="Longest still period" unit="min" color={C.orange}/>
             <Text style={s.secHeader}>Walking</Text>
-            <TrendBar data={week('camera_gait_speed_ms')} label="Walking Speed" unit="m/s" color={C.teal} dec={2}/>
-            <TrendBar data={week('posture_score')} label="Posture Score" unit="/100" color={C.purple}/>
-            <TrendBar data={week('camera_asymmetry_pct')} label="Gait Asymmetry" unit="%" color={C.orange} dec={1}/>
+            <TrendBar data={week('camera_gait_speed_ms')} label="Walking speed" unit="m/s" color={C.teal} dec={2}/>
+            <TrendBar data={week('posture_score')} label="Posture" unit="/100" color={C.purple}/>
+            <TrendBar data={week('camera_asymmetry_pct')} label="Step evenness" unit="% uneven" color={C.orange} dec={1}/>
             <TrendBar data={week('stride_variability')} label="Step-Time Variation (lower is steadier)" unit="%" color={C.teal} dec={1}/>
             {watchIsResident&&history.some(r=>r.hrv_sdnn!=null)&&(
               <>
                 <Text style={s.secHeader}>Apple Watch</Text>
-                <TrendBar data={week('hrv_sdnn')} label="HRV" unit="ms" color={C.purple} dec={1}/>
-                <TrendBar data={week('resting_hr')} label="Resting HR" unit="bpm" color={C.red}/>
+                <TrendBar data={week('hrv_sdnn')} label="Heart rate variability" unit="ms" color={C.purple} dec={1}/>
+                <TrendBar data={week('resting_hr')} label="Resting heart rate" unit="bpm" color={C.red}/>
               </>
             )}
-            <Text style={s.secHeader}>Daily Log</Text>
+            <Text style={s.secHeader}>Daily log</Text>
             <View style={{marginHorizontal:16,backgroundColor:C.card,borderRadius:16,overflow:'hidden',marginBottom:16}}>
               <View style={{flexDirection:'row',paddingHorizontal:12,paddingVertical:10,borderBottomWidth:1,borderBottomColor:C.border}}>
                 {['Date','Active','Still','Speed','Posture','Flag'].map(h=><Text key={h} style={{flex:1,color:C.muted,fontSize:11,fontWeight:'700',textTransform:'uppercase'}}>{h}</Text>)}
@@ -5066,10 +5098,7 @@ export default function App() {
     <ScrollView showsVerticalScrollIndicator={false} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
       <View style={s.pageHead}>
         <Text style={s.pageTitle}>Alerts</Text>
-        <Text style={s.pageSub}>{alertCount>0?`${alertCount} unacknowledged`:'All clear'}</Text>
-        <Text style={{color:C.muted,fontSize:12,marginTop:4,lineHeight:17}}>
-          {`Camera alerts for ${residentPerson?.name??(residentName||'this room')}. Each alert shows who it is for.`}
-        </Text>
+        <Text style={s.pageSub}>{alertCount>0?`${alertCount} ${alertCount===1?'needs':'need'} attention`:'All clear'}</Text>
       </View>
       {alerts.length===0?(
         <View style={s.empty}>
@@ -5119,7 +5148,7 @@ export default function App() {
               <View style={{flexDirection:'row',gap:8,marginTop:14}}>
                 {!a.seen&&(
                   <TouchableOpacity onPress={()=>acknowledgeAlert(a.id)}
-                    style={{flex:1,backgroundColor:a.alert_type==='fall'?C.red:C.fill,borderRadius:12,paddingVertical:11,alignItems:'center'}}>
+                    style={{flex:1,backgroundColor:a.alert_type==='fall'?C.red:C.fill,borderRadius:100,paddingVertical:11,alignItems:'center'}}>
                     <Text style={{color:a.alert_type==='fall'?'#fff':C.text,fontSize:14,fontWeight:'700'}}>{a.alert_type==='fall'?'I am checking on them':'Mark as seen'}</Text>
                   </TouchableOpacity>
                 )}
@@ -5131,7 +5160,7 @@ export default function App() {
                       if(r.data?.available&&Array.isArray(r.data.frames)&&r.data.frames.length>1){setReplayMsg(null);setReplayFrames(r.data.frames);}
                       else{setReplayFrames([]);setReplayMsg('No replay was saved for this fall. Replays are kept for falls detected after this feature was added.');}
                     }catch(_e){setReplayFrames([]);setReplayMsg('Could not load the replay. Check the connection to the monitoring unit.');}
-                  }} style={{flex:a.seen?1:0,paddingHorizontal:16,borderRadius:12,paddingVertical:11,alignItems:'center',borderWidth:1,borderColor:C.border}}>
+                  }} style={{flex:a.seen?1:0,paddingHorizontal:18,borderRadius:100,paddingVertical:11,alignItems:'center',borderWidth:1,borderColor:C.border}}>
                     <Text style={{color:C.text,fontSize:14,fontWeight:'600'}}>Replay</Text>
                   </TouchableOpacity>
                 )}
@@ -5183,7 +5212,7 @@ export default function App() {
             <View style={{flex:1}}><OField label="in" value={hIn} onChange={setHIn} placeholder="6" keyboard="number-pad"/></View>
           </View>
         ):<OField label="Height (cm)" value={hCm} onChange={setHCm} placeholder="168" keyboard="number-pad"/>}
-        <Text style={{color:C.muted,fontSize:11,marginHorizontal:16,marginVertical:8,lineHeight:16}}>Height sets their walking speed. Everyone else's height: Settings, Camera, Monitored People, Edit.</Text>
+        <Text style={{color:C.muted,fontSize:11,marginHorizontal:16,marginVertical:8,lineHeight:16}}>Height is used to estimate walking speed. Set everyone else's height in the Camera tab, under People.</Text>
       </View>
 
       <Text style={s.secHeader}>Alerts</Text>
@@ -5221,7 +5250,7 @@ export default function App() {
         {savingProfile?<ActivityIndicator color="#000" size="small"/>:<Text style={s.btnPrimaryTxt}>Save changes</Text>}
       </TouchableOpacity>
       <Text style={{color:C.muted,fontSize:12,textAlign:'center',marginTop:10,marginHorizontal:16,lineHeight:17}}>
-        The watch choice saves right away. To rename someone, mark them as a visitor, or remove them: Settings, Camera, Monitored People, Edit.
+        To rename someone, mark them as a visitor or remove them, open the Camera tab and go to People.
       </Text>
       <View style={{height:32}}/>
     </ScrollView>
@@ -5262,7 +5291,7 @@ export default function App() {
       )}
       {cloud&&<AddCameraCard cfg={cloud} onAdded={(cfg,role)=>{enterCloud(cfg);   // ADD_THEN_SETUP_V1: a new camera goes straight to its box setup
         if((role||'owner')==='owner'&&!cfg.sites.find(x=>x.id===cfg.siteId)?.online)setTimeout(()=>setBoxAgain(true),400);}}/>}
-      {!cloud&&<Text style={[s.secHeader,{marginTop:20}]}>Local VIGIL server</Text>}
+      {!cloud&&<Text style={[s.secHeader,{marginTop:20}]}>Local unit</Text>}
       {!cloud&&<>
       <View style={[s.card,{marginHorizontal:16,marginTop:16,alignItems:'center',paddingVertical:28}]}>
         <View style={{width:16,height:16,borderRadius:8,marginBottom:12,backgroundColor:jetsonOk===true?C.green:jetsonOk===false?C.red:C.sub}}/>
@@ -5290,7 +5319,7 @@ export default function App() {
 
   const renderCameraTab=()=>(
     <ScrollView showsVerticalScrollIndicator={false} automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
-      <Text style={s.secHeader}>Camera Status</Text>
+      <Text style={s.secHeader}>Camera status</Text>
       <View style={s.settGrp}>
         <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14}}>
           <Text style={{color:C.text,fontSize:15}}>Connection</Text>
@@ -5300,7 +5329,7 @@ export default function App() {
           </View>
         </View>
         <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}>
-          <Text style={{color:C.text,fontSize:15}}>Person Detected</Text>
+          <Text style={{color:C.text,fontSize:15}}>Someone in view</Text>
           <Text style={{color:cameraStatus?.person_present?C.green:C.sub,fontSize:14,fontWeight:'500'}}>{cameraStatus?.person_present?'Yes':'No'}</Text>
         </View>
         {(cameraStatus?.person_count??0)>1&&(
@@ -5310,13 +5339,81 @@ export default function App() {
           </View>
         )}
         <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}>
-          <Text style={{color:C.text,fontSize:15}}>Frame Rate</Text>
+          <Text style={{color:C.text,fontSize:15}}>Frame rate</Text>
           <Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>{cameraStatus?.fps!=null?`${cameraStatus.fps.toFixed(1)} fps`:'—'}</Text>
         </View>
       </View>
-      <Text style={s.secHeader}>Live View</Text>
+      <Text style={s.secHeader}>Live view</Text>
       <View style={{marginHorizontal:16}}>{renderCameraFeed()}</View>
-      <Text style={{color:C.muted,fontSize:11,marginLeft:16,marginTop:6,marginBottom:4}}>Live view · Tap for full screen</Text>
+      <Text style={{color:C.muted,fontSize:11,marginLeft:16,marginTop:6,marginBottom:4}}>Tap Expand for full screen.</Text>
+      {persons.length>0&&(
+        <>
+          <Text style={s.secHeader}>People</Text>
+          <TouchableOpacity onPress={()=>setShowTeach(true)}
+            style={[s.card,{marginHorizontal:16,marginBottom:10,flexDirection:'row',alignItems:'center',borderWidth:1,borderColor:C.green+'55'}]}>
+            <View style={{flex:1}}>
+              <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Introduce everyone</Text>
+              <Text style={{color:C.sub,fontSize:12,marginTop:3,lineHeight:17}}>Teach VIGIL who is who, one person at a time. Do it again whenever names are often wrong.</Text>
+            </View>
+            <Text style={{color:C.green,fontSize:15,fontWeight:'700'}}>Start</Text>
+          </TouchableOpacity>
+          <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginBottom:8,lineHeight:17}}>
+            Tap Edit to rename someone, set their height, mark them as a visitor or merge a duplicate. Press and hold to delete.
+          </Text>
+          {persons.map(p=>(
+            <TouchableOpacity
+              key={p.id}
+              activeOpacity={p.name?0.6:1}
+              onPress={()=>{if(p.name)setSelectedPerson(p);}}
+              onLongPress={()=>deletePerson(p)}
+              style={[s.card,{marginHorizontal:16,marginBottom:8,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}]}>
+              <View style={{flexDirection:'row',alignItems:'center',gap:10,flex:1,minWidth:0}}>
+                <PersonAvatar personId={p.id} name={p.name} serverUrl={urlRef.current} size={48} isResident={!!p.is_resident}/>
+                <View style={{flex:1,minWidth:0}}>
+                  <Text style={{color:C.text,fontSize:14,fontWeight:'600'}} numberOfLines={1} ellipsizeMode="tail">{p.name??'Unidentified Person'}</Text>
+                  <Text style={{color:C.sub,fontSize:11,marginTop:2}} numberOfLines={1} ellipsizeMode="tail">
+                    {p.is_resident?'Resident':'Visitor'}{p.height_cm?` · ${fmtHeight(p.height_cm,pUnits)}`:''}{p.name?' · Tap for trends':''}
+                  </Text>
+                </View>
+              </View>
+              {!p.name?(
+                <TouchableOpacity
+                  style={{backgroundColor:C.green,paddingHorizontal:12,paddingVertical:6,borderRadius:8}}
+                  onPress={()=>{
+                    setPendingPersonAlert({id:0,alert_type:'manual',room_id:'room_1',person_ids:[p.id],resolved:0,created_at:''});
+                    setShowPersonModal(true);
+                  }}>
+                  <Text style={{color:'#000',fontSize:12,fontWeight:'600'}}>Identify</Text>
+                </TouchableOpacity>
+              ):(
+                <View style={{flexDirection:'row',alignItems:'center',gap:12}}>
+                  <TouchableOpacity hitSlop={{top:10,bottom:10,left:10,right:10}} onPress={()=>editPerson(p)}>
+                    <Text style={{color:C.blue,fontSize:13,fontWeight:'700'}}>Edit</Text>
+                  </TouchableOpacity>
+                  <Glyph name="chevron" color={C.muted} size={16}/>
+                </View>
+              )}
+            </TouchableOpacity>
+          ))}
+        </>
+      )}
+      {rooms.length>0&&(
+        <>
+          <Text style={s.secHeader}>Rooms</Text>
+          {rooms.map(r=>(
+            <View key={r.id} style={[s.card,{marginHorizontal:16,marginBottom:8,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}]}>
+              <View style={{flexDirection:'row',alignItems:'center',gap:10}}>
+                <View style={{width:8,height:8,borderRadius:4,backgroundColor:r.camera_online?C.green:C.muted}}/>
+                <View>
+                  <Text style={{color:C.text,fontSize:14,fontWeight:'600'}}>{r.name}</Text>
+                  {r.resident_name&&<Text style={{color:C.sub,fontSize:11,marginTop:2}}>{r.resident_name}</Text>}
+                </View>
+              </View>
+              <Text style={{color:r.camera_online?C.green:C.muted,fontSize:12}}>{r.camera_online?'Live':'Offline'}</Text>
+            </View>
+          ))}
+        </>
+      )}
       <Text style={s.secHeader}>Room setup</Text>
       <TouchableOpacity disabled={demoMode} onPress={()=>setZoneEditor(true)} style={[s.btnPrimary,{marginHorizontal:16,opacity:demoMode?0.4:1}]}>
         <Text style={s.btnPrimaryTxt}>Set up bed and couch zones</Text>
@@ -5358,12 +5455,13 @@ export default function App() {
           ?'Only the resident is named and their health measured. Staff, family and visitors appear as Visitor, with no prompts.'
           :'Everyone in the home is named. Tap a name under In view now to confirm or correct it; VIGIL remembers each look.'}
       </Text>
-      <Text style={s.secHeader}>Setup Guide</Text>
+      {!cloud&&<>
+      <Text style={s.secHeader}>Setup guide</Text>
       {[
-        {n:'1',title:'Place the Camera',desc:'Mount the camera 5–7 feet high, angled slightly downward. Position it to see the resident\'s full body when standing in their main living area.'},
-        {n:'2',title:'Connect to Wi-Fi',desc:'Open the Tapo or Reolink app, add your camera, and connect it to the same Wi-Fi network as the VIGIL server.'},
-        {n:'3',title:'Enable RTSP Stream',desc:'In the camera app, go to Advanced Settings and enable RTSP. Note the camera IP address.'},
-        {n:'4',title:'Start Monitoring',desc:'Once the unit is plugged in and connected, monitoring starts on its own. VIGIL spends the first week learning what is normal for the resident.'},
+        {n:'1',title:'Place the camera',desc:'Mount it 5 to 7 feet high, angled slightly down, where it sees the whole body of someone standing in the main living area.'},
+        {n:'2',title:'Connect the camera',desc:'Add the camera in its own app and put it on the same Wi-Fi as the VIGIL unit.'},
+        {n:'3',title:'Mark the bed and couch',desc:'In Room setup above, draw a box around each, so lying down there is not taken for a fall.'},
+        {n:'4',title:'Introduce everyone',desc:'In People above, let VIGIL learn each person. It then spends about a week learning what is normal for them.'},
       ].map(step=>(
         <View key={step.n} style={[s.card,{marginHorizontal:16,marginBottom:8,flexDirection:'row',gap:14}]}>
           <View style={{width:28,height:28,borderRadius:14,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center'}}>
@@ -5375,74 +5473,7 @@ export default function App() {
           </View>
         </View>
       ))}
-      {persons.length>0&&(
-        <>
-          <Text style={s.secHeader}>Monitored People</Text>
-          <TouchableOpacity onPress={()=>setShowTeach(true)}
-            style={[s.card,{marginHorizontal:16,marginBottom:10,flexDirection:'row',alignItems:'center',borderWidth:1,borderColor:C.green+'55'}]}>
-            <View style={{flex:1}}>
-              <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Introduce everyone</Text>
-              <Text style={{color:C.sub,fontSize:12,marginTop:3,lineHeight:17}}>Teach VIGIL who is who, one person at a time. Do it again whenever names are often wrong.</Text>
-            </View>
-            <Text style={{color:C.green,fontSize:15,fontWeight:'700'}}>Start</Text>
-          </TouchableOpacity>
-          <Text style={{color:C.muted,fontSize:12,marginHorizontal:16,marginBottom:8,lineHeight:17}}>
-            Everyone VIGIL has recognised. Tap Edit to rename, set their height, mark as a visitor, merge a duplicate or delete. Press and hold anyone to delete them.
-          </Text>
-          {persons.map(p=>(
-            <TouchableOpacity
-              key={p.id}
-              activeOpacity={p.name?0.6:1}
-              onPress={()=>{if(p.name)setSelectedPerson(p);}}
-              onLongPress={()=>deletePerson(p)}
-              style={[s.card,{marginHorizontal:16,marginBottom:8,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}]}>
-              <View style={{flexDirection:'row',alignItems:'center',gap:10,flex:1,minWidth:0}}>
-                <PersonAvatar personId={p.id} name={p.name} serverUrl={urlRef.current} size={48} isResident={!!p.is_resident}/>
-                <View style={{flex:1,minWidth:0}}>
-                  <Text style={{color:C.text,fontSize:14,fontWeight:'600'}} numberOfLines={1} ellipsizeMode="tail">{p.name??'Unidentified Person'}</Text>
-                  <Text style={{color:C.sub,fontSize:11,marginTop:2}} numberOfLines={1} ellipsizeMode="tail">
-                    {p.is_resident?'Resident':'Visitor'}{p.height_cm?` · ${fmtHeight(p.height_cm,pUnits)}`:''}{p.name?' · Tap for trends':''}
-                  </Text>
-                </View>
-              </View>
-              {!p.name?(
-                <TouchableOpacity
-                  style={{backgroundColor:C.green,paddingHorizontal:12,paddingVertical:6,borderRadius:8}}
-                  onPress={()=>{
-                    setPendingPersonAlert({id:0,alert_type:'manual',room_id:'room_1',person_ids:[p.id],resolved:0,created_at:''});
-                    setShowPersonModal(true);
-                  }}>
-                  <Text style={{color:'#000',fontSize:12,fontWeight:'600'}}>Identify</Text>
-                </TouchableOpacity>
-              ):(
-                <View style={{flexDirection:'row',alignItems:'center',gap:12}}>
-                  <TouchableOpacity hitSlop={{top:10,bottom:10,left:10,right:10}} onPress={()=>editPerson(p)}>
-                    <Text style={{color:C.blue,fontSize:13,fontWeight:'700'}}>Edit</Text>
-                  </TouchableOpacity>
-                  <Text style={{color:C.muted,fontSize:16}}>{'>'}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          ))}
-        </>
-      )}
-      {rooms.length>0&&(
-        <>
-          <Text style={s.secHeader}>Active Rooms ({String(rooms.length)})</Text>
-          {rooms.map(r=>(
-            <View key={r.id} style={[s.card,{marginHorizontal:16,marginBottom:8,flexDirection:'row',alignItems:'center',justifyContent:'space-between'}]}>
-              <View style={{flexDirection:'row',alignItems:'center',gap:10}}>
-                <View style={{width:8,height:8,borderRadius:4,backgroundColor:r.camera_online?C.green:C.muted}}/>
-                <View>
-                  <Text style={{color:C.text,fontSize:14,fontWeight:'600'}}>{r.name}</Text>
-                  {r.resident_name&&<Text style={{color:C.sub,fontSize:11,marginTop:2}}>{r.resident_name}</Text>}
-                </View>
-              </View>
-              <Text style={{color:r.camera_online?C.green:C.muted,fontSize:12}}>{r.camera_online?`${r.fps?.toFixed(0)??'?'} fps`:'Offline'}</Text>
-            </View>
-          ))}
-        </>
-      )}
+      </>}
       <View style={{height:32}}/>
     </ScrollView>
   );
@@ -5462,14 +5493,14 @@ export default function App() {
             <Text style={{color:C.text,fontSize:15}}>{t}</Text><Text style={{color:C.muted,fontSize:15}}>{'›'}</Text>
           </TouchableOpacity>))}
       </View>
-      <Text style={s.secHeader}>App Info</Text>
+      <Text style={s.secHeader}>About</Text>
       <View style={s.settGrp}>
-        <View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14}}><Text style={{color:C.text,fontSize:15}}>App Version</Text><Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>VIGIL v1.0.0</Text></View>
-        {serverVersion&&<View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}><Text style={{color:C.text,fontSize:15}}>Server Version</Text><Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>{serverVersion}</Text></View>}
-        <View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}><Text style={{color:C.text,fontSize:15}}>HealthKit</Text><Text style={{color:initialized?C.green:initError?C.orange:C.sub,fontSize:14,fontWeight:'500'}}>{initialized?'Connected':initError?'Not connected':'Starting'}</Text></View>
-        <View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}><Text style={{color:C.text,fontSize:15}}>Active Rooms</Text><Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>{String(rooms.length||1)}</Text></View>
+        <View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14}}><Text style={{color:C.text,fontSize:15}}>Version</Text><Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>{APP_VERSION}</Text></View>
+        {serverVersion&&<View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}><Text style={{color:C.text,fontSize:15}}>Monitoring unit</Text><Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>{serverVersion}</Text></View>}
+        <View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}><Text style={{color:C.text,fontSize:15}}>Apple Health</Text><Text style={{color:initialized?C.green:initError?C.orange:C.sub,fontSize:14,fontWeight:'500'}}>{initialized?'Connected':initError?'Not connected':'Starting'}</Text></View>
+        <View style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14,borderTopWidth:1,borderTopColor:C.hair}}><Text style={{color:C.text,fontSize:15}}>Rooms</Text><Text style={{color:C.sub,fontSize:14,fontWeight:'500'}}>{String(rooms.length||1)}</Text></View>
       </View>
-      <Text style={s.secHeader}>Sync Apple Watch</Text>
+      <Text style={s.secHeader}>Apple Watch sync</Text>
       <View style={[s.card,{marginHorizontal:16}]}>
         <TouchableOpacity style={[s.btnPrimary,{opacity:syncing||!initialized||!jetsonOk?0.5:1}]} onPress={()=>performSync(false)} disabled={syncing||!initialized||jetsonOk!==true}>
           {syncing?<View style={{flexDirection:'row',alignItems:'center',justifyContent:'center',gap:8}}><ActivityIndicator color="#000" size="small"/><Text style={s.btnPrimaryTxt}>Syncing...</Text></View>:<Text style={s.btnPrimaryTxt}>Sync Apple Watch Now</Text>}
@@ -5479,7 +5510,7 @@ export default function App() {
       <Text style={s.secHeader}>Diagnostics</Text>
       <View style={s.settGrp}>
         <TouchableOpacity style={{flexDirection:'row',justifyContent:'space-between',paddingHorizontal:16,paddingVertical:14}} onPress={()=>setShowLogs(p=>!p)}>
-          <Text style={{color:C.text,fontSize:15}}>Debug Logs</Text>
+          <Text style={{color:C.text,fontSize:15}}>Activity log</Text>
           <Text style={{color:C.sub,fontSize:13}}>{showLogs?'Hide':'Show ('+debugLog.length+')'}</Text>
         </TouchableOpacity>
         {showLogs&&(
@@ -5566,7 +5597,7 @@ export default function App() {
     ['today','Today','⊙'],
     ['trends','Trends','↗'],
     ['alerts','Alerts','⚑'],
-    ['insights','AI','◈'],
+    ['insights','Insights','◈'],
     ['settings','Settings','⋯'],
   ];
 
@@ -5780,11 +5811,11 @@ export default function App() {
 
       {/* Tab bar */}
       <View style={s.tabBar}>
-        {TABS.map(([key,label,icon])=>{
+        {TABS.map(([key,label])=>{
           const active=activeTab===key; const color=active?C.green:C.muted;
           return(
-            <TouchableOpacity key={key} style={{flex:1,alignItems:'center',paddingTop:4,paddingBottom:2}} onPress={()=>setActiveTab(key)}>
-              {active&&<View style={s.tabIndicator}/>}
+            <TouchableOpacity key={key} style={{flex:1,alignItems:'center',paddingTop:4,paddingBottom:2}} onPress={()=>setActiveTab(key)}
+              accessibilityRole="tab" accessibilityState={{selected:active}} accessibilityLabel={key==='alerts'&&alertCount>0?`${label}, ${alertCount} new`:label}>
               <View style={{position:'relative'}}>
                 <TabIcon name={key} color={color}/>
                 {key==='alerts'&&alertCount>0&&(
@@ -5830,7 +5861,6 @@ const s=StyleSheet.create({
   btnSecondary: {backgroundColor:'rgba(255,255,255,0.04)',borderRadius:100,paddingVertical:14,paddingHorizontal:20,alignItems:'center',borderWidth:1,borderColor:C.border},
   btnSecondaryTxt:{color:C.text,fontSize:14,fontWeight:'600'},
   tabBar:       {flexDirection:'row',backgroundColor:'#070B09',borderTopWidth:1,borderTopColor:C.hair,paddingBottom:22,paddingTop:10},
-  tabIndicator: {position:'absolute',top:-10,alignSelf:'center',width:28,height:3,borderRadius:2,backgroundColor:C.green,opacity:0},
   badge:        {position:'absolute',top:-3,right:-8,backgroundColor:C.red,borderRadius:8,minWidth:15,height:15,alignItems:'center',justifyContent:'center',paddingHorizontal:3,borderWidth:1.5,borderColor:'#070B09'},
   badgeTxt:     {color:'#fff',fontSize:11,fontWeight:'700'},
   sheetHandle:  {alignSelf:'center',width:40,height:4,borderRadius:2,backgroundColor:C.fill,marginBottom:16},
