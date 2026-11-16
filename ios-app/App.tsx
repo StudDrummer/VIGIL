@@ -1869,7 +1869,7 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
               rotation={-90} origin={`${cx},${cx}`}/>
           )}
         </Svg>
-        <View style={{alignItems:'center',backgroundColor:'rgba(0,0,0,0.85)',paddingHorizontal:18,paddingVertical:12,borderRadius:28}}>
+        <View style={{alignItems:'center'}}>
           <Text style={{color:C.muted,fontSize:11,fontWeight:'700',letterSpacing:1.5,textTransform:'uppercase'}}>Activity</Text>
           <Text style={{color:C.green,fontSize:42,fontWeight:'800',lineHeight:48,marginTop:2}}>
             {pct!=null?Math.round(pct)+'%':'—'}
@@ -4639,22 +4639,33 @@ export default function App() {
         </TouchableOpacity>
       )}
 
-      {/* Status pills */}
-      <View style={s.pillRow}>
-        <TouchableOpacity activeOpacity={initError?0.6:1} style={s.pill}
-          onPress={()=>{if(initError)Alert.alert('Apple Health is not connected',
-            `${initError}\n\nVIGIL's camera monitoring does not depend on it. Apple Health only adds Apple Watch heart rate and sleep.`,
-            [{text:'Try again',onPress:()=>startHealthKit()},{text:'OK',style:'cancel'}]);}}>
-          <View style={[s.pillDot,{backgroundColor:initialized?C.green:initError?C.orange:C.sub}]}/><Text style={s.pillTxt}>{initialized?'Apple Health':initError?'Health off':'Starting'}</Text></TouchableOpacity>
-        {cloud?(()=>{   // CLOUD_STATE_V1: the camera's real state from VIGIL Cloud, not one missed reply
-          const cs=cloud.sites.find(x=>x.id===cloud.siteId);
-          const st=cs?.online===false?'off':(jetsonOk===true||cs?.online)?'on':'wait';
-          return <View style={s.pill}><View style={[s.pillDot,{backgroundColor:st==='on'?C.green:st==='off'?C.red:C.sub}]}/><Text style={s.pillTxt}>{st==='on'?'Watching':st==='off'?'Camera offline':'Connecting'}</Text></View>;
-        })():(
-        <View style={s.pill}><View style={[s.pillDot,{backgroundColor:demoMode||jetsonOk===true?C.green:jetsonOk===false?C.red:C.sub}]}/><Text style={s.pillTxt}>{demoMode?'Demo unit':jetsonOk===true?'Monitoring unit':jetsonOk===false?'Unit offline':'Checking'}</Text></View>)}
-        {jetsonOk===true&&<View style={s.pill}><View style={[s.pillDot,{backgroundColor:syncing?C.orange:C.green}]}/><Text style={s.pillTxt}>{syncing?'Syncing':'Synced'}</Text></View>}
-        {cameraStatus?.online&&<View style={s.pill}><View style={[s.pillDot,{backgroundColor:C.green}]}/><Text style={s.pillTxt}>{String(cameraStatus.fps?.toFixed(0)??'?')} fps</Text></View>}
-      </View>
+      {/* REDESIGN_V1: one status card answers "is everything OK?" at a glance */}
+      {(()=>{
+        const cs=cloud?cloud.sites.find(x=>x.id===cloud.siteId):null;
+        const online=demoMode||(cloud?(cs?.online!==false&&(jetsonOk===true||!!cs?.online||!!cameraStatus?.online)):!!cameraStatus?.online);
+        const checking=!demoMode&&!online&&(cloud?cs?.online==null&&jetsonOk==null:jetsonOk==null);
+        const openFall=alerts.some(a=>a.alert_type==='fall'&&!a.seen);
+        if(openFall)return null;   // the fall card below is the status
+        const tone=openFall?C.red:checking?C.sub:!online?C.red:C.green;
+        const who=inViewNames||((cameraStatus?.person_count??0)>1?`${cameraStatus?.person_count} people`:'Someone');
+        const head=openFall?'Needs attention':checking?'Connecting':!online?'Camera offline':someoneInView?`${who} in view`:'Room is quiet';
+        const sub=openFall?'A fall has not been acknowledged yet.':checking?'Checking the camera.':!online?'Alerts are paused until it reconnects.':someoneInView?'Watching. You will be alerted if anyone falls.':'Watching. No one in view right now.';
+        return(
+          <View style={[s.card,{marginHorizontal:16,marginBottom:12,flexDirection:'row',alignItems:'center',gap:14}]}>
+            <View style={{width:44,height:44,borderRadius:22,backgroundColor:tone+'22',alignItems:'center',justifyContent:'center'}}>
+              {checking?<ActivityIndicator color={C.sub}/>:
+                <Animated.View style={{width:14,height:14,borderRadius:7,backgroundColor:tone,transform:[{scale:online&&!openFall?LIVE_PULSE:1}]}}/>}
+            </View>
+            <View style={{flex:1}}>
+              <Text numberOfLines={1} style={{color:C.text,fontSize:18,fontWeight:'700',letterSpacing:-0.3}}>{head}</Text>
+              <Text style={{color:C.sub,fontSize:13,marginTop:3,lineHeight:18}}>{sub}</Text>
+              {!!initError&&!demoMode&&watchEnabled&&<TouchableOpacity onPress={()=>Alert.alert('Apple Health is not connected',
+                `${initError}\n\nCamera monitoring does not depend on it. Apple Health only adds Apple Watch heart rate and sleep.`,
+                [{text:'Try again',onPress:()=>startHealthKit()},{text:'OK',style:'cancel'}])}>
+                <Text style={{color:C.orange,fontSize:12,fontWeight:'600',marginTop:6}}>Apple Health not connected</Text></TouchableOpacity>}
+            </View>
+          </View>);
+      })()}
 
       {(()=>{
         // An unacknowledged fall is the first thing on screen, not a list
@@ -4666,10 +4677,13 @@ export default function App() {
           <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.red+'1F',
                         borderRadius:16,padding:16,borderWidth:1,borderColor:C.red+'66'}}>
             <Text style={{color:C.red,fontSize:12,fontWeight:'800',letterSpacing:0.6}}>
-              FALL NOT YET ACKNOWLEDGED
+              FALL DETECTED · {timeAgo(a.detected_at).toUpperCase()}
             </Text>
-            <Text style={{color:C.text,fontSize:14,marginTop:6,lineHeight:20}}>
-              {`Detected ${timeAgo(a.detected_at)}. Someone should check on the resident and confirm here.`}
+            <Text style={{color:C.text,fontSize:20,fontWeight:'700',letterSpacing:-0.3,marginTop:6}}>
+              {(()=>{const pid=(a as any).person_id||(a as any).payload?.person_id;const rs=persons.filter(x=>x.is_resident);const nm=persons.find(x=>x.id===pid)?.name||(rs.length===1?rs[0].name:null)||residentName;return nm?`${nm} may have fallen`:'Someone may have fallen';})()}
+            </Text>
+            <Text style={{color:C.sub,fontSize:14,marginTop:4,lineHeight:20}}>
+              Check on them, then confirm here so everyone knows it is handled.
             </Text>
             <TouchableOpacity onPress={()=>acknowledgeAlert(a.id)}
               style={{backgroundColor:C.red,borderRadius:12,paddingVertical:13,
@@ -4740,28 +4754,8 @@ export default function App() {
         </ScrollView>
       )}
 
-      {/* Camera status */}
-      <View style={[s.card,{marginHorizontal:16,marginTop:12,marginBottom:4,borderWidth:1,borderColor:camBorder}]}>
-        <View style={{flexDirection:'row',alignItems:'center',gap:10}}>
-          <View style={{width:12,height:12,borderRadius:6,backgroundColor:cameraStatus?.online?C.green:C.red}}/>
-          <View style={{flex:1}}>
-            <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>
-              {cameraStatus?.online&&someoneInView?'Resident Detected':cameraStatus?.online?'Room Empty':'Camera Offline'}
-            </Text>
-            <Text style={{color:C.sub,fontSize:12,marginTop:2}}>
-              {cameraStatus?.online?`${inViewNames?inViewNames+' in view · ':''}${cameraStatus.fps?.toFixed(1)??'?'} fps · Live`:'Monitoring unit offline'}
-            </Text>
-          </View>
-          {(cameraStatus?.person_count??0)>1&&(
-            <View style={{backgroundColor:C.orange+'22',borderRadius:8,paddingHorizontal:8,paddingVertical:3}}>
-              <Text style={{color:C.orange,fontSize:11,fontWeight:'700'}}>{String(cameraStatus?.person_count)} people</Text>
-            </View>
-          )}
-        </View>
-      </View>
-
       {/* Live camera feed */}
-      <Text style={s.secHeader}>Camera Feed</Text>
+      <Text style={s.secHeader}>Live view</Text>
       <View style={{marginHorizontal:16,marginBottom:4}}>{renderCameraFeed()}</View>
       {!demoMode&&(()=>{
         // IN_VIEW_V1: who the camera recognises right now.
@@ -4812,14 +4806,14 @@ export default function App() {
       )}
 
       {/* Activity ring */}
-      <Text style={s.secHeader}>{dayName?`${dayName}'s activity`:'Activity'}</Text>
+      <Text style={s.secHeader}>Activity</Text>
       <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,lineHeight:17}}>Share of the time {dayName||'the resident'} was in view today that they were moving. Time out of view doesn't count.</Text>
       {dayLoading
         ?<ActivityIndicator color={C.green} style={{marginVertical:40}}/>
         :<ActivityRing pct={((dayData?.active_minutes??0)+(dayData?.still_minutes??0))>=(selPid?5:20)?(dayData?.activity_level_pct??null):null} activeMin={dayData?.active_minutes??null} stillMin={dayData?.still_minutes??null}/>}
 
       {/* Camera metrics */}
-      <Text style={s.secHeader}>{dayName?`${dayName}'s walking and posture`:'Walking and posture'}</Text>
+      <Text style={s.secHeader}>Walking</Text>
       <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Typical values today for {dayName||'the resident'} only, from times they walked. Speed is estimated from steps and height.</Text>
       <View style={s.grid}>
         {[
@@ -4828,7 +4822,7 @@ export default function App() {
           {label:'Asymmetry',val:fmt(dayData?.camera_asymmetry_pct,1),unit:'%',color:C.orange,warn:(dayData?.camera_asymmetry_pct??0)>15},
           {label:'Cadence',val:fmt(dayData?.camera_cadence_spm,0),unit:'spm',color:C.blue,warn:false},
           {label:'Longest Still',val:fmt(dayData?.longest_stillness_min,0),unit:'min',color:C.orange,warn:(dayData?.longest_stillness_min??0)>90},
-          {label:'Data Points',val:fmtLarge(dayData?.camera_data_points),unit:'pts',color:C.sub,warn:false},
+          {label:'Time in view',val:fmt(((dayData?.active_minutes??0)+(dayData?.still_minutes??0))/60||null,1),unit:'hours',color:C.teal,warn:false},
         ].map(m=>(
           <View key={m.label} style={s.metCard}>
             <View style={s.metTop}>
@@ -4852,7 +4846,7 @@ export default function App() {
       )}
       {watchHere&&(watchEnabled||demoMode)&&(
         <>
-          <Text style={s.secHeader}>{homePerson?`${homePerson.name}'s Apple Watch`:residentName?`${residentName}'s Apple Watch`:'Apple Watch'}</Text>
+          <Text style={s.secHeader}>Apple Watch</Text>
           {watchOwnerOk&&!demoMode&&<TouchableOpacity onPress={clearWatchOwner}
             style={{marginHorizontal:20,marginTop:-6,marginBottom:6}}><Text style={{color:C.muted,fontSize:12}}>Not {namedPeople.find(p=>p.id===watchOwner)?.name??'their'}'s watch? Tap to change.</Text></TouchableOpacity>}
           {today?.step_count==null&&today?.resting_hr==null&&today?.hrv_sdnn==null&&today?.sleep_hours==null&&(
@@ -4869,7 +4863,7 @@ export default function App() {
               {label:'SpO2',val:fmt(today?.spo2_avg,1),unit:'%',color:C.purple,warn:(today?.spo2_avg??100)<95&&today?.spo2_avg!=null},
               {label:'Sleep',val:fmt(today?.sleep_hours,1),unit:'hrs',color:C.orange,warn:false},
             ].map(m=>(
-              <View key={m.label} style={[s.metCard,{borderTopColor:m.warn?C.red:m.color}]}>
+              <View key={m.label} style={s.metCard}>
                 <View style={s.metTop}>
                   <View style={[s.metDot,{backgroundColor:m.warn?C.red:m.color}]}/>
                   <Text style={s.metLbl}>{m.label}</Text>
@@ -5112,58 +5106,60 @@ export default function App() {
           : 'HEALTH SIGNAL';
         const isExp=expandedAlert===a.id;
         return(
-          <View key={a.id} style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:16,padding:16,borderLeftWidth:3,borderLeftColor:color}}>
-            <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center'}}>
-              <View style={{paddingHorizontal:10,paddingVertical:4,borderRadius:8,backgroundColor:color+'22',borderWidth:1,borderColor:color+'55'}}>
-                <Text style={{color,fontSize:11,fontWeight:'700',letterSpacing:0.5}}>{badge}</Text>
-              </View>
-              {!a.seen&&<View style={{width:8,height:8,borderRadius:4,backgroundColor:color}}/>}
+          <View key={a.id} style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:18,padding:16,borderWidth:1,borderColor:!a.seen&&a.alert_type==='fall'?C.red+'66':C.border,opacity:a.seen?0.82:1}}>
+            {/* REDESIGN_V1: title + time on one line, plain text, real buttons */}
+            <View style={{flexDirection:'row',alignItems:'center',gap:10}}>
+              <View style={{width:10,height:10,borderRadius:5,backgroundColor:color}}/>
+              <Text style={{color:C.text,fontSize:16,fontWeight:'700',flex:1}} numberOfLines={1}>
+                {badge.charAt(0)+badge.slice(1).toLowerCase()}
+              </Text>
+              <Text style={{color:C.muted,fontSize:12}}>{timeAgo(a.detected_at)}</Text>
             </View>
-            <Text style={{color:C.sub,fontSize:11,marginTop:6}}>{timeAgo(a.detected_at)}</Text>
-            <Text style={{color:C.muted,fontSize:10,marginTop:1}}>{new Date(a.detected_at).toLocaleString()}</Text>
             {(()=>{
               const subj=namedPeople.find(p=>p.name===a.payload?.resident_name)??residentPerson;
               const nm=subj?.name??a.payload?.resident_name??(residentName||null);
               if(!nm)return null;
               return(
-                <View style={{flexDirection:'row',alignItems:'center',gap:8,marginTop:8}}>
-                  {subj&&<PersonAvatar personId={subj.id} name={subj.name} serverUrl={urlRef.current} size={26} isResident={!!subj.is_resident}/>}
-                  <Text style={{color:C.sub,fontSize:12}}>{`For ${nm}`}</Text>
+                <View style={{flexDirection:'row',alignItems:'center',gap:8,marginTop:10}}>
+                  {subj&&<PersonAvatar personId={subj.id} name={subj.name} serverUrl={urlRef.current} size={24} isResident={!!subj.is_resident}/>}
+                  <Text style={{color:C.sub,fontSize:13,fontWeight:'600'}}>{nm}</Text>
                 </View>
               );
             })()}
-            <View style={{marginTop:10,padding:12,backgroundColor:color+'12',borderRadius:10,borderLeftWidth:2,borderLeftColor:color}}>
-              <Text style={{color:C.text,fontSize:13,lineHeight:20}}>{explainAlert(a)}</Text>
-            </View>
-            <View style={{flexDirection:'row',gap:12,marginTop:8}}>
-              <TouchableOpacity onPress={()=>setExpandedAlert(isExp?null:a.id)}>
-                <Text style={{color:C.muted,fontSize:11}}>{isExp?'Hide details':'Show details'}</Text>
+            <Text style={{color:C.sub,fontSize:14,lineHeight:20,marginTop:8}}>{explainAlert(a)}</Text>
+            {(a.alert_type==='fall'||!a.seen)&&(
+              <View style={{flexDirection:'row',gap:8,marginTop:14}}>
+                {!a.seen&&(
+                  <TouchableOpacity onPress={()=>acknowledgeAlert(a.id)}
+                    style={{flex:1,backgroundColor:a.alert_type==='fall'?C.red:C.fill,borderRadius:12,paddingVertical:11,alignItems:'center'}}>
+                    <Text style={{color:a.alert_type==='fall'?'#fff':C.text,fontSize:14,fontWeight:'700'}}>{a.alert_type==='fall'?'I am checking on them':'Mark as seen'}</Text>
+                  </TouchableOpacity>
+                )}
+                {a.alert_type==='fall'&&(
+                  <TouchableOpacity onPress={async()=>{
+                    if(demoMode){setReplayMsg(null);setReplayFrames(demoReplay());return;}
+                    try{
+                      const r=await AX.get(`${url()}/alerts/${a.id}/replay`,{timeout:8000});
+                      if(r.data?.available&&Array.isArray(r.data.frames)&&r.data.frames.length>1){setReplayMsg(null);setReplayFrames(r.data.frames);}
+                      else{setReplayFrames([]);setReplayMsg('No replay was saved for this fall. Replays are kept for falls detected after this feature was added.');}
+                    }catch(_e){setReplayFrames([]);setReplayMsg('Could not load the replay. Check the connection to the monitoring unit.');}
+                  }} style={{flex:a.seen?1:0,paddingHorizontal:16,borderRadius:12,paddingVertical:11,alignItems:'center',borderWidth:1,borderColor:C.border}}>
+                    <Text style={{color:C.text,fontSize:14,fontWeight:'600'}}>Replay</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+            <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:12}}>
+              <Text style={{color:C.muted,fontSize:12}}>
+                {!!a.seen&&!!(a as any).acknowledged_by?`Handled by ${(a as any).acknowledged_by}`:!!a.seen?'Seen':new Date(a.detected_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}
+              </Text>
+              <TouchableOpacity onPress={()=>setExpandedAlert(isExp?null:a.id)} hitSlop={{top:10,bottom:10,left:10,right:10}}>
+                <Text style={{color:C.muted,fontSize:12}}>{isExp?'Hide details':'Details'}</Text>
               </TouchableOpacity>
-              {a.alert_type==='fall'&&(
-                <TouchableOpacity onPress={async()=>{
-                  if(demoMode){setReplayMsg(null);setReplayFrames(demoReplay());return;}
-                  try{
-                    const r=await AX.get(`${url()}/alerts/${a.id}/replay`,{timeout:8000});
-                    if(r.data?.available&&Array.isArray(r.data.frames)&&r.data.frames.length>1){setReplayMsg(null);setReplayFrames(r.data.frames);}
-                    else{setReplayFrames([]);setReplayMsg('No replay was saved for this fall. Replays are kept for falls detected after this feature was added.');}
-                  }catch(_e){setReplayFrames([]);setReplayMsg('Could not load the replay. Check the connection to the monitoring unit.');}
-                }}>
-                  <Text style={{color:C.red,fontSize:11,fontWeight:'600'}}>Watch replay</Text>
-                </TouchableOpacity>
-              )}
-              {!a.seen&&(
-                <TouchableOpacity onPress={()=>acknowledgeAlert(a.id)}>
-                  <Text style={{color:C.green,fontSize:11,fontWeight:'600'}}>Acknowledge</Text>
-                </TouchableOpacity>
-              )}
-              {!!a.seen&&!!(a as any).acknowledged_by&&(
-                <Text style={{color:C.muted,fontSize:11}}>
-                  {`Acknowledged by ${(a as any).acknowledged_by}`}
-                </Text>
-              )}
             </View>
             {isExp&&(
               <View style={{marginTop:8,gap:3}}>
+                <Text style={{color:C.sub,fontSize:11}}>{new Date(a.detected_at).toLocaleString()}</Text>
                 {Object.entries(a.payload||{}).map(([k,v])=>(
                   <Text key={k} style={{color:C.sub,fontSize:11}}>{k}: {String(v)}</Text>
                 ))}
@@ -5647,7 +5643,7 @@ export default function App() {
             </View>
           )}
           <Text style={{position:'absolute',bottom:48,color:C.muted,fontSize:12}}>
-            {someoneInView?'Resident Detected':'Room Empty'} · {cameraStatus?.fps?.toFixed(1)??'?'} fps
+            {someoneInView?(inViewNames||'Someone')+' in view':'No one in view'}
           </Text>
         </View>
       </Modal>
@@ -5845,12 +5841,12 @@ const s=StyleSheet.create({
   emptyTxt:     {color:C.text,fontSize:16,fontWeight:'600'},
   emptySub:     {color:C.muted,fontSize:13,textAlign:'center',marginTop:5,lineHeight:19},
   settGrp:      {marginHorizontal:16,backgroundColor:C.card,borderRadius:20,overflow:'hidden',borderWidth:1,borderColor:C.border},
-  btnPrimary:   {backgroundColor:C.green,borderRadius:100,paddingVertical:16,paddingHorizontal:20,alignItems:'center',shadowColor:C.green,shadowOpacity:0.4,shadowRadius:16,shadowOffset:{width:0,height:6}},
+  btnPrimary:   {backgroundColor:C.green,borderRadius:100,paddingVertical:16,paddingHorizontal:20,alignItems:'center'},
   btnPrimaryTxt:{color:'#04140A',fontSize:16,fontWeight:'800'},
   btnSecondary: {backgroundColor:'rgba(255,255,255,0.04)',borderRadius:100,paddingVertical:14,paddingHorizontal:20,alignItems:'center',borderWidth:1,borderColor:C.border},
   btnSecondaryTxt:{color:C.text,fontSize:14,fontWeight:'600'},
   tabBar:       {flexDirection:'row',backgroundColor:'#070B09',borderTopWidth:1,borderTopColor:C.hair,paddingBottom:22,paddingTop:10},
-  tabIndicator: {position:'absolute',top:-10,alignSelf:'center',width:28,height:3,borderRadius:2,backgroundColor:C.green,shadowColor:C.green,shadowOpacity:0.8,shadowRadius:6,shadowOffset:{width:0,height:0}},
+  tabIndicator: {position:'absolute',top:-10,alignSelf:'center',width:28,height:3,borderRadius:2,backgroundColor:C.green,opacity:0},
   badge:        {position:'absolute',top:-3,right:-8,backgroundColor:C.red,borderRadius:7,minWidth:15,height:15,alignItems:'center',justifyContent:'center',paddingHorizontal:3,borderWidth:1.5,borderColor:'#070B09'},
   badgeTxt:     {color:'#fff',fontSize:9,fontWeight:'800'},
   avatar:       {width:44,height:44,borderRadius:22,backgroundColor:C.fill,alignItems:'center',justifyContent:'center',borderWidth:1,borderColor:C.border},
