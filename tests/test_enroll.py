@@ -151,6 +151,20 @@ def test_new_track_keeps_build_and_height():
     assert st["parts"]["body"] == 1.0 and st["parts"]["height"] == 1.0, st["parts"]
 
 
+def test_returning_track_not_counted_twice():
+    """ENROLL_V4: A, B, then A again must not add A's samples a second time."""
+    import time as _tm
+    with open(os.environ["VIGIL_ENROLL_REQ"], "w") as f:
+        json.dump({"key": "k10", "person_id": "p2", "name": "Nitin", "track": 60, "t": _tm.time()}, f)
+    ph._PROP_TRK[60] = [("a%d" % i) for i in range(3)]
+    ph._PROP_TRK[61] = [("b%d" % i) for i in range(2)]
+    for tid in (60, 61, 60):
+        ph._EN["seen_t"] = _tm.time() - 1.0
+        frame("front", t=tid)
+    body = ph._EN["body"]
+    assert len(body) == len(set(map(id, body))), [str(x)[:12] for x in body]
+
+
 if __name__ == "__main__":
     test_learns_every_part_then_commits(); test_stop_request_ends_it(); test_lost_and_renamed_midway()
-    test_new_track_keeps_build_and_height(); print("ok")
+    test_new_track_keeps_build_and_height(); test_returning_track_not_counted_twice(); print("ok")

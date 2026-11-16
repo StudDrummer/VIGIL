@@ -1439,7 +1439,7 @@ def _enroll_reset(req):
                 "track": None, "track_hint": req.get("track"), "stage": "still", "stage_t": 0.0,
                 "last_tick": time.time(), "started": time.time(), "seen_t": 0.0, "faces": [], "face_ids": set(),
                 "fp": {"front": [], "side": [], "back": []}, "body": [], "height": [], "walk": None,
-                "cur_t": None, "carry_body": [], "carry_height": [], "snap_body": [], "snap_height": [],
+                "per_t": {},   # ENROLL_V4: track -> its latest body and height samples
                 "notes": [], "done": False, "others": 0})
     print("[ENROLL] learning %s (track hint %s)" % (_EN["pid"], _EN["track_hint"]), flush=True)
 
@@ -1573,17 +1573,19 @@ def _enroll_tick(all_persons, track_ids, boxes, fps):
                 _EN["face_ids"].add(id(e))
                 _EN["faces"].append(e)
                 del _EN["faces"][:-20]
-        # ENROLL_V3: samples add up across tracker IDs. When the tracker gives them a new
-        # ID, what the old ID collected is carried over, so build and height never restart.
-        if _EN.get("cur_t") not in (None, t):
-            for key in ("body", "height"):
-                _EN["carry_" + key] = (_EN.get("carry_" + key, []) + _EN.get("snap_" + key, []))[-max(EN_BODY, EN_HEIGHT) * 2:]
-                _EN["snap_" + key] = []
-        _EN["cur_t"] = t
+        # ENROLL_V4: samples add up across tracker IDs. Each ID's latest samples are kept once,
+        # so build and height never restart when the tracker hands out a new ID, and going back
+        # to an earlier ID (A, B, A) does not count A's samples twice.
+        per = _EN.setdefault("per_t", {})
+        cur = per.setdefault(t, {})
         for key, src, nmax in (("body", _PROP_TRK.get(t), EN_BODY), ("height", _V8_TH.get(t), EN_HEIGHT)):
             if src:
-                _EN["snap_" + key] = list(src)[-nmax * 2:]
-            _EN[key] = (_EN.get("carry_" + key, []) + _EN.get("snap_" + key, []))[-nmax:]
+                cur[key] = list(src)[-nmax * 2:]
+        if len(per) > 12:                                   # only the most recent IDs matter
+            for _old in list(per)[:-12]:
+                per.pop(_old, None)
+        for key, nmax in (("body", EN_BODY), ("height", EN_HEIGHT)):
+            _EN[key] = [x for d in per.values() for x in d.get(key, [])][-nmax:]
         if _V8_WALK is not None:
             try:
                 sig = _V8_WALK.signature(t)
@@ -2271,7 +2273,10 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
                 elif _t not in _track_to_pid or _fp_frame[0] % 3 == 0 or _t in _V7["pending"] \
                         or _t == _EN["track"]:                     # ENROLL_V1: every frame while learning them
                     _want.append((_t, _k))
-            _want = _want[:2] if CPU_MODE else _want
+            if CPU_MODE:
+                # the person being introduced, then anyone not yet named, go first; the rest wait their turn
+                _want.sort(key=lambda w: 0 if w[0] == _EN["track"] else (1 if (w[0] not in _track_to_pid or w[0] in _V7["pending"]) else 2))
+                _want = _want[:2]
             for _t, _k in _want:
                 _FP_T[_t] = _nowf
             if len(_FP_T) > 400:
