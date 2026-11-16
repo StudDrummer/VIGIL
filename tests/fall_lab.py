@@ -3,6 +3,7 @@
 
 Run on the Jetson, with VIGIL running and the camera seeing the whole room:
 
+    tmux new -s lab        (keeps running if the connection drops; reattach: tmux attach -t lab)
     python3 ~/VIGIL/tests/fall_lab.py
 
 For each trial it tells you what to do, counts down, then (a) checks whether
@@ -88,11 +89,21 @@ def main():
         print("Cannot find camera.log in %s. Set VIGIL_JETSON_DIR." % BASE)
         sys.exit(1)
     print(__doc__)
+    # LAB_RESUME_V1: results are saved after every trial; a dropped connection loses nothing
+    saved = os.path.join(PROBES, "lab_results.json")
+    results, start = [], 1
+    try:
+        prev = json.load(open(saved))
+        if prev and len(prev) < len(TRIALS) and input("Continue the last run from trial %d? (Y/n) " % (len(prev) + 1)).lower() != "n":
+            results, start = prev, len(prev) + 1
+    except Exception:
+        pass
     input("Press Enter when the room is clear, the mattress is down and you are ready...")
-    results = []
     stamp = time.strftime("%m%d%H%M")
     try:
         for i, (label, is_fall, how, secs) in enumerate(TRIALS, 1):
+            if i < start:
+                continue
             print("\n[%d/%d] %s%s" % (i, len(TRIALS), "FALL: " if is_fall else "", how))
             input("    Press Enter, then start within 3 seconds...")
             path, off = log_size()
@@ -106,6 +117,7 @@ def main():
             ok = bool(hits) == is_fall
             results.append({"label": label, "is_fall": is_fall, "alerted": bool(hits), "log": hits, "probe": name})
             print("    %s  VIGIL %s" % ("RIGHT" if ok else "WRONG", "raised a fall alert" if hits else "stayed quiet"))
+            json.dump(results, open(saved, "w"), indent=1)
             if i < len(TRIALS):
                 countdown(GAP_S, "stand up and rest")
     except KeyboardInterrupt:

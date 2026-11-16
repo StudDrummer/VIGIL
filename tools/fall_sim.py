@@ -123,3 +123,25 @@ SCENARIOS = [
     ("sit on the floor on purpose from a chair (slow)", False, [("stand", 2), ("sit_chair", 2), ("sit_chair", 3), ("sit_floor", 3.5), ("sit_floor", 25)]),
 ]
 BED_ZONE = [{"x1": 0.25, "y1": 0.55, "x2": 0.75, "y2": 0.76}]   # where lie_bed lands (normalized)
+
+
+def perspective_walk(fps=5.0, seconds=14.0, toward=False, seed=0):
+    """Walking straight away from (or toward) the camera: the body shrinks or grows
+    in the picture and the feet move up or down it. Nothing is a fall."""
+    rng = np.random.default_rng(seed)
+    base = _pose("stand", 1150.0)
+    out = []
+    n = int(seconds * fps)
+    for i in range(n):
+        t = i / fps
+        a = t / seconds
+        sc = (1.25 - 0.9 * a) if not toward else (0.35 + 0.9 * a)      # 1.25 -> 0.35 (away)
+        foot_y = (1250 - 650 * a) if not toward else (600 + 650 * a)
+        xy = base.copy()
+        xy[:, 0] = 1150 + (xy[:, 0] - 1150) * sc
+        xy[:, 1] = foot_y - (GROUND - xy[:, 1]) * sc
+        step = np.sin(2 * np.pi * 0.9 * t) * 18 * sc               # legs swing
+        xy[15, 1] -= max(0, step); xy[16, 1] -= max(0, -step)
+        k = np.zeros((17, 3)); k[:, :2] = xy + rng.normal(0, 3, (17, 2)); k[:, 2] = 0.9
+        out.append((t, k))
+    return out

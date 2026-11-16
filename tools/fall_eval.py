@@ -63,6 +63,14 @@ def synthetic(cls=None, quiet=False):
                 good = alerted == is_fall
                 ok += good
                 rows.append((fps, name, side, is_fall, fall_at, floor_at, good))
+    for fps in (5.0, 2.0):                         # FALL_V5B: perspective, nothing here is a fall
+        for toward in (False, True):
+            for seed in range(3):
+                fr = fall_sim.perspective_walk(fps=fps, toward=toward, seed=seed)
+                fall_at, floor_at = run(fr, fall_sim.SHAPE, [], cls)
+                good = fall_at is None
+                ok += good
+                rows.append((fps, "walk %s the camera" % ("toward" if toward else "away from"), seed, False, fall_at, floor_at, good))
     if not quiet:
         for fps, name, side, is_fall, fa, fl, good in rows:
             print("%s %2.0f fps %-44s %s  fall=%s floor=%s" % ("PASS" if good else "MISS" if is_fall else "FALSE",

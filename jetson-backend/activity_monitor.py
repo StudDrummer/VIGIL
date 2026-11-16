@@ -850,6 +850,7 @@ class FallDetector:
         self.reason = ""
 
     # FALL_V5 thresholds (fractions of the person's own standing height)
+    V5 = os.environ.get("VIGIL_FALL_V5", "1") == "1"   # FALL_V5B: off on cloud cameras until validated
     SEAT_DROP = 0.17          # hips drop at least this far ...
     SEAT_RATE = 0.22          # ... at least this fast per second, over at most SEAT_WIN (falls ~0.3+, sitting down ~0.1-0.2)
     SEAT_WIN = 1.5
@@ -1001,7 +1002,8 @@ class FallDetector:
             down = aspect >= self.DOWN_ASPECT_NO_TORSO
         legs_up = self._legs_standing(kp, frame_shape)
         _Hr = self._standing_h(now)
-        if legs_up and _Hr and h < 0.42 * _Hr:
+        _sw = abs(float(kp[5][0]) - float(kp[6][0])) if min(float(kp[5][2]), float(kp[6][2])) >= 0.3 else 0.0
+        if legs_up and _Hr and h < 0.42 * _Hr and _sw >= 0.33 * h:
             legs_up = False          # FALL_V5: tiny "standing" legs are a body lying end-on, not legs
         if down and legs_up:
             down = False            # FALL_V43: bending over, still on their feet
@@ -1015,11 +1017,20 @@ class FallDetector:
         if H_ref and hip_y is not None and not legs_up:
             # lying along the camera's line of sight: short, and the hips are at the bottom
             flat = h < self.FLAT_RATIO * H_ref and (bot - hip_y) < self.FLAT_HIP * H_ref
+            # FALL_V5B: distance-proof. Someone far from the camera is small but still narrow;
+            # a body lying end-on is wide for its height (shoulders span >= a third of it).
+            try:
+                sw = abs(float(kp[5][0]) - float(kp[6][0])) if min(float(kp[5][2]), float(kp[6][2])) >= 0.3 else 0.0
+            except Exception:
+                sw = 0.0
+            flat = flat and sw >= 0.33 * h
             ank = self._ankle_y(kp)
             seated_floor = ank is not None and abs(ank - hip_y) < self.SEAT_LEVEL * H_ref and h < 0.62 * H_ref
         if flat:
             compact = False                      # short and "upright"-angled, but lying end-on
         self.hist.append((now, hip_y, top, bot, h, bool(compact)))
+        if not self.V5:
+            flat = seated_floor = False
         if flat and not down:
             down = True
             self.reason = "lying, seen end-on"
