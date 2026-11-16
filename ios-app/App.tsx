@@ -157,7 +157,7 @@ Animated.loop(
 const C = {
   bg:'#050807', card:'#0F1613', cardHi:'#141D19', fill:'#1A2420',
   border:'#24312B', hair:'rgba(255,255,255,0.07)',
-  text:'#F2F6F3', sub:'#A3B0A9', muted:'#6C7A73',
+  text:'#F2F6F3', sub:'#A3B0A9', muted:'#84918A',
   green:'#32D74B', red:'#FF453A', orange:'#FF9F0A',
   blue:'#0A84FF', purple:'#BF5AF2', teal:'#3DD6E3',
 };
@@ -193,11 +193,6 @@ interface Room {
 interface AlertEntry {
   id:number; alert_type:string; detected_at:string;
   payload:any; seen:number; created_at:string;
-}
-interface MLScore {
-  condition_id:string; condition_label:string; score_0_100:number;
-  probability:number; published_auc:number; data_quality:number;
-  days_of_data:number; insufficient_data:number;
 }
 interface DebugEntry { ts:string; level:'INFO'|'WARN'|'ERROR'|'OK'; msg:string; }
 
@@ -447,7 +442,7 @@ function AddCameraCard({cfg,onAdded,onSkip,initialCode=''}:{cfg:CloudCfg;onAdded
     <View style={[s.card,{marginHorizontal:16,marginTop:16}]}>
       <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>Add a camera</Text>
       <Text style={{color:C.sub,fontSize:15,marginTop:6,lineHeight:21}}>Type the 8-character setup code printed on the card that came with the VIGIL camera.</Text>
-      <TextInput style={{color:C.text,fontSize:26,letterSpacing:4,textAlign:'center',paddingVertical:16,backgroundColor:C.bg,
+      <TextInput style={{color:C.text,fontSize:28,letterSpacing:4,textAlign:'center',paddingVertical:16,backgroundColor:C.bg,
           borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:14,fontWeight:'700'}}
         value={code} onChangeText={t=>{const c=t.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);setCode(c.length>4?c.slice(0,4)+'-'+c.slice(4):c);}}
         placeholder="ABCD-1234" placeholderTextColor={C.muted} autoCapitalize="characters" autoCorrect={false} returnKeyType="go"
@@ -496,7 +491,7 @@ function AlertsOnCard({cfg}:{cfg:CloudCfg}){
   return(
     <View style={[s.card,{marginHorizontal:16,marginTop:16,flexDirection:'row',alignItems:'center',gap:14}]}>
       <View style={{width:44,height:44,borderRadius:12,backgroundColor:(st==='on'?C.green:C.orange)+'22',alignItems:'center',justifyContent:'center'}}>
-        <View style={{width:14,height:14,borderRadius:7,backgroundColor:st==='on'?C.green:C.orange}}/></View>
+        <View style={{width:14,height:14,borderRadius:8,backgroundColor:st==='on'?C.green:C.orange}}/></View>
       <View style={{flex:1}}>
         <Text style={{color:C.text,fontSize:16,fontWeight:'700'}}>{title}</Text>
         <Text style={{color:C.sub,fontSize:13,marginTop:3,lineHeight:18}}>{sub}</Text>
@@ -538,7 +533,7 @@ function SiteEditSheet({cfg,site,onClose,onSaved}:{cfg:CloudCfg;site:CloudSite;o
       <KeyboardAvoidingView behavior={Platform.OS==='ios'?'padding':undefined} style={{flex:1,backgroundColor:'rgba(0,0,0,0.55)',justifyContent:'flex-end'}}>
         <View style={{backgroundColor:C.card,borderTopLeftRadius:22,borderTopRightRadius:22,padding:20,paddingBottom:36}}>
           <View style={{width:40,height:5,borderRadius:3,backgroundColor:C.fill,alignSelf:'center',marginBottom:14}}/>
-          <Text style={{color:C.text,fontSize:20,fontWeight:'800'}}>Camera details</Text>
+          <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>Camera details</Text>
           <Text style={{color:C.sub,fontSize:14,marginTop:16,fontWeight:'600'}}>Name</Text>
           <TextInput style={inp} value={name} onChangeText={setName} placeholder="e.g. Nani's bedroom" placeholderTextColor={C.muted} autoCapitalize="sentences" maxLength={40}/>
           <Text style={{color:C.sub,fontSize:14,marginTop:16,fontWeight:'600'}}>Home</Text>
@@ -687,7 +682,7 @@ function BoxArt({size=150,led='double'}:{size?:number;led?:Led}){
         <Path d="M60 44 L75 72 L90 44" stroke="#32D74B" strokeWidth={7} fill="none" strokeLinecap="round" strokeLinejoin="round"/>
         <Circle cx={118} cy={80} r={4} fill="#0E3A16"/>
       </Svg>
-      <Animated.View style={{position:'absolute',left:118*k-5*k,top:80*k-5*k,width:10*k,height:10*k,borderRadius:5*k,
+      <Animated.View style={{position:'absolute',left:118*k-5*k,top:80*k-5*k,width:10*k,height:10*k,borderRadius:6*k,
         backgroundColor:'#32D74B',opacity:glow,shadowColor:'#32D74B',shadowOpacity:1,shadowRadius:7*k,shadowOffset:{width:0,height:0}}}/>
     </View>);
 }
@@ -754,11 +749,11 @@ function ChainNode({label,detail,state}:{label:string;detail?:string;state:'wait
   const col=state==='ok'?C.green:state==='bad'?C.orange:state==='work'?C.text:C.muted;
   return(
     <View style={{flexDirection:'row',alignItems:'center',paddingVertical:10}}>
-      <Animated.View style={{width:30,height:30,borderRadius:15,alignItems:'center',justifyContent:'center',marginRight:14,
+      <Animated.View style={{width:30,height:30,borderRadius:16,alignItems:'center',justifyContent:'center',marginRight:14,
         backgroundColor:state==='ok'?C.green:'transparent',borderWidth:state==='ok'?0:2,borderColor:col,
         opacity:state==='work'?pulse.interpolate({inputRange:[0,1],outputRange:[0.45,1]}):1}}>
-        {state==='ok'&&<Text style={{color:'#000',fontWeight:'900',fontSize:15}}>{'✓'}</Text>}
-        {state==='bad'&&<Text style={{color:C.orange,fontWeight:'900',fontSize:15}}>!</Text>}
+        {state==='ok'&&<Text style={{color:'#000',fontWeight:'700',fontSize:15}}>{'✓'}</Text>}
+        {state==='bad'&&<Text style={{color:C.orange,fontWeight:'700',fontSize:15}}>!</Text>}
       </Animated.View>
       <View style={{flex:1}}>
         <Text style={{color:state==='wait'?C.muted:C.text,fontSize:16,fontWeight:'700'}}>{label}</Text>
@@ -861,7 +856,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
   };
   const copy=(t:string)=>Share.share({message:t}).catch(()=>{});
   const Title=({t,sub}:{t:string;sub?:string})=>(<View style={{alignItems:'center',marginTop:6}}>
-    <Text style={{color:C.text,fontSize:28,fontWeight:'800',letterSpacing:-0.4,textAlign:'center'}}>{t}</Text>
+    <Text style={{color:C.text,fontSize:28,fontWeight:'700',letterSpacing:-0.4,textAlign:'center'}}>{t}</Text>
     {!!sub&&<Text style={{color:C.sub,fontSize:16,marginTop:8,lineHeight:23,textAlign:'center',maxWidth:340}}>{sub}</Text>}</View>);
   const Field=({label,value}:{label:string;value:string})=>(
     <TouchableOpacity onPress={()=>copy(value)} style={{flexDirection:'row',alignItems:'center',marginTop:8,padding:12,borderRadius:12,backgroundColor:C.bg,borderWidth:1,borderColor:C.border}}>
@@ -870,8 +865,8 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
       <Text style={{color:C.blue,fontSize:14}}>Copy</Text></TouchableOpacity>);
   const Step=({n,children}:{n:number;children:any})=>(
     <View style={{flexDirection:'row',marginTop:16}}>
-      <View style={{width:26,height:26,borderRadius:13,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center',marginRight:12}}>
-        <Text style={{color:C.green,fontWeight:'800',fontSize:13}}>{n}</Text></View>
+      <View style={{width:26,height:26,borderRadius:12,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center',marginRight:12}}>
+        <Text style={{color:C.green,fontWeight:'700',fontSize:13}}>{n}</Text></View>
       <View style={{flex:1}}>{children}</View></View>);
   const P=({children}:{children:any})=><Text style={{color:C.sub,fontSize:15,lineHeight:22}}>{children}</Text>;
   const B=({children}:{children:any})=><Text style={{color:C.text,fontWeight:'700'}}>{children}</Text>;
@@ -910,7 +905,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
       <Step n={5}><P>Recommended: camera settings, <B>Firmware Update</B>, automatic updates off.</P></Step>
       <TouchableOpacity onPress={()=>{setTapoDone(!tapoDone);save({tapoDone:!tapoDone});}} style={[s.card,{marginTop:20,flexDirection:'row',alignItems:'center',borderWidth:2,borderColor:tapoDone?C.green:'transparent'}]}>
         <View style={{width:26,height:26,borderRadius:8,borderWidth:2,borderColor:tapoDone?C.green:C.muted,backgroundColor:tapoDone?C.green:'transparent',alignItems:'center',justifyContent:'center'}}>
-          {tapoDone&&<Text style={{color:'#000',fontWeight:'900'}}>{'✓'}</Text>}</View>
+          {tapoDone&&<Text style={{color:'#000',fontWeight:'700'}}>{'✓'}</Text>}</View>
         <Text style={{color:C.text,fontSize:16,marginLeft:12,flex:1}}>I can see the camera's picture in Tapo, and typed the camera account</Text>
       </TouchableOpacity>
     </>);
@@ -940,7 +935,7 @@ function BoxSetup({cfg,onDone,onSkip}:{cfg:CloudCfg;onDone:()=>void;onSkip:()=>v
               <View style={{flexDirection:'row',alignItems:'flex-end',gap:2,marginRight:12}}>
                 {[0,1,2,3].map(i=><View key={i} style={{width:4,height:5+i*3,borderRadius:1,backgroundColor:n.signal>=i*25?(ssid===n.ssid&&!manual?C.green:C.sub):C.fill}}/>)}</View>
               <Text style={{color:C.text,fontSize:16,flex:1,fontWeight:ssid===n.ssid&&!manual?'700':'400'}}>{n.ssid}</Text>
-              {ssid===n.ssid&&!manual&&<Text style={{color:C.green,fontWeight:'900',fontSize:16}}>{'✓'}</Text>}
+              {ssid===n.ssid&&!manual&&<Text style={{color:C.green,fontWeight:'700',fontSize:16}}>{'✓'}</Text>}
             </TouchableOpacity>))}
           <TouchableOpacity onPress={()=>{setManual(true);setSsid('');}} style={{paddingVertical:13}}>
             <Text style={{color:C.blue,fontSize:15}}>{nets.length?'Other network':'Type the Wi-Fi name'}</Text></TouchableOpacity>
@@ -1153,11 +1148,11 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
   };
   const inp={color:C.text,fontSize:17,paddingHorizontal:14,paddingVertical:14,backgroundColor:C.bg,borderRadius:10,borderWidth:1,borderColor:C.border,marginTop:8};
   const H1=({t,sub}:{t:string;sub?:string})=>(<>
-    <Text style={{color:C.text,fontSize:27,fontWeight:'800',letterSpacing:-0.3}}>{t}</Text>
+    <Text style={{color:C.text,fontSize:28,fontWeight:'700',letterSpacing:-0.3}}>{t}</Text>
     {!!sub&&<Text style={{color:C.sub,fontSize:16,marginTop:8,lineHeight:23}}>{sub}</Text>}</>);
   const Tick=({on}:{on:boolean})=>(
     <View style={{width:26,height:26,borderRadius:8,borderWidth:2,borderColor:on?C.green:C.muted,backgroundColor:on?C.green:'transparent',alignItems:'center',justifyContent:'center'}}>
-      {on&&<Text style={{color:'#000',fontSize:15,fontWeight:'900'}}>{'✓'}</Text>}</View>);
+      {on&&<Text style={{color:'#000',fontSize:15,fontWeight:'700'}}>{'✓'}</Text>}</View>);
   const residents=people.filter(p=>p.resident);
   const canNext=cur==='people'?(people.length>0&&residents.length>0&&!form)
     :cur==='consent'?people.every(p=>p.consent)
@@ -1167,7 +1162,7 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
       <H1 t="Who lives here?" sub="Add everyone the camera will see most days. VIGIL looks after the people you mark, and learns everyone else so it never mixes them up."/>
       <View style={{flexDirection:'row',backgroundColor:C.card,borderRadius:12,padding:4,marginTop:18,borderWidth:1,borderColor:C.border}}>
         {([['us','Feet and inches'],['metric','Centimetres']] as const).map(([k,l])=>(
-          <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:10,borderRadius:9,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
+          <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:10,borderRadius:10,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
             <Text style={{color:units===k?'#000':C.sub,fontSize:14,fontWeight:'700'}}>{l}</Text></TouchableOpacity>))}
       </View>
       {others.length>0&&!form&&(
@@ -1315,7 +1310,7 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
         {['Mount it high in a corner, about 2 metres up, tilted down.','The floor where people walk should be visible from wall to wall, and people should be seen head to toe.',
           'Avoid pointing it at a bright window or into a bathroom.','Plug it in where nobody will unplug it, near the VIGIL box.'].map((t,i)=>(
           <View key={i} style={{flexDirection:'row',marginBottom:10}}>
-            <Text style={{color:C.green,fontSize:15,fontWeight:'800',width:22}}>{i+1}</Text>
+            <Text style={{color:C.green,fontSize:15,fontWeight:'700',width:22}}>{i+1}</Text>
             <Text style={{color:C.sub,fontSize:15,lineHeight:21,flex:1}}>{t}</Text></View>))}
       </View>
     </>);
@@ -1330,7 +1325,7 @@ function HomeSetup({cfg,role,onDone}:{cfg:CloudCfg;role:string;onDone:()=>void})
         <View style={{width:96,height:96,borderRadius:48,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}>
           <Svg width={52} height={52} viewBox="0 0 52 52"><Path d="M12 27 L22 37 L41 16" stroke="#000" strokeWidth={6} fill="none" strokeLinecap="round" strokeLinejoin="round"/></Svg>
         </View>
-        <Text style={{color:C.text,fontSize:28,fontWeight:'800',marginTop:20}}>You are all set</Text>
+        <Text style={{color:C.text,fontSize:28,fontWeight:'700',marginTop:20}}>You are all set</Text>
         <Text style={{color:C.sub,fontSize:16,textAlign:'center',lineHeight:23,marginTop:10}}>
           {owner?`VIGIL is watching over ${residents.map(p=>p.name).join(' and ')||'your home'}. Over the first week it learns what is normal for each person, then shows when something changes.`
             :`You will see ${site?.name||'this home'}'s alerts and trends.`}
@@ -1458,7 +1453,6 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
   useEffect(()=>{if(pendingCode)setMode(m=>m==='choose'?'cloud':m);},[pendingCode]);   // APP_SETUP_V1: opened from the card's QR code
   const [step,setStep]             = useState(1);
   const [residentName,setRN]       = useState('');
-  const [dob,setDOB]               = useState('');
   const [residentHeight,setRH]     = useState('170');
   const [emergencyPhone,setEP]     = useState('');
   const [emergencyEmail,setEE]     = useState('');
@@ -1478,7 +1472,6 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
   const [testing,setTesting]       = useState(false);
   const [serverOk,setServerOk]     = useState<boolean|null>(null);
   const [agreed,setAgreed]         = useState(false);
-  const TOTAL = 6;
   // PROFILE_V2: who + measurements, Apple Watch, then connect (local) or done (cloud).
   const LOCAL_STEPS = cloudCfg ? [1,4,5] : [1,4,3,5];
   const heightCm = ():number|null=>{
@@ -1515,9 +1508,9 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
         <View style={{flex:1}}>
           <View style={{alignItems:'center',marginTop:20,marginBottom:32}}>
             <View style={{width:80,height:80,borderRadius:20,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center',marginBottom:16}}>
-              <Text style={{fontSize:36}}>◎</Text>
+              <Text style={{fontSize:34}}>◎</Text>
             </View>
-            <Text style={{color:C.text,fontSize:28,fontWeight:'800',letterSpacing:-0.5,marginBottom:8}}>Welcome to VIGIL</Text>
+            <Text style={{color:C.text,fontSize:28,fontWeight:'700',letterSpacing:-0.5,marginBottom:8}}>Welcome to VIGIL</Text>
             <Text style={{color:C.sub,fontSize:15,textAlign:'center',lineHeight:22,paddingHorizontal:8}}>
               Passive health monitoring for retirement homes. VIGIL watches for changes in activity, gait, and vital signs — alerting caregivers when something seems off.
             </Text>
@@ -1540,7 +1533,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
           </View>
           <TouchableOpacity style={{flexDirection:'row',alignItems:'flex-start',gap:12,marginBottom:20}} onPress={()=>setAgreed(p=>!p)}>
             <View style={{width:22,height:22,borderRadius:6,borderWidth:2,borderColor:agreed?C.green:C.muted,backgroundColor:agreed?C.green:'transparent',alignItems:'center',justifyContent:'center',marginTop:1}}>
-              {agreed && <Text style={{color:'#000',fontSize:13,fontWeight:'800'}}>✓</Text>}
+              {agreed && <Text style={{color:'#000',fontSize:13,fontWeight:'700'}}>✓</Text>}
             </View>
             <Text style={{color:C.sub,fontSize:13,lineHeight:19,flex:1}}>
               I understand VIGIL is a wellness monitoring tool and not a medical device. I have read and agree to the Terms of Service and Privacy Policy.
@@ -1550,14 +1543,14 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
       );
       case 1: return (
         <View style={{flex:1}}>
-          <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Who is VIGIL watching over?</Text>
+          <Text style={{color:C.text,fontSize:28,fontWeight:'700',marginBottom:8}}>Who is VIGIL watching over?</Text>
           <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
             Their height lets VIGIL measure their walking speed. Everyone else in the home is added after setup.
           </Text>
           <OBField label="First name" value={residentName} onChange={setRN} placeholder="e.g. Margaret"/>
           <View style={{flexDirection:'row',backgroundColor:C.card,borderRadius:12,padding:4,marginBottom:20,borderWidth:1,borderColor:C.border}}>
             {([['us','Feet and inches'],['metric','Centimetres']] as const).map(([k,lbl])=>(
-              <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:12,borderRadius:9,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
+              <TouchableOpacity key={k} onPress={()=>setUnits(k)} style={{flex:1,paddingVertical:12,borderRadius:10,alignItems:'center',backgroundColor:units===k?C.green:'transparent'}}>
                 <Text style={{color:units===k?'#000':C.sub,fontSize:14,fontWeight:'700'}}>{lbl}</Text>
               </TouchableOpacity>
             ))}
@@ -1574,7 +1567,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
       );
       case 2: return (
         <View style={{flex:1}}>
-          <Text style={{color:C.text,fontSize:24,fontWeight:'800',marginBottom:6}}>Emergency Contact</Text>
+          <Text style={{color:C.text,fontSize:22,fontWeight:'700',marginBottom:6}}>Emergency Contact</Text>
           <Text style={{color:C.sub,fontSize:14,marginBottom:28,lineHeight:20}}>
             This person receives an SMS immediately when a fall or extended period of inactivity is detected.
           </Text>
@@ -1597,7 +1590,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
       );
       case 3: return (
         <View style={{flex:1}}>
-          <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Connect to your VIGIL box</Text>
+          <Text style={{color:C.text,fontSize:28,fontWeight:'700',marginBottom:8}}>Connect to your VIGIL box</Text>
           <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
             Type the address from the card that came with the box, then tap Test.
           </Text>
@@ -1639,7 +1632,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
               <TouchableOpacity onPress={onDemo}
                 style={{backgroundColor:C.green,borderRadius:12,paddingVertical:12,
                         alignItems:'center'}}>
-                <Text style={{color:'#000',fontWeight:'800',fontSize:15}}>Open Demo Mode</Text>
+                <Text style={{color:'#000',fontWeight:'700',fontSize:15}}>Open Demo Mode</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -1647,7 +1640,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
       );
       case 4: return (
         <View style={{flex:1}}>
-          <Text style={{color:C.text,fontSize:26,fontWeight:'800',marginBottom:8}}>Does {residentName.trim()||'they'} wear an Apple Watch?</Text>
+          <Text style={{color:C.text,fontSize:28,fontWeight:'700',marginBottom:8}}>Does {residentName.trim()||'they'} wear an Apple Watch?</Text>
           <Text style={{color:C.sub,fontSize:16,marginBottom:28,lineHeight:22}}>
             VIGIL works fully with the camera alone. If the watch is paired with this iPhone, VIGIL can also show their heart rate, sleep and steps.
           </Text>
@@ -1662,7 +1655,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
                 <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Yes — connect Apple Watch</Text>
                 <Text style={{color:C.sub,fontSize:13,marginTop:3}}>Adds HRV, heart rate, sleep, and SpO2 data</Text>
               </View>
-              {watchEnabled && <View style={{width:20,height:20,borderRadius:10,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}><Text style={{color:'#000',fontSize:12,fontWeight:'800'}}>✓</Text></View>}
+              {watchEnabled && <View style={{width:20,height:20,borderRadius:10,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}><Text style={{color:'#000',fontSize:12,fontWeight:'700'}}>✓</Text></View>}
             </View>
           </TouchableOpacity>
           <TouchableOpacity
@@ -1676,7 +1669,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
                 <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>No — camera only</Text>
                 <Text style={{color:C.sub,fontSize:13,marginTop:3}}>VIGIL monitors activity, gait, and detects falls automatically</Text>
               </View>
-              {!watchEnabled && <View style={{width:20,height:20,borderRadius:10,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}><Text style={{color:'#000',fontSize:12,fontWeight:'800'}}>✓</Text></View>}
+              {!watchEnabled && <View style={{width:20,height:20,borderRadius:10,backgroundColor:C.green,alignItems:'center',justifyContent:'center'}}><Text style={{color:'#000',fontSize:12,fontWeight:'700'}}>✓</Text></View>}
             </View>
           </TouchableOpacity>
         </View>
@@ -1685,9 +1678,9 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
         <View style={{flex:1}}>
           <View style={{alignItems:'center',marginTop:20,marginBottom:32}}>
             <View style={{width:80,height:80,borderRadius:40,backgroundColor:C.green+'22',alignItems:'center',justifyContent:'center',marginBottom:16}}>
-              <Text style={{fontSize:36}}>◎</Text>
+              <Text style={{fontSize:34}}>◎</Text>
             </View>
-            <Text style={{color:C.text,fontSize:28,fontWeight:'800',letterSpacing:-0.5,marginBottom:8}}>All Set</Text>
+            <Text style={{color:C.text,fontSize:28,fontWeight:'700',letterSpacing:-0.5,marginBottom:8}}>All Set</Text>
             <Text style={{color:C.sub,fontSize:15,textAlign:'center',lineHeight:22}}>
               VIGIL is ready to monitor {residentName||'the resident'}. The camera will begin learning their normal activity pattern immediately.
             </Text>
@@ -1712,7 +1705,6 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
     }
   };
 
-  const stepTitles = ['Welcome','Who is VIGIL watching over?','Emergency','Connect','Watch','Ready'];
   const li = LOCAL_STEPS.indexOf(step);
 
   const finish = async () => {
@@ -1758,7 +1750,7 @@ function OnboardingScreen({onComplete,onDemo,onCloud,pendingCode}:OBProps&{onClo
           <ScrollView contentContainerStyle={{padding:24,paddingTop:48}} keyboardShouldPersistTaps="handled">
             <View style={{alignItems:'center',marginBottom:28}}>
               <Image source={{uri:'LaunchLogo'}} style={{width:84,height:84,borderRadius:20,marginBottom:18}}/>
-              <Text style={{color:C.text,fontSize:32,fontWeight:'800',letterSpacing:-0.5}}>VIGIL</Text>
+              <Text style={{color:C.text,fontSize:34,fontWeight:'700',letterSpacing:-0.5}}>VIGIL</Text>
               <Text style={{color:C.sub,fontSize:17,textAlign:'center',lineHeight:24,marginTop:8}}>
                 Tells you right away if someone falls. Nothing to wear, nothing to press.
               </Text>
@@ -1871,7 +1863,7 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
         </Svg>
         <View style={{alignItems:'center'}}>
           <Text style={{color:C.muted,fontSize:11,fontWeight:'700',letterSpacing:1.5,textTransform:'uppercase'}}>Activity</Text>
-          <Text style={{color:C.green,fontSize:42,fontWeight:'800',lineHeight:48,marginTop:2}}>
+          <Text style={{color:C.green,fontSize:42,fontWeight:'700',lineHeight:48,marginTop:2}}>
             {pct!=null?Math.round(pct)+'%':'—'}
           </Text>
           <Text style={{color:C.muted,fontSize:11,marginTop:1}}>of in-view time moving</Text>
@@ -1883,7 +1875,7 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
             <View style={{width:8,height:8,borderRadius:4,backgroundColor:C.green}}/>
             <Text style={{color:C.sub,fontSize:12}}>Active</Text>
           </View>
-          <Text style={{color:C.text,fontSize:18,fontWeight:'800'}}>
+          <Text style={{color:C.text,fontSize:18,fontWeight:'700'}}>
             {activeMin!=null?Math.round(activeMin)+' min':'—'}
           </Text>
         </View>
@@ -1893,7 +1885,7 @@ function ActivityRing({pct,activeMin,stillMin}:{pct:number|null;activeMin:number
             <View style={{width:8,height:8,borderRadius:4,backgroundColor:C.orange}}/>
             <Text style={{color:C.sub,fontSize:12}}>Still</Text>
           </View>
-          <Text style={{color:C.text,fontSize:18,fontWeight:'800'}}>
+          <Text style={{color:C.text,fontSize:18,fontWeight:'700'}}>
             {stillMin!=null?Math.round(stillMin)+' min':'—'}
           </Text>
         </View>
@@ -1963,7 +1955,7 @@ function WhoIsThisSheet({serverUrl,track,current,people,onDone,onClose}:
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView style={{flex:1,justifyContent:'flex-end',backgroundColor:'#000A'}} behavior={Platform.OS==='ios'?'padding':undefined}>
         <View style={{backgroundColor:C.card,borderTopLeftRadius:20,borderTopRightRadius:20,padding:20,paddingBottom:36,maxHeight:'85%'}}>
-          <Text style={{color:C.text,fontSize:21,fontWeight:'800'}}>{current?.name?`Is this ${current.name}?`:'Who is this?'}</Text>
+          <Text style={{color:C.text,fontSize:22,fontWeight:'700'}}>{current?.name?`Is this ${current.name}?`:'Who is this?'}</Text>
           <Text style={{color:C.sub,fontSize:14,marginTop:4,lineHeight:20}}>Only this person on the camera is changed. VIGIL learns from your answer.</Text>
           <ScrollView style={{marginTop:6}} keyboardShouldPersistTaps="handled">
             {current?.name&&row(current,`Yes, this is ${current.name}`,true)}
@@ -2038,7 +2030,7 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
     <Modal visible animationType="fade" onRequestClose={cancel}>
       <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
         <ScrollView contentContainerStyle={{padding:20,paddingBottom:40,alignItems:'center'}}>
-          <Text style={{color:C.text,fontSize:24,fontWeight:'800',alignSelf:'flex-start'}}>{done?`VIGIL knows ${personName}`:`Learning ${personName}`}</Text>
+          <Text style={{color:C.text,fontSize:22,fontWeight:'700',alignSelf:'flex-start'}}>{done?`VIGIL knows ${personName}`:`Learning ${personName}`}</Text>
           <Text style={{color:C.sub,fontSize:14,marginTop:6,lineHeight:20,alignSelf:'flex-start'}}>
             {done?'Every part is saved. VIGIL keeps improving each time you confirm or correct a name.'
               :`Only ${personName} in front of the camera. This takes about a minute; the circle fills as VIGIL learns each part.`}
@@ -2069,10 +2061,10 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
                 </Svg>
               </Animated.View>
             ):(
-              <Text style={{color:C.text,fontSize:30,fontWeight:'800',fontVariant:['tabular-nums']}}>{Math.round(prog*100)}%</Text>
+              <Text style={{color:C.text,fontSize:28,fontWeight:'700',fontVariant:['tabular-nums']}}>{Math.round(prog*100)}%</Text>
             )}
           </View>
-          <Text style={{color:done?C.green:(st&&!st.in_view)?C.orange:C.text,fontSize:19,fontWeight:'700',marginTop:20,textAlign:'center'}}>
+          <Text style={{color:done?C.green:(st&&!st.in_view)?C.orange:C.text,fontSize:20,fontWeight:'700',marginTop:20,textAlign:'center'}}>
             {done?'Done':err&&!st?'Connecting...':st?.prompt??'Getting ready...'}
           </Text>
           {!done&&othersSeen>=6&&(
@@ -2090,9 +2082,9 @@ function EnrollRing({serverUrl,personId,personName,track,frame,onDone,onCancel}:
               const v=parts[k]??0;const ok=v>=1;
               return(
                 <View key={k} style={{flexDirection:'row',alignItems:'center',paddingVertical:7}}>
-                  <View style={{width:22,height:22,borderRadius:11,marginRight:12,alignItems:'center',justifyContent:'center',
+                  <View style={{width:22,height:22,borderRadius:12,marginRight:12,alignItems:'center',justifyContent:'center',
                     backgroundColor:ok?C.green:'transparent',borderWidth:ok?0:2,borderColor:C.border}}>
-                    {ok&&<Text style={{color:'#000',fontSize:12,fontWeight:'900'}}>{'✓'}</Text>}
+                    {ok&&<Text style={{color:'#000',fontSize:12,fontWeight:'700'}}>{'✓'}</Text>}
                   </View>
                   <Text style={{color:ok?C.text:C.sub,fontSize:15,flex:1}}>{l}</Text>
                   {!ok&&<View style={{width:70,height:5,borderRadius:3,backgroundColor:C.fill}}>
@@ -2201,7 +2193,7 @@ function TeachWhoScreen({serverUrl,units,onClose}:{serverUrl:string;units:'us'|'
         onCancel={()=>{const n=enrolling.name;setEnrolling(null);setDone(d=>d.includes(n)?d:[...d,n]);setMsg(`${n} is named. VIGIL keeps learning them over time.`);}}/>}
       <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
       <ScrollView contentContainerStyle={{padding:20,paddingBottom:60}} keyboardShouldPersistTaps="handled">
-        <Text style={{color:C.text,fontSize:26,fontWeight:'800'}}>Introduce everyone</Text>
+        <Text style={{color:C.text,fontSize:28,fontWeight:'700'}}>Introduce everyone</Text>
         <Text style={{color:C.sub,fontSize:15,marginTop:8,lineHeight:22}}>
           About a minute per person. Recommended: VIGIL then tells your family apart by face, build, height, walk and clothing, and keeps learning every time you name someone.
         </Text>
@@ -2319,9 +2311,9 @@ function BaselineMeasureCard({m}:{m:BLMeasure}){
     const dotCol=e.state!=='ok'?C.sub:e.where==='normal'?C.green:e.concern?C.orange:C.blue;
     bar=(
       <View style={{marginTop:14,marginBottom:4}}>
-        <View style={{height:10,borderRadius:5,backgroundColor:C.fill}}>
+        <View style={{height:10,borderRadius:6,backgroundColor:C.fill}}>
           <View style={{position:'absolute',top:0,bottom:0,left:pct(e.lo) as any,
-            width:`${((e.hi-e.lo)/(right-left))*100}%` as any,backgroundColor:C.green+'55',borderRadius:5}}/>
+            width:`${((e.hi-e.lo)/(right-left))*100}%` as any,backgroundColor:C.green+'55',borderRadius:6}}/>
           {v!=null&&<View style={{position:'absolute',top:-5,left:pct(v) as any,marginLeft:-10,width:20,height:20,borderRadius:10,
             backgroundColor:dotCol,borderWidth:3,borderColor:C.card}}/>}
         </View>
@@ -2364,7 +2356,7 @@ function BaselineView({name,measures,groups}:{name:string;measures:BLMeasure[];g
     <View>
       <View style={{marginHorizontal:16,marginBottom:14,padding:16,backgroundColor:C.card,borderRadius:16,
         borderWidth:1,borderColor:(!learning&&off.some(x=>x.e.concern))?C.orange+'66':C.border}}>
-        <Text style={{color:C.text,fontSize:17,fontWeight:'800',lineHeight:23}}>{head}</Text>
+        <Text style={{color:C.text,fontSize:17,fontWeight:'700',lineHeight:23}}>{head}</Text>
         <Text style={{color:C.sub,fontSize:13,marginTop:6,lineHeight:19}}>{sub}</Text>
         {!learning&&off.length>0&&<Text style={{color:C.text,fontSize:13,marginTop:8,lineHeight:19}}>
           {off.map(x=>`${x.m.label}: ${x.e.where==='low'?'lower':'higher'} than usual`).join('. ')+'.'}</Text>}
@@ -2443,8 +2435,8 @@ function PersonDetailScreen({
       <View style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16}}>
         <View style={{flexDirection:'row',justifyContent:'space-between',marginBottom:8}}>
           <View>
-            <Text style={{color:C.sub,fontSize:12.5,fontWeight:'600',marginBottom:2}}>{label}</Text>
-            <Text style={{color,fontSize:20,fontWeight:'800'}}>{latest!=null?latest.toFixed(dec):'—'}{' '}<Text style={{color:C.sub,fontSize:11}}>{unit}</Text></Text>
+            <Text style={{color:C.sub,fontSize:13,fontWeight:'600',marginBottom:2}}>{label}</Text>
+            <Text style={{color,fontSize:20,fontWeight:'700'}}>{latest!=null?latest.toFixed(dec):'—'}{' '}<Text style={{color:C.sub,fontSize:11}}>{unit}</Text></Text>
           </View>
           <Text style={{color:C.muted,fontSize:11}}>{personName}'s avg {mean.toFixed(dec)}</Text>
         </View>
@@ -2472,18 +2464,6 @@ function PersonDetailScreen({
     const wk=trends.filter(t=>t.date>=cut);
     const watchAll=[...(watchHistory??[])].sort((a,b)=>a.date<b.date?-1:1);
     const watchWk=watchAll.filter(r=>r.date>=cut&&(r.step_count!=null||r.resting_hr!=null||r.hrv_sdnn!=null||r.sleep_hours!=null));
-    const stat=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>{
-      const b=baseline?.baseline?.[k];
-      if(b)return {mean:b.mean,std:b.std,src:'baseline'};
-      const v=trends.map(t=>t[k]).filter(x=>x!=null) as number[];
-      if(v.length<3)return null;
-      const m=v.reduce((a,b2)=>a+b2,0)/v.length;
-      return {mean:m,std:Math.sqrt(v.reduce((a,b2)=>a+(b2-m)**2,0)/v.length),src:'sofar'};
-    };
-    const rows:[string,'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry',string,number][]=[
-      ['Walking Speed','avg_speed','m/s',2],['Cadence','avg_cadence','spm',0],
-      ['Posture Score','avg_posture','/100',0],['Gait Asymmetry','avg_asymmetry','%',1]];
-    const latest=(k:'avg_speed'|'avg_cadence'|'avg_posture'|'avg_asymmetry')=>{const v=trends.map(t=>t[k]).filter(x=>x!=null) as number[];return v.length?v[v.length-1]:null;};
     return(
       <View>
         {view==='week'&&<View style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:16,padding:16}}>
@@ -2552,10 +2532,10 @@ function PersonDetailScreen({
         <StatusBar barStyle="light-content"/>
         <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:20,paddingTop:12,paddingBottom:8}}>
           <View>
-            <Text style={{color:C.text,fontSize:28,fontWeight:'800'}}>{personName}</Text>
+            <Text style={{color:C.text,fontSize:28,fontWeight:'700'}}>{personName}</Text>
             <Text style={{color:C.sub,fontSize:13,marginTop:2}}>Individual trend history</Text>
           </View>
-          <TouchableOpacity onPress={onClose} style={{backgroundColor:C.card,borderRadius:18,width:36,height:36,alignItems:'center',justifyContent:'center'}}>
+          <TouchableOpacity onPress={onClose} style={{backgroundColor:C.card,borderRadius:20,width:36,height:36,alignItems:'center',justifyContent:'center'}}>
             <Text style={{color:C.text,fontSize:16}}>Close</Text>
           </TouchableOpacity>
         </View>
@@ -2756,7 +2736,7 @@ function PersonAvatar({personId,name,serverUrl,size=44,isResident=false}:
   const ini = initialsOf(name);
   return (
     <View style={{width:size,height:size,borderRadius:size/2,backgroundColor:tint+'26',alignItems:'center',justifyContent:'center',borderWidth:2,borderColor:tint+'66'}}>
-      <Text style={{color:tint,fontWeight:'800',fontSize:Math.round(size*(ini.length>1?0.36:0.42)),letterSpacing:0.5}}>{ini}</Text>
+      <Text style={{color:tint,fontWeight:'700',fontSize:Math.round(size*(ini.length>1?0.36:0.42)),letterSpacing:0.5}}>{ini}</Text>
     </View>
   );
 }
@@ -2784,7 +2764,7 @@ function PersonChips({people,selectedId,onPick,serverUrl,allLabel}:
             <PersonAvatar personId={p.id} name={p.name} serverUrl={serverUrl} size={34} isResident={!!p.is_resident}/>
             <View>
               <Text style={{color:C.text,fontWeight:'700',fontSize:13}} numberOfLines={1}>{p.name}</Text>
-              <Text style={{color:C.muted,fontSize:10}}>{p.is_resident?'Resident':'Visitor'}</Text>
+              <Text style={{color:C.muted,fontSize:11}}>{p.is_resident?'Resident':'Visitor'}</Text>
             </View>
           </TouchableOpacity>
         );
@@ -2931,7 +2911,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>}>
 
       <View style={{paddingHorizontal:20,paddingTop:20,paddingBottom:12}}>
-        <Text style={{color:C.text,fontSize:34,fontWeight:'800'}}>AI Insights</Text>
+        <Text style={{color:C.text,fontSize:34,fontWeight:'700'}}>AI Insights</Text>
         <Text style={{color:C.sub,fontSize:14,marginTop:2}}>
           Measured against each resident's own baseline
         </Text>
@@ -3001,7 +2981,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                 <View style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:16,padding:16,flexDirection:'row'}}>
                   {[['ATTENTION',attention,C.red],['WATCH',watch,C.orange],['NORMAL',normal,C.green]].map(([l,n,c])=>(
                     <View key={l as string} style={{flex:1,alignItems:'center'}}>
-                      <Text style={{color:c as string,fontSize:28,fontWeight:'800'}}>{String(n)}</Text>
+                      <Text style={{color:c as string,fontSize:28,fontWeight:'700'}}>{String(n)}</Text>
                       <Text style={{color:C.sub,fontSize:11,marginTop:2}}>{l as string}</Text>
                     </View>
                   ))}
@@ -3017,13 +2997,13 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                         <Text style={{color:C.text,fontSize:15,fontWeight:'700',flex:1,marginRight:8}}>{it.label}</Text>
                         <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
                                       paddingHorizontal:8,paddingVertical:3,borderRadius:8}}>
-                          <Text style={{color:col,fontSize:10,fontWeight:'800',letterSpacing:0.5}}>
+                          <Text style={{color:col,fontSize:11,fontWeight:'700',letterSpacing:0.5}}>
                             {sevLabel(it.severity)}
                           </Text>
                         </View>
                       </View>
 
-                      <Text style={{color:C.text,fontSize:28,fontWeight:'800',marginTop:8,
+                      <Text style={{color:C.text,fontSize:28,fontWeight:'700',marginTop:8,
                                     fontVariant:['tabular-nums']}}>
                         {fmtMetric(it.metric,it.current)}<Text style={{color:C.sub,fontSize:15,fontWeight:'600'}}> {it.unit}</Text>
                       </Text>
@@ -3102,7 +3082,7 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
 
           <View style={{flexDirection:'row',justifyContent:'space-between',marginTop:6}}>
             {['12a','6a','12p','6p','11p'].map(l=>(
-              <Text key={l} style={{color:C.muted,fontSize:10}}>{l}</Text>
+              <Text key={l} style={{color:C.muted,fontSize:11}}>{l}</Text>
             ))}
           </View>
 
@@ -3188,8 +3168,8 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                   </Text>
                   {it.severity!=='normal'&&(
                     <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
-                                  paddingHorizontal:8,paddingVertical:2,borderRadius:7}}>
-                      <Text style={{color:col,fontSize:9,fontWeight:'800',letterSpacing:0.5}}>
+                                  paddingHorizontal:8,paddingVertical:2,borderRadius:8}}>
+                      <Text style={{color:col,fontSize:11,fontWeight:'700',letterSpacing:0.5}}>
                         {it.severity==='attention'?'ATTENTION':'WATCH'}
                       </Text>
                     </View>
@@ -3245,8 +3225,8 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
                   </Text>
                   {s.severity!=='normal'&&(
                     <View style={{backgroundColor:col+'22',borderColor:col+'55',borderWidth:1,
-                                  paddingHorizontal:8,paddingVertical:2,borderRadius:7}}>
-                      <Text style={{color:col,fontSize:9,fontWeight:'800',letterSpacing:0.5}}>
+                                  paddingHorizontal:8,paddingVertical:2,borderRadius:8}}>
+                      <Text style={{color:col,fontSize:11,fontWeight:'700',letterSpacing:0.5}}>
                         {s.severity==='attention'?'ATTENTION':'WATCH'}
                       </Text>
                     </View>
@@ -3299,19 +3279,19 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
             <Text style={{color:C.text,fontSize:15,fontWeight:'700'}}>Facial Cues</Text>
             <View style={{backgroundColor:C.blue+'22',borderColor:C.blue+'55',borderWidth:1,
                           paddingHorizontal:8,paddingVertical:3,borderRadius:8}}>
-              <Text style={{color:C.blue,fontSize:10,fontWeight:'800',letterSpacing:0.5}}>EXPERIMENTAL</Text>
+              <Text style={{color:C.blue,fontSize:11,fontWeight:'700',letterSpacing:0.5}}>EXPERIMENTAL</Text>
             </View>
           </View>
 
           <View style={{flexDirection:'row'}}>
             <View style={{flex:1}}>
-              <Text style={{color:C.text,fontSize:28,fontWeight:'800',fontVariant:['tabular-nums']}}>
+              <Text style={{color:C.text,fontSize:28,fontWeight:'700',fontVariant:['tabular-nums']}}>
                 {face.yawns_today ?? 0}
               </Text>
               <Text style={{color:C.sub,fontSize:12,marginTop:2}}>Yawns today</Text>
             </View>
             <View style={{flex:1}}>
-              <Text style={{color:C.text,fontSize:28,fontWeight:'800',fontVariant:['tabular-nums']}}>
+              <Text style={{color:C.text,fontSize:28,fontWeight:'700',fontVariant:['tabular-nums']}}>
                 {face.perclos_1h_avg!=null?`${Math.round(face.perclos_1h_avg*100)}%`:'--'}
               </Text>
               <Text style={{color:C.sub,fontSize:12,marginTop:2}}>Eyes closed, last hour</Text>
@@ -3688,7 +3668,7 @@ function ZoneEditor({serverUrl,onClose}:{serverUrl:string;onClose:()=>void}){
   const box=(z:Zone,key:string,col:string,dashed=false)=>(
     <View key={key} pointerEvents="none" style={{position:'absolute',left:z.x1*W,top:z.y1*H,width:(z.x2-z.x1)*W,height:(z.y2-z.y1)*H,
       borderWidth:2,borderColor:col,borderStyle:dashed?'dashed':'solid',backgroundColor:col+'33',borderRadius:6}}>
-      {!!z.label&&<Text style={{color:'#fff',fontSize:11,fontWeight:'800',backgroundColor:col,alignSelf:'flex-start',paddingHorizontal:6,paddingVertical:2,borderBottomRightRadius:6}}>{z.label}</Text>}
+      {!!z.label&&<Text style={{color:'#fff',fontSize:11,fontWeight:'700',backgroundColor:col,alignSelf:'flex-start',paddingHorizontal:6,paddingVertical:2,borderBottomRightRadius:6}}>{z.label}</Text>}
     </View>
   );
   const save=async()=>{
@@ -3703,7 +3683,7 @@ function ZoneEditor({serverUrl,onClose}:{serverUrl:string;onClose:()=>void}){
   return(
     <SafeAreaView style={{flex:1,backgroundColor:C.bg}}>
       <View style={{flexDirection:'row',justifyContent:'space-between',alignItems:'center',paddingHorizontal:16,paddingVertical:12}}>
-        <Text style={{color:C.text,fontSize:17,fontWeight:'800'}}>Room setup</Text>
+        <Text style={{color:C.text,fontSize:17,fontWeight:'700'}}>Room setup</Text>
         <TouchableOpacity onPress={onClose} hitSlop={{top:10,bottom:10,left:10,right:10}}><Text style={{color:C.green,fontSize:16,fontWeight:'700'}}>Done</Text></TouchableOpacity>
       </View>
       <Text style={{color:C.sub,fontSize:14,lineHeight:20,marginHorizontal:16,marginBottom:12}}>
@@ -4565,10 +4545,10 @@ export default function App() {
                 <Text style={{color:C.muted,fontSize:13}}>No one in view</Text>
               </View>)}
             {/* REDESIGN_V1: a two-way switch instead of a sentence */}
-            <View style={{position:'absolute',top:10,left:10,flexDirection:'row',backgroundColor:'rgba(0,0,0,0.65)',borderRadius:9,padding:2}}>
+            <View style={{position:'absolute',top:10,left:10,flexDirection:'row',backgroundColor:'rgba(0,0,0,0.65)',borderRadius:10,padding:2}}>
               {([['Video',false],['Figures',true]] as const).map(([lbl,pv])=>(
                 <TouchableOpacity key={lbl} onPress={()=>{if(privacyView!==pv)togglePrivacyView();}}
-                  style={{paddingHorizontal:10,paddingVertical:4,borderRadius:7,backgroundColor:privacyView===pv?'rgba(255,255,255,0.22)':'transparent'}}>
+                  style={{paddingHorizontal:10,paddingVertical:4,borderRadius:8,backgroundColor:privacyView===pv?'rgba(255,255,255,0.22)':'transparent'}}>
                   <Text style={{color:'#fff',fontSize:11,fontWeight:privacyView===pv?'700':'500'}}>{lbl}</Text>
                 </TouchableOpacity>))}
             </View>
@@ -4605,13 +4585,12 @@ export default function App() {
   const watchOwnerOk=!!watchOwner&&namedPeople.some(p=>p.id===watchOwner);
   // WATCH_OWNER_V2: with nobody picked the page is about the resident, so only show the watch if it is theirs.
   const watchHere=demoMode||(watchOwnerOk?(selPid?selPid===watchOwner:watchOwner===residentPerson?.id):(!selPid&&namedPeople.length===0));
-  const hasWatchData=today?.step_count!=null||today?.resting_hr!=null||today?.hrv_sdnn!=null||today?.sleep_hours!=null;
   const renderToday=()=>(
     <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.green}/>} showsVerticalScrollIndicator={false}>
       <View style={s.pageHead}>
         <View style={{flexDirection:'row',alignItems:'center',gap:10,marginBottom:16}}>
           <Image source={{uri:'LaunchLogo'}} style={{width:30,height:30,borderRadius:8}}/>
-          <Text style={{color:C.text,fontSize:15,fontWeight:'800',letterSpacing:2.4}}>VIGIL</Text>
+          <Text style={{color:C.text,fontSize:15,fontWeight:'700',letterSpacing:2.4}}>VIGIL</Text>
         </View>
         <Text style={s.pageTitle}>Today</Text>
         <Text style={s.pageSub}>{new Date().toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})}</Text>
@@ -4662,7 +4641,7 @@ export default function App() {
           <View style={[s.card,{marginHorizontal:16,marginBottom:12,flexDirection:'row',alignItems:'center',gap:14}]}>
             <View style={{width:44,height:44,borderRadius:22,backgroundColor:tone+'22',alignItems:'center',justifyContent:'center'}}>
               {checking?<ActivityIndicator color={C.sub}/>:
-                <Animated.View style={{width:14,height:14,borderRadius:7,backgroundColor:tone,transform:[{scale:online&&!openFall?LIVE_PULSE:1}]}}/>}
+                <Animated.View style={{width:14,height:14,borderRadius:8,backgroundColor:tone,transform:[{scale:online&&!openFall?LIVE_PULSE:1}]}}/>}
             </View>
             <View style={{flex:1}}>
               <Text numberOfLines={1} style={{color:C.text,fontSize:18,fontWeight:'700',letterSpacing:-0.3}}>{head}</Text>
@@ -4684,7 +4663,7 @@ export default function App() {
         return (
           <View style={{marginHorizontal:16,marginBottom:12,backgroundColor:C.red+'1F',
                         borderRadius:16,padding:16,borderWidth:1,borderColor:C.red+'66'}}>
-            <Text style={{color:C.red,fontSize:12,fontWeight:'800',letterSpacing:0.6}}>
+            <Text style={{color:C.red,fontSize:12,fontWeight:'700',letterSpacing:0.6}}>
               FALL DETECTED · {timeAgo(a.detected_at).toUpperCase()}
             </Text>
             <Text style={{color:C.text,fontSize:20,fontWeight:'700',letterSpacing:-0.3,marginTop:6}}>
@@ -4696,7 +4675,7 @@ export default function App() {
             <TouchableOpacity onPress={()=>acknowledgeAlert(a.id)}
               style={{backgroundColor:C.red,borderRadius:12,paddingVertical:13,
                       alignItems:'center',marginTop:12}}>
-              <Text style={{color:'#fff',fontWeight:'800',fontSize:15}}>
+              <Text style={{color:'#fff',fontWeight:'700',fontSize:15}}>
                 {open.length>1?`I am checking on them (${open.length} open)`:'I am checking on them'}
               </Text>
             </TouchableOpacity>
@@ -4707,7 +4686,7 @@ export default function App() {
               if(!who)return null;
               return(<TouchableOpacity onPress={()=>Linking.openURL(`tel:${String(who.emergency_phone).replace(/[^0-9+]/g,'')}`)}
                 style={{borderRadius:12,paddingVertical:13,alignItems:'center',marginTop:8,borderWidth:1.5,borderColor:C.red}}>
-                <Text style={{color:C.red,fontWeight:'800',fontSize:15}}>Call {who.emergency_name||'emergency contact'}</Text>
+                <Text style={{color:C.red,fontWeight:'700',fontSize:15}}>Call {who.emergency_name||'emergency contact'}</Text>
               </TouchableOpacity>);
             })()}
           </View>
@@ -4743,7 +4722,7 @@ export default function App() {
           <TouchableOpacity onPress={enterDemo}
             style={{backgroundColor:C.green,borderRadius:12,paddingVertical:12,
                     alignItems:'center',marginTop:14}}>
-            <Text style={{color:'#000',fontWeight:'800',fontSize:15}}>Open Demo Mode</Text>
+            <Text style={{color:'#000',fontWeight:'700',fontSize:15}}>Open Demo Mode</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -4918,8 +4897,8 @@ export default function App() {
         <View style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16,borderWidth:1,borderColor:C.border}}>
           <View style={{flexDirection:'row',justifyContent:'space-between',marginBottom:8}}>
             <View>
-              <Text style={{color:C.sub,fontSize:12.5,fontWeight:'600',marginBottom:2}}>{label}</Text>
-              <Text style={{color,fontSize:22,fontWeight:'800'}}>{latest!=null?latest.toFixed(dec):'—'}<Text style={{color:C.sub,fontSize:12}}> {unit}</Text></Text>
+              <Text style={{color:C.sub,fontSize:13,fontWeight:'600',marginBottom:2}}>{label}</Text>
+              <Text style={{color,fontSize:22,fontWeight:'700'}}>{latest!=null?latest.toFixed(dec):'—'}<Text style={{color:C.sub,fontSize:12}}> {unit}</Text></Text>
             </View>
             <Text style={{color:C.muted,fontSize:11}}>avg {mean.toFixed(dec)}</Text>
           </View>
@@ -4932,8 +4911,8 @@ export default function App() {
                 const isAnom=std>0.001&&Math.abs(v-mean)>1.5*std;
                 return(
                   <View key={i} style={{flex:1,height:BAR+8,justifyContent:'flex-end',alignItems:'center'}}>
-                    {isAnom?<Text style={{fontSize:9,color:C.red,fontWeight:'800',marginBottom:1}}>!</Text>:<View style={{height:11}}/>}
-                    <View style={{width:'62%',height:h,backgroundColor:isAnom?C.red:weekDates[i]===todayStr?color:color+'8C',borderRadius:5}}/>
+                    {isAnom?<Text style={{fontSize:11,color:C.red,fontWeight:'700',marginBottom:1}}>!</Text>:<View style={{height:11}}/>}
+                    <View style={{width:'62%',height:h,backgroundColor:isAnom?C.red:weekDates[i]===todayStr?color:color+'8C',borderRadius:6}}/>
                   </View>
                 );
               })}
@@ -4943,7 +4922,7 @@ export default function App() {
           <View style={{flexDirection:'row',marginTop:4,gap:3}}>
             {weekDates.map((d,i)=>{
               const isToday=d===todayStr;const isFuture=d>todayStr;
-              return<Text key={i} style={{flex:1,textAlign:'center',fontSize:9,color:isToday?color:isFuture?C.muted+'40':C.muted,fontWeight:isToday?'700':'400'}}>{DAY[new Date(d+'T12:00:00').getDay()]}</Text>;
+              return<Text key={i} style={{flex:1,textAlign:'center',fontSize:11,color:isToday?color:isFuture?C.muted+'40':C.muted,fontWeight:isToday?'700':'400'}}>{DAY[new Date(d+'T12:00:00').getDay()]}</Text>;
             })}
           </View>
         </View>
@@ -4992,7 +4971,7 @@ export default function App() {
         <View style={{flexDirection:'row',marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:12,padding:4}}>
           {([['week','Last 7 days'],['baseline','Normal range']] as const).map(([key,lbl])=>(
             <TouchableOpacity key={key} onPress={()=>setTrendView(key)}
-              style={{flex:1,paddingVertical:9,borderRadius:9,alignItems:'center',
+              style={{flex:1,paddingVertical:9,borderRadius:10,alignItems:'center',
                       backgroundColor:trendView===key?C.green:'transparent'}}>
               <Text style={{color:trendView===key?'#000':C.sub,fontWeight:'700',fontSize:13}}>{lbl}</Text>
             </TouchableOpacity>
@@ -5044,16 +5023,16 @@ export default function App() {
             <Text style={s.secHeader}>Daily Log</Text>
             <View style={{marginHorizontal:16,backgroundColor:C.card,borderRadius:16,overflow:'hidden',marginBottom:16}}>
               <View style={{flexDirection:'row',paddingHorizontal:12,paddingVertical:10,borderBottomWidth:1,borderBottomColor:C.border}}>
-                {['Date','Active','Still','Speed','Posture','Flag'].map(h=><Text key={h} style={{flex:1,color:C.muted,fontSize:9,fontWeight:'700',textTransform:'uppercase'}}>{h}</Text>)}
+                {['Date','Active','Still','Speed','Posture','Flag'].map(h=><Text key={h} style={{flex:1,color:C.muted,fontSize:11,fontWeight:'700',textTransform:'uppercase'}}>{h}</Text>)}
               </View>
               {history.slice(0,14).map(row=>(
                 <View key={row.date} style={{flexDirection:'row',paddingHorizontal:12,paddingVertical:10,borderBottomWidth:1,borderBottomColor:C.fill,backgroundColor:row.anomaly_flag?'#1a0800':'transparent'}}>
-                  <Text style={{flex:1,color:C.sub,fontSize:10}}>{row.date?.slice(5)}</Text>
-                  <Text style={{flex:1,color:C.sub,fontSize:10}}>{fmt(row.active_minutes,0)}m</Text>
-                  <Text style={{flex:1,color:C.sub,fontSize:10}}>{fmt(row.still_minutes,0)}m</Text>
-                  <Text style={{flex:1,color:C.sub,fontSize:10}}>{fmt(row.camera_gait_speed_ms,2)}</Text>
-                  <Text style={{flex:1,color:C.sub,fontSize:10}}>{fmt(row.posture_score,0)}</Text>
-                  <Text style={{flex:1,color:row.anomaly_flag?C.orange:C.green,fontSize:10,fontWeight:'600'}}>{row.anomaly_flag?'Alert':'OK'}</Text>
+                  <Text style={{flex:1,color:C.sub,fontSize:11}}>{row.date?.slice(5)}</Text>
+                  <Text style={{flex:1,color:C.sub,fontSize:11}}>{fmt(row.active_minutes,0)}m</Text>
+                  <Text style={{flex:1,color:C.sub,fontSize:11}}>{fmt(row.still_minutes,0)}m</Text>
+                  <Text style={{flex:1,color:C.sub,fontSize:11}}>{fmt(row.camera_gait_speed_ms,2)}</Text>
+                  <Text style={{flex:1,color:C.sub,fontSize:11}}>{fmt(row.posture_score,0)}</Text>
+                  <Text style={{flex:1,color:row.anomaly_flag?C.orange:C.green,fontSize:11,fontWeight:'600'}}>{row.anomaly_flag?'Alert':'OK'}</Text>
                 </View>
               ))}
             </View>
@@ -5115,10 +5094,10 @@ export default function App() {
           : 'HEALTH SIGNAL';
         const isExp=expandedAlert===a.id;
         return(
-          <View key={a.id} style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:18,padding:16,borderWidth:1,borderColor:!a.seen&&a.alert_type==='fall'?C.red+'66':C.border,opacity:a.seen?0.82:1}}>
+          <View key={a.id} style={{marginHorizontal:16,marginBottom:10,backgroundColor:C.card,borderRadius:20,padding:16,borderWidth:1,borderColor:!a.seen&&a.alert_type==='fall'?C.red+'66':C.border,opacity:a.seen?0.82:1}}>
             {/* REDESIGN_V1: title + time on one line, plain text, real buttons */}
             <View style={{flexDirection:'row',alignItems:'center',gap:10}}>
-              <View style={{width:10,height:10,borderRadius:5,backgroundColor:color}}/>
+              <View style={{width:10,height:10,borderRadius:6,backgroundColor:color}}/>
               <Text style={{color:C.text,fontSize:16,fontWeight:'700',flex:1}} numberOfLines={1}>
                 {badge.charAt(0)+badge.slice(1).toLowerCase()}
               </Text>
@@ -5187,7 +5166,7 @@ export default function App() {
 
   const renderResidentTab=()=>{
     const unitBtn=(u:'us'|'metric',label:string)=>(
-      <TouchableOpacity onPress={()=>switchUnits(u)} style={{flex:1,paddingVertical:9,borderRadius:9,alignItems:'center',backgroundColor:pUnits===u?C.green+'22':'transparent',borderWidth:1,borderColor:pUnits===u?C.green:C.border}}>
+      <TouchableOpacity onPress={()=>switchUnits(u)} style={{flex:1,paddingVertical:9,borderRadius:10,alignItems:'center',backgroundColor:pUnits===u?C.green+'22':'transparent',borderWidth:1,borderColor:pUnits===u?C.green:C.border}}>
         <Text style={{color:pUnits===u?C.green:C.sub,fontWeight:'700',fontSize:13}}>{label}</Text></TouchableOpacity>);
     const owner=namedPeopleAll.find(p=>p.id===watchOwner);
     return(
@@ -5261,7 +5240,7 @@ export default function App() {
           {cloud.sites.map(site=>(
             <TouchableOpacity key={site.id} onPress={()=>switchSite(site.id)}
               style={{flexDirection:'row',alignItems:'center',paddingVertical:12,borderTopWidth:1,borderTopColor:C.hair}}>
-              <View style={{width:9,height:9,borderRadius:5,marginRight:10,backgroundColor:site.online===false?C.red:site.online?C.green:C.sub}}/>
+              <View style={{width:9,height:9,borderRadius:6,marginRight:10,backgroundColor:site.online===false?C.red:site.online?C.green:C.sub}}/>
               <View style={{flex:1}}>
                 <Text style={{color:C.text,fontSize:15,fontWeight:site.id===cloud.siteId?'700':'400'}}>{site.name}</Text>
                 {!!site.home&&site.home!==site.name&&<Text style={{color:C.muted,fontSize:12}}>{site.home}</Text>}
@@ -5507,7 +5486,7 @@ export default function App() {
           <View style={{padding:12}}>
             <ScrollView style={{maxHeight:280,backgroundColor:'#000',borderRadius:8,padding:8}} nestedScrollEnabled>
               {debugLog.length===0?<Text style={{color:C.muted,fontSize:11}}>No log entries.</Text>:debugLog.map((e,i)=>(
-                <Text key={i} style={{fontSize:10,fontFamily:'Courier New',lineHeight:16,color:e.level==='ERROR'?C.red:e.level==='WARN'?C.orange:e.level==='OK'?C.green:C.sub}}>{e.ts}  [{e.level}]  {e.msg}</Text>
+                <Text key={i} style={{fontSize:11,fontFamily:'Courier New',lineHeight:16,color:e.level==='ERROR'?C.red:e.level==='WARN'?C.orange:e.level==='OK'?C.green:C.sub}}>{e.ts}  [{e.level}]  {e.msg}</Text>
               ))}
             </ScrollView>
             <TouchableOpacity style={[s.btnSecondary,{marginTop:8}]} onPress={()=>setDebugLog([])}><Text style={s.btnSecondaryTxt}>Clear Logs</Text></TouchableOpacity>
@@ -5551,7 +5530,7 @@ export default function App() {
     return(
       <View style={{flex:1,backgroundColor:C.bg,alignItems:'center',justifyContent:'center'}}>
         <StatusBar barStyle="light-content"/>
-        <Text style={{color:C.green,fontSize:42,fontWeight:'800',letterSpacing:4}}>VIGIL</Text>
+        <Text style={{color:C.green,fontSize:42,fontWeight:'700',letterSpacing:4}}>VIGIL</Text>
         <Text style={{color:C.muted,fontSize:13,marginTop:8,letterSpacing:2}}>HEALTH MONITOR</Text>
         <ActivityIndicator color={C.green} style={{marginTop:32}}/>
       </View>
@@ -5602,7 +5581,7 @@ export default function App() {
         <TouchableOpacity activeOpacity={1} onPress={()=>setSwitcher(false)} style={{flex:1,backgroundColor:'rgba(0,0,0,0.55)',justifyContent:'flex-end'}}>
           <TouchableOpacity activeOpacity={1} style={{backgroundColor:C.card,borderTopLeftRadius:22,borderTopRightRadius:22,paddingBottom:34,paddingTop:10,maxHeight:'80%'}}>
             <View style={{width:40,height:5,borderRadius:3,backgroundColor:C.fill,alignSelf:'center',marginBottom:12}}/>
-            <Text style={{color:C.text,fontSize:20,fontWeight:'800',paddingHorizontal:20,marginBottom:6}}>Cameras</Text>
+            <Text style={{color:C.text,fontSize:20,fontWeight:'700',paddingHorizontal:20,marginBottom:6}}>Cameras</Text>
             <ScrollView>
               {cloud&&(()=>{
                 const groups:Record<string,CloudSite[]>={};
@@ -5613,7 +5592,7 @@ export default function App() {
                     {groups[h].map(x=>{const on=x.id===cloud.siteId;return(
                       <TouchableOpacity key={x.id} onPress={()=>{setSwitcher(false);if(!on)switchSite(x.id);}}
                         style={{flexDirection:'row',alignItems:'center',paddingHorizontal:20,paddingVertical:14,backgroundColor:on?C.green+'14':'transparent'}}>
-                        <View style={{width:10,height:10,borderRadius:5,marginRight:14,backgroundColor:x.online===false?C.red:x.online?C.green:C.sub}}/>
+                        <View style={{width:10,height:10,borderRadius:6,marginRight:14,backgroundColor:x.online===false?C.red:x.online?C.green:C.sub}}/>
                         <View style={{flex:1}}>
                           <Text style={{color:C.text,fontSize:17,fontWeight:on?'700':'500'}}>{x.name}</Text>
                           <Text style={{color:x.online===false?C.red:C.muted,fontSize:12,marginTop:2}}>{x.online===false?'Offline: check the camera and box are plugged in':x.online?'Watching':'Connecting...'}</Text>
@@ -5661,7 +5640,7 @@ export default function App() {
         <View style={{flex:1,backgroundColor:'rgba(0,0,0,0.85)',justifyContent:'flex-end'}}>
           <View style={{backgroundColor:C.card,borderTopLeftRadius:24,borderTopRightRadius:24,padding:24,paddingBottom:44}}>
             <View style={s.sheetHandle}/>
-            <Text style={{color:C.text,fontSize:20,fontWeight:'800',marginBottom:4}}>Fall replay</Text>
+            <Text style={{color:C.text,fontSize:20,fontWeight:'700',marginBottom:4}}>Fall replay</Text>
             <Text style={{color:C.sub,fontSize:13,lineHeight:19,marginBottom:14}}>
               {demoMode?'Sample data. ':''}The 30 seconds before the alert, as a stick figure. VIGIL never stores video.
             </Text>
@@ -5685,7 +5664,7 @@ export default function App() {
               <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive"
                 contentContainerStyle={{padding:24,paddingBottom:40}} showsVerticalScrollIndicator={false}>
                 <View style={s.sheetHandle}/>
-                <Text style={{color:C.text,fontSize:22,fontWeight:'800',marginBottom:6}}>New person detected</Text>
+                <Text style={{color:C.text,fontSize:22,fontWeight:'700',marginBottom:6}}>New person detected</Text>
                 <Text style={{color:C.sub,fontSize:14,lineHeight:20,marginBottom:18}}>
                   Who is this? Naming them once is enough; VIGIL will not ask about them again.
                 </Text>
@@ -5712,7 +5691,7 @@ export default function App() {
                       <TouchableOpacity onPress={()=>save()} disabled={newPersonName.trim().length===0&&!nameRef.current.trim()}
                         style={{backgroundColor:C.green,borderRadius:12,paddingVertical:14,alignItems:'center',marginTop:14,
                                 opacity:newPersonName.trim().length>0?1:0.45}}>
-                        <Text style={{color:'#000',fontWeight:'800',fontSize:15}}>Save name</Text>
+                        <Text style={{color:'#000',fontWeight:'700',fontSize:15}}>Save name</Text>
                       </TouchableOpacity>
                       {known.length>0&&(
                         <View style={{marginTop:18}}>
@@ -5827,38 +5806,32 @@ export default function App() {
 const s=StyleSheet.create({
   root:         {flex:1,backgroundColor:C.bg},
   pageHead:     {paddingHorizontal:20,paddingTop:20,paddingBottom:12},
-  pageTitle:    {color:C.text,fontSize:36,fontWeight:'800',letterSpacing:-1.1},
+  pageTitle:    {color:C.text,fontSize:34,fontWeight:'700',letterSpacing:0.3},
   pageSub:      {color:C.sub,fontSize:15,marginTop:4},
-  secHeader:    {color:C.text,fontSize:21,fontWeight:'800',letterSpacing:-0.5,marginLeft:20,marginTop:30,marginBottom:12},
-  pillRow:      {flexDirection:'row',paddingHorizontal:16,gap:8,marginBottom:4,flexWrap:'wrap'},
-  pill:         {flexDirection:'row',alignItems:'center',backgroundColor:'rgba(50,215,75,0.07)',borderRadius:100,paddingHorizontal:12,paddingVertical:7,gap:7,borderWidth:1,borderColor:'rgba(50,215,75,0.22)'},
-  pillDot:      {width:7,height:7,borderRadius:4},
-  pillTxt:      {color:'#CFEFD6',fontSize:12.5,fontWeight:'700'},
+  secHeader:    {color:C.text,fontSize:22,fontWeight:'700',letterSpacing:0.2,marginLeft:20,marginTop:32,marginBottom:12},
   card:         {backgroundColor:C.card,borderRadius:20,padding:18,borderWidth:1,borderColor:C.border},
   grid:         {flexDirection:'row',flexWrap:'wrap',paddingHorizontal:12,gap:10},
   metCard:      {width:(SW-44)/2,backgroundColor:C.card,borderRadius:20,padding:16,borderWidth:1,borderColor:C.border},
   metTop:       {flexDirection:'row',alignItems:'center',gap:6,marginBottom:10},
   metDot:       {width:7,height:7,borderRadius:4},
-  metLbl:       {color:C.sub,fontSize:12.5,fontWeight:'600'},
-  metVal:       {color:C.text,fontSize:28,fontWeight:'800',letterSpacing:-0.8,fontVariant:['tabular-nums']},
+  metLbl:       {color:C.sub,fontSize:13,fontWeight:'600'},
+  metVal:       {color:C.text,fontSize:28,fontWeight:'700',letterSpacing:-0.8,fontVariant:['tabular-nums']},
   metUnit:      {color:C.sub,fontSize:11,marginTop:3},
   warnChip:     {alignSelf:'flex-start',marginTop:8,backgroundColor:'rgba(255,69,58,0.14)',borderRadius:100,paddingHorizontal:8,paddingVertical:3},
-  warnChipTxt:  {color:C.red,fontSize:9,fontWeight:'700',letterSpacing:0.4},
+  warnChipTxt:  {color:C.red,fontSize:11,fontWeight:'700',letterSpacing:0.4},
   empty:        {alignItems:'center',paddingVertical:56,paddingHorizontal:32},
   emptyGlyph:   {width:64,height:64,borderRadius:20,backgroundColor:'rgba(50,215,75,0.12)',alignItems:'center',justifyContent:'center',marginBottom:16},
-  emptyGlyphTxt:{color:C.green,fontSize:24,fontWeight:'800'},
+  emptyGlyphTxt:{color:C.green,fontSize:22,fontWeight:'700'},
   emptyTxt:     {color:C.text,fontSize:16,fontWeight:'600'},
   emptySub:     {color:C.muted,fontSize:13,textAlign:'center',marginTop:5,lineHeight:19},
   settGrp:      {marginHorizontal:16,backgroundColor:C.card,borderRadius:20,overflow:'hidden',borderWidth:1,borderColor:C.border},
   btnPrimary:   {backgroundColor:C.green,borderRadius:100,paddingVertical:16,paddingHorizontal:20,alignItems:'center'},
-  btnPrimaryTxt:{color:'#04140A',fontSize:16,fontWeight:'800'},
+  btnPrimaryTxt:{color:'#04140A',fontSize:16,fontWeight:'700'},
   btnSecondary: {backgroundColor:'rgba(255,255,255,0.04)',borderRadius:100,paddingVertical:14,paddingHorizontal:20,alignItems:'center',borderWidth:1,borderColor:C.border},
   btnSecondaryTxt:{color:C.text,fontSize:14,fontWeight:'600'},
   tabBar:       {flexDirection:'row',backgroundColor:'#070B09',borderTopWidth:1,borderTopColor:C.hair,paddingBottom:22,paddingTop:10},
   tabIndicator: {position:'absolute',top:-10,alignSelf:'center',width:28,height:3,borderRadius:2,backgroundColor:C.green,opacity:0},
-  badge:        {position:'absolute',top:-3,right:-8,backgroundColor:C.red,borderRadius:7,minWidth:15,height:15,alignItems:'center',justifyContent:'center',paddingHorizontal:3,borderWidth:1.5,borderColor:'#070B09'},
-  badgeTxt:     {color:'#fff',fontSize:9,fontWeight:'800'},
-  avatar:       {width:44,height:44,borderRadius:22,backgroundColor:C.fill,alignItems:'center',justifyContent:'center',borderWidth:1,borderColor:C.border},
-  avatarTxt:    {color:C.green,fontSize:18,fontWeight:'800'},
+  badge:        {position:'absolute',top:-3,right:-8,backgroundColor:C.red,borderRadius:8,minWidth:15,height:15,alignItems:'center',justifyContent:'center',paddingHorizontal:3,borderWidth:1.5,borderColor:'#070B09'},
+  badgeTxt:     {color:'#fff',fontSize:11,fontWeight:'700'},
   sheetHandle:  {alignSelf:'center',width:40,height:4,borderRadius:2,backgroundColor:C.fill,marginBottom:16},
 });
