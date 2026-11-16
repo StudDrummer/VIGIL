@@ -4544,7 +4544,7 @@ export default function App() {
     const w=fullSize?SW-32:CAM_W;
     const h=fullSize?Math.round((SW-32)*9/16):CAM_H;
     return(
-      <View style={jetsonOk===true&&cameraFrame?{borderRadius:20,shadowColor:C.green,shadowOpacity:0.15,shadowRadius:16,shadowOffset:{width:0,height:0}}:undefined}>
+      <View>
       <View style={{width:w,height:h,borderRadius:20,overflow:'hidden',borderWidth:1.5,borderColor:camBorder,backgroundColor:C.card}}>
         {cameraFrame?(
           <>
@@ -4558,13 +4558,20 @@ export default function App() {
             <TouchableOpacity
               style={{position:'absolute',bottom:10,right:10,backgroundColor:'rgba(0,0,0,0.65)',borderRadius:8,paddingHorizontal:10,paddingVertical:5}}
               onPress={()=>setFullscreen(true)}>
-              <Text style={{color:'#fff',fontSize:11,fontWeight:'600'}}>Full Screen</Text>
+              <Text style={{color:'#fff',fontSize:11,fontWeight:'600'}}>Expand</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={{position:'absolute',top:10,left:10,backgroundColor:'rgba(0,0,0,0.65)',borderRadius:8,paddingHorizontal:10,paddingVertical:5}}
-              onPress={togglePrivacyView}>
-              <Text style={{color:'#fff',fontSize:11,fontWeight:'600'}}>{privacyView?'Stick figures (tap for video)':'Video (tap for stick figures)'}</Text>
-            </TouchableOpacity>
+            {privacyView&&!someoneInView&&(
+              <View pointerEvents="none" style={{position:'absolute',left:0,right:0,top:0,bottom:0,alignItems:'center',justifyContent:'center'}}>
+                <Text style={{color:C.muted,fontSize:13}}>No one in view</Text>
+              </View>)}
+            {/* REDESIGN_V1: a two-way switch instead of a sentence */}
+            <View style={{position:'absolute',top:10,left:10,flexDirection:'row',backgroundColor:'rgba(0,0,0,0.65)',borderRadius:9,padding:2}}>
+              {([['Video',false],['Figures',true]] as const).map(([lbl,pv])=>(
+                <TouchableOpacity key={lbl} onPress={()=>{if(privacyView!==pv)togglePrivacyView();}}
+                  style={{paddingHorizontal:10,paddingVertical:4,borderRadius:7,backgroundColor:privacyView===pv?'rgba(255,255,255,0.22)':'transparent'}}>
+                  <Text style={{color:'#fff',fontSize:11,fontWeight:privacyView===pv?'700':'500'}}>{lbl}</Text>
+                </TouchableOpacity>))}
+            </View>
           </>
         ):(
           <View style={{flex:1,alignItems:'center',justifyContent:'center',gap:6}}>
@@ -4642,8 +4649,9 @@ export default function App() {
       {/* REDESIGN_V1: one status card answers "is everything OK?" at a glance */}
       {(()=>{
         const cs=cloud?cloud.sites.find(x=>x.id===cloud.siteId):null;
-        const online=demoMode||(cloud?(cs?.online!==false&&(jetsonOk===true||!!cs?.online||!!cameraStatus?.online)):!!cameraStatus?.online);
-        const checking=!demoMode&&!online&&(cloud?cs?.online==null&&jetsonOk==null:jetsonOk==null);
+        // a frame arriving is proof the camera is up; no status yet means still checking, not offline
+        const online=demoMode||!!cameraFrame||(cloud?(cs?.online!==false&&(jetsonOk===true||!!cs?.online||!!cameraStatus?.online)):!!cameraStatus?.online);
+        const checking=!demoMode&&!online&&(cloud?cs?.online==null&&jetsonOk!==false:(jetsonOk==null||(jetsonOk===true&&cameraStatus==null)));
         const openFall=alerts.some(a=>a.alert_type==='fall'&&!a.seen);
         if(openFall)return null;   // the fall card below is the status
         const tone=openFall?C.red:checking?C.sub:!online?C.red:C.green;
@@ -4814,14 +4822,14 @@ export default function App() {
 
       {/* Camera metrics */}
       <Text style={s.secHeader}>Walking</Text>
-      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Typical values today for {dayName||'the resident'} only, from times they walked. Speed is estimated from steps and height.</Text>
+      <Text style={{color:C.muted,fontSize:12,marginHorizontal:20,marginTop:-6,marginBottom:8,lineHeight:17}}>Today's typical values for {dayName||'the resident'}, from times they walked. Changes from their own normal show in AI Insights.</Text>
       <View style={s.grid}>
         {[
-          {label:'Speed (est.)',val:fmt(dayData?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:(dayData?.camera_gait_speed_ms??1)<0.8&&dayData?.camera_gait_speed_ms!=null},
-          {label:'Posture',val:fmt(dayData?.posture_score,0),unit:'/100',color:C.purple,warn:(dayData?.posture_score??100)<50&&dayData?.posture_score!=null},
-          {label:'Asymmetry',val:fmt(dayData?.camera_asymmetry_pct,1),unit:'%',color:C.orange,warn:(dayData?.camera_asymmetry_pct??0)>15},
-          {label:'Cadence',val:fmt(dayData?.camera_cadence_spm,0),unit:'spm',color:C.blue,warn:false},
-          {label:'Longest Still',val:fmt(dayData?.longest_stillness_min,0),unit:'min',color:C.orange,warn:(dayData?.longest_stillness_min??0)>90},
+          {label:'Speed (est.)',val:fmt(dayData?.camera_gait_speed_ms,2),unit:'m/s',color:C.green,warn:false},
+          {label:'Posture',val:fmt(dayData?.posture_score,0),unit:'/100',color:C.purple,warn:false},
+          {label:'Step evenness',val:fmt(dayData?.camera_asymmetry_pct,1),unit:'% uneven',color:C.orange,warn:false},
+          {label:'Cadence',val:fmt(dayData?.camera_cadence_spm,0),unit:'steps/min',color:C.blue,warn:false},
+          {label:'Longest still',val:fmt(dayData?.longest_stillness_min,0),unit:'min',color:C.orange,warn:false},
           {label:'Time in view',val:fmt(((dayData?.active_minutes??0)+(dayData?.still_minutes??0))/60||null,1),unit:'hours',color:C.teal,warn:false},
         ].map(m=>(
           <View key={m.label} style={s.metCard}>
