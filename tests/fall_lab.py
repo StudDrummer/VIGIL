@@ -83,7 +83,47 @@ def pack(results):
     print("\nPacked: %s  (send this file)" % out)
 
 
+def preflight():
+    """PREFLIGHT_V1: prove everything works before anyone falls on a mattress."""
+    ok = True
+    def line(good, msg):
+        nonlocal ok
+        ok = ok and good
+        print("  [%s] %s" % (" OK " if good else "FIX ", msg))
+    path, size = log_size()
+    line(bool(path), "camera log found (%s)" % (path or "none in %s" % BASE))
+    if path:
+        line(time.time() - os.path.getmtime(path) < 120, "camera log is being written (VIGIL camera is running)")
+    try:
+        d = json.load(open("/dev/shm/vigil_in_view.json"))
+        line(time.time() - float(d.get("t", 0)) < 5, "camera is analysing frames right now")
+    except Exception:
+        line(False, "camera is analysing frames right now (no /dev/shm/vigil_in_view.json)")
+    os.makedirs(PROBES, exist_ok=True)
+    name = "preflight_%d" % int(time.time())
+    with open(FLAG, "w") as f:
+        f.write(name)
+    target = os.path.join(PROBES, name + ".json")
+    for _ in range(8):
+        if os.path.exists(target):
+            break
+        time.sleep(0.5)
+    saved = os.path.exists(target)
+    line(saved, "recording a trial works (stand in view for this check)")
+    if saved:
+        j = json.load(open(target))
+        n = max((len(v) for v in (j.get("tracks") or {}).values()), default=0)
+        line(n > 0, "the recording has stick figures in it (%d frames)" % n)
+        line(bool(j.get("shape")), "the recording knows the picture size")
+        line(True, "bed and couch zones in the recording: %d" % len(j.get("zones") or []))
+        os.remove(target)
+    print("\nReady for the fall lab." if ok else "\nFix the items marked FIX first.")
+    return ok
+
+
 def main():
+    if "--check" in sys.argv:
+        sys.exit(0 if preflight() else 1)
     os.makedirs(PROBES, exist_ok=True)
     path, _ = log_size()
     if not path:

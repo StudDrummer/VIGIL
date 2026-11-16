@@ -79,7 +79,30 @@ def score(log, person, others):
     return {"right": round(right / n, 2), "wrong": round(wrong / n, 2), "unsure": round(unsure / n, 2), "first_s": first}
 
 
+def preflight():
+    """PREFLIGHT_V1"""
+    ok = True
+    try:
+        m = names()
+        print("  [ OK ] people VIGIL knows: %s" % (", ".join(sorted(set(m.values()))) or "none"))
+        if not m:
+            ok = False
+            print("  [FIX ] add everyone in the app first (Settings, Camera, Monitored People), then Introduce them")
+    except Exception as e:
+        ok = False
+        print("  [FIX ] cannot read %s/vigil.db: %s" % (BASE, e))
+    s = sample(names() if ok else {})
+    print("  [%s] camera is analysing frames right now" % (" OK " if s is not None else "FIX "))
+    ok = ok and s is not None
+    if s is not None:
+        print("  [ OK ] in view now: %s, unsure: %d" % (", ".join(s[0]) or "nobody named", s[1]))
+    print("\nReady for the recognition lab." if ok else "\nFix the items marked FIX first.")
+    return ok
+
+
 def main():
+    if "--check" in sys.argv:
+        sys.exit(0 if preflight() else 1)
     print(__doc__)
     idmap = names()
     print("People VIGIL knows: %s" % (", ".join(sorted(set(idmap.values()))) or "nobody yet"))
