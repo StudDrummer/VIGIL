@@ -2504,7 +2504,7 @@ function PersonDetailScreen({
             </View>
           ):(
             <>
-              <Text style={s.secHeader}>Gait & Posture — This Week</Text>
+              <Text style={s.secHeader}>Walking</Text>
               <PTrendBar data={wk.map(t=>t.avg_speed)} label="Walking Speed" unit="m/s" color={C.teal} dec={2}/>
               <PTrendBar data={wk.map(t=>t.avg_cadence)} label="Cadence" unit="spm" color={C.blue} dec={0}/>
               <PTrendBar data={wk.map(t=>t.avg_posture)} label="Posture Score" unit="/100" color={C.purple} dec={0}/>
@@ -2513,7 +2513,7 @@ function PersonDetailScreen({
           )}
           {watchWk.length>0&&(
             <>
-              <Text style={s.secHeader}>{personName}'s Apple Watch — This Week</Text>
+              <Text style={s.secHeader}>Apple Watch</Text>
               <PTrendBar data={watchWk.map(r=>r.step_count)} label="Steps" unit="steps" color={C.green} dec={0}/>
               <PTrendBar data={watchWk.map(r=>r.resting_hr)} label="Resting HR" unit="bpm" color={C.red} dec={0}/>
               <PTrendBar data={watchWk.map(r=>r.hrv_sdnn)} label="HRV" unit="ms" color={C.purple} dec={1}/>
@@ -3365,8 +3365,8 @@ function AIInsightsScreen({serverUrl,demoMode,people=[]}:{serverUrl:string;demoM
 const DEMO_RESIDENT = 'Margaret (Demo Resident)';
 
 function demoDate(back:number):string{
-  const d=new Date(); d.setDate(d.getDate()-back);
-  return d.toISOString().slice(0,10);
+  const d=new Date(); d.setHours(12,0,0,0); d.setDate(d.getDate()-back);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 function demoIso(hoursAgo:number):string{
   return new Date(Date.now()-hoursAgo*3600*1000).toISOString();
@@ -4884,10 +4884,11 @@ export default function App() {
   // TRENDS SCREEN
   // ─────────────────────────────────────────────
   const renderTrends=()=>{
-    const t2=new Date();
-    const sun=new Date(t2);sun.setDate(t2.getDate()-t2.getDay());sun.setHours(0,0,0,0);
-    const weekDates=Array.from({length:7},(_,i)=>{const d=new Date(sun);d.setDate(sun.getDate()+i);return d.toISOString().slice(0,10);});
-    const todayStr=new Date().toISOString().slice(0,10);
+    // REDESIGN_V1: the last 7 days ending today, in local dates (toISOString is UTC, which put
+    // "today" on tomorrow every evening in the US), like Apple Health.
+    const ld=(d:Date)=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    const weekDates=Array.from({length:7},(_,i)=>{const d=new Date();d.setHours(12,0,0,0);d.setDate(d.getDate()-6+i);return ld(d);});
+    const todayStr=ld(new Date());
     const byDate:Record<string,DailySummary>={};history.forEach(r=>{byDate[r.date]=r;});
     const week=(k:keyof DailySummary)=>weekDates.map(d=>{if(d>todayStr)return null;return(byDate[d]?.[k] as number|null)??null;});
     const DAY=['S','M','T','W','T','F','S'];
@@ -4902,11 +4903,11 @@ export default function App() {
       if(!valid.length)return null;
       const mean=valid.reduce((a,b)=>a+b,0)/valid.length;
       const std=valid.length>1?Math.sqrt(valid.reduce((a,b)=>a+(b-mean)**2,0)/valid.length):0;
-      const min=Math.min(...valid);const max=Math.max(...valid);const range=max-min||1;
+      const min=Math.min(0,...valid);const max=Math.max(...valid);const range=max-min||1;   // bars start at zero
       const latest=data.filter(v=>v!=null).slice(-1)[0];
       const BAR=48;const meanBot=Math.max(2,((mean-min)/range)*BAR);
       return(
-        <View style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16}}>
+        <View style={{marginHorizontal:16,marginBottom:10,padding:14,backgroundColor:C.card,borderRadius:16,borderWidth:1,borderColor:C.border}}>
           <View style={{flexDirection:'row',justifyContent:'space-between',marginBottom:8}}>
             <View>
               <Text style={{color:C.sub,fontSize:12.5,fontWeight:'600',marginBottom:2}}>{label}</Text>
@@ -4924,7 +4925,7 @@ export default function App() {
                 return(
                   <View key={i} style={{flex:1,height:BAR+8,justifyContent:'flex-end',alignItems:'center'}}>
                     {isAnom?<Text style={{fontSize:9,color:C.red,fontWeight:'800',marginBottom:1}}>!</Text>:<View style={{height:11}}/>}
-                    <View style={{width:'100%',height:h,backgroundColor:isAnom?C.red:color,borderRadius:3}}/>
+                    <View style={{width:'62%',height:h,backgroundColor:isAnom?C.red:weekDates[i]===todayStr?color:color+'8C',borderRadius:5}}/>
                   </View>
                 );
               })}
@@ -4981,7 +4982,7 @@ export default function App() {
             :`These charts are for everyone the camera sees. Name people in Introduce everyone to get each person's own trends.`}
         </Text>
         <View style={{flexDirection:'row',marginHorizontal:16,marginBottom:12,backgroundColor:C.card,borderRadius:12,padding:4}}>
-          {([['week','7-Day'],['baseline','Baseline']] as const).map(([key,lbl])=>(
+          {([['week','Last 7 days'],['baseline','Normal range']] as const).map(([key,lbl])=>(
             <TouchableOpacity key={key} onPress={()=>setTrendView(key)}
               style={{flex:1,paddingVertical:9,borderRadius:9,alignItems:'center',
                       backgroundColor:trendView===key?C.green:'transparent'}}>
@@ -5004,7 +5005,7 @@ export default function App() {
             serverUrl={urlRef.current} onClose={()=>setTrendPid(null)}/>
           {trendView==='week'&&history.some(r=>r.activity_level_pct!=null||r.active_minutes!=null)&&(
             <>
-              <Text style={s.secHeader}>Everyone at home — This Week</Text>
+              <Text style={s.secHeader}>Everyone at home</Text>
               <Text style={{color:C.muted,fontSize:12,lineHeight:17,marginHorizontal:16,marginTop:-4,marginBottom:8}}>Movement and stillness are measured for the whole room, not one person.</Text>
               <TrendBar data={week('activity_level_pct')} label="Activity Level" unit="%" color={C.green}/>
               <TrendBar data={week('active_minutes')} label="Active Minutes" unit="min" color={C.green}/>
@@ -5016,18 +5017,18 @@ export default function App() {
           <View style={s.empty}><View style={s.emptyGlyph}><Text style={s.emptyGlyphTxt}>…</Text></View><Text style={s.emptyTxt}>No trend data yet</Text><Text style={s.emptySub}>Data collects automatically each day</Text></View>
         ):(
           <>
-            <Text style={s.secHeader}>Activity — This Week</Text>
+            <Text style={s.secHeader}>Activity</Text>
             <TrendBar data={week('activity_level_pct')} label="Activity Level" unit="%" color={C.green}/>
             <TrendBar data={week('active_minutes')} label="Active Minutes" unit="min" color={C.green}/>
             <TrendBar data={week('longest_stillness_min')} label="Longest Stillness" unit="min" color={C.orange}/>
-            <Text style={s.secHeader}>Gait & Posture — This Week</Text>
+            <Text style={s.secHeader}>Walking</Text>
             <TrendBar data={week('camera_gait_speed_ms')} label="Walking Speed" unit="m/s" color={C.teal} dec={2}/>
             <TrendBar data={week('posture_score')} label="Posture Score" unit="/100" color={C.purple}/>
             <TrendBar data={week('camera_asymmetry_pct')} label="Gait Asymmetry" unit="%" color={C.orange} dec={1}/>
             <TrendBar data={week('stride_variability')} label="Step-Time Variation (lower is steadier)" unit="%" color={C.teal} dec={1}/>
             {watchIsResident&&history.some(r=>r.hrv_sdnn!=null)&&(
               <>
-                <Text style={s.secHeader}>{residentPerson?.name?`${residentPerson.name}'s Apple Watch`:'Apple Watch'} — This Week</Text>
+                <Text style={s.secHeader}>Apple Watch</Text>
                 <TrendBar data={week('hrv_sdnn')} label="HRV" unit="ms" color={C.purple} dec={1}/>
                 <TrendBar data={week('resting_hr')} label="Resting HR" unit="bpm" color={C.red}/>
               </>
