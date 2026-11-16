@@ -60,7 +60,8 @@ def falls_since(path, offset):
         return []
     with open(path, errors="replace") as f:
         f.seek(offset)
-        return [l.strip() for l in f if "[FALL]" in l]
+        # only real alert decisions: "[FALL] track=..." (LAB_FIX_V1: not "[FALL] 2 furniture zone(s) loaded")
+        return [l.strip() for l in f if l.startswith("[FALL] track=")]
 
 
 def countdown(s, msg):

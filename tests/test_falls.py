@@ -97,7 +97,7 @@ SAFETY -- read before starting:
         start = len(read_lines(LOG))
         countdown(window, "recording")
         new = read_lines(LOG)[start:]
-        falls = [ln for ln in new if "[FALL]" in ln]
+        falls = [ln for ln in new if "[FALL] track=" in ln]   # LAB_FIX_V1: not the "zones loaded" line
         results.append((name, should, len(falls), falls))
         verdict = ("detected %d" % len(falls)) if falls else "no alert"
         ok = (len(falls) > 0) == should

@@ -883,7 +883,7 @@ class FallDetector:
                 data = json.load(f)
             zones = [(float(z["x1"]), float(z["y1"]),
                       float(z["x2"]), float(z["y2"])) for z in data]
-            print("[FALL] %d furniture zone(s) loaded" % len(zones))
+            print("[ZONES] %d furniture zone(s) loaded" % len(zones))
             return zones
         except Exception:
             return []
