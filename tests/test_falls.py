@@ -17,7 +17,6 @@ The detector has a 30 s internal cooldown, so each scenario starts after
 a 35 s gap.
 """
 import os
-import re
 import subprocess
 import sys
 import time

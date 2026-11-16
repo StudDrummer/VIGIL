@@ -5,8 +5,8 @@
 [vigilhealth.me](https://vigilhealth.me) · hello@vigilhealth.me
 
 A camera-based system that watches for falls and tracks each resident's
-walking, posture and daily routine against their own personal baseline —
-no wearable, no cloud, nothing stored off the device.
+walking, posture and daily routine against their own personal baseline.
+Nothing to wear, nothing to press, and no video is ever recorded.
 
 ---
 
@@ -52,24 +52,34 @@ require the camera to be in the resident's own living space.
 
 ## How it works
 
+The same pipeline runs in one of two places.
+
 ```
-IP camera ──RTSP──► Jetson Orin Nano (~7-12 fps)
-                        │
-           YOLOv8n-pose, 17 keypoints
+In the room (Jetson)                     Through VIGIL Cloud (no Jetson in the home)
+
+IP camera ──RTSP──► Jetson Orin Nano     IP camera ──RTSP──► relay box (Raspberry Pi)
+                    (~7-12 fps)                                   │ SRT, encrypted
+                        │                                         ▼
+                        │                              cloud server, one container per camera
+                        └──────────────┬──────────────────────────┘
+                                       │
+           YOLOv8n-pose, 17 keypoints per person
            Gait: heel-strike peak detection, wall-clock intervals
            Falls: torso angle + standing-legs check + furniture zones
            Identity: ByteTrack + DINOv2 appearance fingerprints + memory
-                        │
-           Flask REST API ── SQLite (on device)
-                        │
-        ┌───────────────┴────────────────┐
-   iOS app                          push notifications
-   live view, metrics,              (SMS via Twilio once
-   trends, insights                 carrier approval completes)
+                                       │
+           Flask REST API ── SQLite (one database per camera)
+                                       │
+                         gateway: accounts, access, alerts
+                                       │
+              iOS app (live view, metrics, trends, insights)
+              push notifications (Apple Push) and alert emails
 ```
 
 A separate process handles facial cues in its own virtualenv, so its
-dependencies cannot disturb the main pipeline.
+dependencies cannot disturb the main pipeline. More detail is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [cloud/README.md](cloud/README.md)
+and [relay/README.md](relay/README.md).
 
 ---
 
@@ -173,22 +183,30 @@ and does not follow anyone.
 ## Repository
 
 ```
-ios-app/          React Native app (TypeScript)
+ios-app/          React Native app (TypeScript): App.tsx plus the native iOS modules
 jetson-backend/   camera pipeline, REST API, nightly analysis jobs
-tests/            validation harnesses used to produce the table above
+cloud/            VIGIL Cloud: gateway, per-camera containers, vigilctl.py, auto-update
+relay/            the Raspberry Pi relay box that sits next to a camera
+tools/            fall replay and simulation (fall_eval.py, fall_sim.py), ship.sh
+tests/            unit tests, live validation harnesses, labs (see tests/README.md)
 docs/             architecture notes
 ```
 
-The test harnesses are included deliberately. `test_falls.py`,
-`test_multiperson.py` and `test_end_to_end.py` are how the numbers above
-were produced and can be re-run to check them.
+`bash tests/run_all.sh` runs every test that needs no camera. The live
+harnesses are included deliberately: `test_falls.py`, `test_multiperson.py`
+and `test_end_to_end.py` are how the numbers above were produced and can be
+re-run to check them.
+
+Two branches matter: `main` is what runs in the developer's home, and
+`stable` is what deployed homes pull automatically. `tools/ship.sh` moves a
+tested `main` to `stable` and can undo it.
 
 ---
 
 ## Status
 
 Running continuously in the developer's home since late September 2026,
-tested on family members only. Free pilots are offered to assisted living
+tested on family members only. The iOS app is in TestFlight. Free pilots are offered to assisted living
 communities near Bellevue, WA. The iOS app includes a self-contained,
 clearly labelled demo mode.
 
@@ -202,7 +220,8 @@ clearly labelled demo mode.
 | [Meta DINOv2](https://github.com/facebookresearch/dinov2) ViT-S/14 via PyTorch | appearance fingerprints for telling people apart |
 | [Google MediaPipe](https://github.com/google-ai-edge/mediapipe) | eye and jaw openness (fatigue cues) |
 | OpenCV, NumPy, SciPy, scikit-learn | video capture, geometry, statistics, isolation forest |
-| Flask + SQLite | on-device REST API and database |
+| Flask + SQLite | REST API and database, one per camera |
+| MediaMTX, Caddy, Docker | video relay, HTTPS front door and per-camera containers in VIGIL Cloud |
 | React Native, TypeScript, react-native-svg, react-native-health | iOS app and Apple HealthKit |
 
 ## Use of AI

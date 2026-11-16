@@ -18,11 +18,10 @@ VIGIL Server.py v6 - Camera-First, Complete
 # Data retention: Per BAA with facility. Default: data retained while
 # monitoring is active. Deletion on facility request.
 # ─────────────────────────────────────────────────────────────────────────────
-from flask import Flask, request, jsonify, send_file, Response
-import sqlite3, os, json, math, shutil, tempfile
+from flask import Flask, request, jsonify, Response
+import sqlite3, os, math, shutil
 from datetime import datetime, timedelta
 from functools import wraps
-import base64
 import threading
 import hmac
 import time

@@ -8,7 +8,7 @@ import time
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 @dataclass
 class PersonSignature:

@@ -17,8 +17,6 @@ everything recorded so far is kept and packed.
 """
 import json
 import os
-import re
-import subprocess
 import sys
 import tarfile
 import time

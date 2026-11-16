@@ -2,7 +2,6 @@
 same view under brighter or dimmer light is not."""
 import json
 import os
-import shutil
 import sys
 import tempfile
 import types
