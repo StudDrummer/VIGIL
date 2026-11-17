@@ -102,6 +102,8 @@ def init_db():
         created REAL, last_ok REAL);
     CREATE TABLE IF NOT EXISTS site_names (
         site_id TEXT PRIMARY KEY, name TEXT, home TEXT);
+    CREATE TABLE IF NOT EXISTS site_prefs (
+        site_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (site_id, key));
     """)
     cols = {r[1] for r in c.execute("PRAGMA table_info(users)")}
     for col, typ in (("phone", "TEXT"), ("email_alerts", "INTEGER DEFAULT 1")):   # ACCOUNTS_V1
@@ -191,13 +193,41 @@ def _site_names():
         return {}
 
 
-def public_site(s, _names=None):
+PLANS = ("pilot", "trial", "active", "past_due", "cancelled")
+
+
+def _site_prefs(site_id=None):
+    """PRIVACY_LOCK_V1 / PLAN_V1: per-camera choices kept by the gateway.
+    video_locked: "1" means nobody is sent video from this camera, only stick figures.
+    plan / plan_until: what the home is on. Never used to switch monitoring off."""
+    try:
+        c = sqlite3.connect(DB_PATH, timeout=10)
+        rows = c.execute("SELECT site_id, key, value FROM site_prefs" + (" WHERE site_id=?" if site_id else ""),
+                         (site_id,) if site_id else ()).fetchall()
+        c.close()
+    except Exception:
+        return {}
+    out = {}
+    for sid, k, v in rows:
+        out.setdefault(sid, {})[k] = v
+    return out.get(site_id, {}) if site_id else out
+
+
+def _set_pref(site_id, key, value):
+    db().execute("INSERT OR REPLACE INTO site_prefs (site_id, key, value) VALUES (?,?,?)", (site_id, key, value))
+    db().commit()
+
+
+def public_site(s, _names=None, _prefs=None):
     st = _STATUS.get(s["id"], {})
     nm, hm = (_names if _names is not None else _site_names()).get(s["id"], (None, None))
+    pf = (_prefs if _prefs is not None else _site_prefs()).get(s["id"], {})
     return {"id": s["id"], "name": nm or s.get("name", s["id"]), "home": hm if hm is not None else s.get("home", ""),
             "room": s.get("room", ""), "timezone": s.get("timezone", ""),
             "ntfy_topic": s.get("ntfy_topic", ""), "online": st.get("online"),
-            "last_seen": st.get("last_seen"), "url_path": "/s/%s" % s["id"]}
+            "last_seen": st.get("last_seen"), "url_path": "/s/%s" % s["id"],
+            "video_locked": pf.get("video_locked") == "1",
+            "plan": pf.get("plan") if pf.get("plan") in PLANS else "pilot", "plan_until": pf.get("plan_until") or None}
 
 
 def _too_many_fails(key):
@@ -625,7 +655,11 @@ def site_settings(site_id):
         return jsonify({"status": "error", "reason": "type a name"}), 400
     db().execute("INSERT OR REPLACE INTO site_names (site_id, name, home) VALUES (?,?,?)", (site_id, name, home))
     db().commit()
-    audit("rename", site_id=site_id)
+    if isinstance(body.get("video_locked"), bool):                     # PRIVACY_LOCK_V1
+        _set_pref(site_id, "video_locked", "1" if body["video_locked"] else "0")
+        audit("video_locked" if body["video_locked"] else "video_unlocked", site_id=site_id)
+    if "name" in body or "home" in body:
+        audit("rename", site_id=site_id)
     return jsonify({"status": "ok", "site": public_site(sites()[site_id]),
                     "sites": [public_site(x) for x in user_sites(g.user_id, g.is_admin)]})
 
@@ -729,6 +763,13 @@ def proxy(site_id, path):
     headers["X-VIGIL-Key"] = s["api_key"]
     params = [(k, v) for k, v in request.args.items(multi=True) if k != "token"]
     streaming = path.startswith("camera/stream")
+    if streaming or path.startswith("camera/snapshot"):
+        # PRIVACY_LOCK_V1: a locked camera only ever sends stick figures, whatever the app asks for.
+        # VIEW_LOG_V1: opening video is written down, so the owner can see who looked and when.
+        if _site_prefs(site_id).get("video_locked") == "1":
+            params = [(k, v) for k, v in params if k != "view"] + [("view", "skeleton")]
+        elif request.method == "GET" and request.args.get("view") != "skeleton":
+            _log_view(site_id)
     try:
         r = requests.request(request.method, target, params=params, headers=headers,
                              data=request.get_data(), stream=True,
@@ -739,6 +780,70 @@ def proxy(site_id, path):
     out_headers.append(("Cache-Control", "no-store"))
     return Response(stream_with_context(r.iter_content(chunk_size=16384)), status=r.status_code,
                     headers=out_headers)
+
+
+_VIEW_SEEN = {}
+
+
+def _log_view(site_id, kind="live_video"):
+    """One line per person per camera per 10 minutes, however many frames they pull."""
+    key = (g.user_id, site_id, kind)
+    now = time.time()
+    if now - _VIEW_SEEN.get(key, 0) < 600:
+        return
+    _VIEW_SEEN[key] = now
+    if len(_VIEW_SEEN) > 5000:
+        for k in [k for k, v in _VIEW_SEEN.items() if now - v > 600]:
+            _VIEW_SEEN.pop(k, None)
+    audit(kind, site_id=site_id)
+
+
+@app.route("/auth/site/<site_id>/views")
+@require_user
+def site_views(site_id):
+    """VIEW_LOG_V1: who opened this camera's video, newest first. Everyone with access can see it."""
+    if not (_role(site_id) or g.is_admin):
+        return jsonify({"status": "error", "reason": "not your camera"}), 403
+    rows = db().execute("SELECT a.at, u.name, u.email FROM audit a LEFT JOIN users u ON u.id=a.user_id "
+                        "WHERE a.site_id=? AND a.action='live_video' ORDER BY a.id DESC LIMIT 50", (site_id,)).fetchall()
+    return jsonify({"status": "ok", "video_locked": _site_prefs(site_id).get("video_locked") == "1",
+                    "views": [{"at": r["at"] + "Z", "name": r["name"] or (r["email"] or "").split("@")[0] or "Someone"} for r in rows]})
+
+
+@app.route("/overview")
+@require_user
+def overview():
+    """ROOMS_V1: every camera this person can see, with what needs attention, in one call.
+    Each camera is asked in parallel with a short wait, so one slow room does not hold up the board."""
+    mine = user_sites(g.user_id, g.is_admin)
+    names, prefs = _site_names(), _site_prefs()
+
+    def ask(s):
+        out = dict(public_site(s, names, prefs), unseen=None, unseen_falls=None, oldest_unseen_at=None, person_present=None)
+        h = {"X-VIGIL-Key": s["api_key"]}
+        base = s["internal_url"].rstrip("/")
+        try:
+            a = requests.get(base + "/alerts/unseen", headers=h, timeout=3).json()
+            out.update(unseen=a.get("unseen"), unseen_falls=a.get("unseen_falls"), oldest_unseen_at=a.get("oldest_unseen_at"))
+            c = requests.get(base + "/camera/status", headers=h, timeout=3).json()
+            out["person_present"] = bool(c.get("person_present"))
+            if out["online"] is None:
+                out["online"] = bool(c.get("online"))
+        except Exception:
+            pass
+        return out
+
+    rows = []
+    threads = [threading.Thread(target=lambda s=s: rows.append(ask(s)), daemon=True) for s in mine]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=7)
+    order = {s["id"]: i for i, s in enumerate(mine)}
+    rows.sort(key=lambda r: (-(r["unseen_falls"] or 0), 0 if r["online"] is False else 1, -(r["unseen"] or 0), order.get(r["id"], 0)))
+    return jsonify({"status": "ok", "rooms": rows,
+                    "open_falls": sum(r["unseen_falls"] or 0 for r in rows),
+                    "offline": sum(1 for r in rows if r["online"] is False)})
 
 
 # ---------------------------------------------------------------- watchdog

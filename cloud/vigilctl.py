@@ -465,6 +465,31 @@ def cmd_tune(a):
     print("Each camera may now use %.1f CPU cores." % a.cpus)
 
 
+def cmd_plan(a):
+    """PLAN_V1: what each home is on (pilot, trial, active, past_due, cancelled). A record for
+    the app and for billing; it never switches monitoring off."""
+    st = load()
+    db = gw_db()
+    import gateway
+    if a.camera:
+        c = next((c for c in st["cameras"] if c["id"] == a.camera), None)
+        if not c:
+            sys.exit("No camera %s" % a.camera)
+        if a.plan not in gateway.PLANS:
+            sys.exit("plan must be one of: " + ", ".join(gateway.PLANS))
+        db.execute("INSERT OR REPLACE INTO site_prefs (site_id, key, value) VALUES (?,?,?)", (c["id"], "plan", a.plan))
+        db.execute("INSERT OR REPLACE INTO site_prefs (site_id, key, value) VALUES (?,?,?)", (c["id"], "plan_until", a.until or ""))
+        db.commit()
+    prefs = {}
+    for sid, k, v in db.execute("SELECT site_id, key, value FROM site_prefs"):
+        prefs.setdefault(sid, {})[k] = v
+    for c in st.get("cameras", []):
+        p = prefs.get(c["id"], {})
+        print("%-10s %-24s %-10s %s%s" % (c["id"], c.get("name", "")[:24], p.get("plan") or "pilot",
+                                         ("until " + p["plan_until"]) if p.get("plan_until") else "",
+                                         "   video locked" if p.get("video_locked") == "1" else ""))
+
+
 def cmd_boxes(_a):
     """AUTOUPDATE_V1: every relay box, what it is doing and which code it runs."""
     try:
@@ -571,6 +596,8 @@ def main():
     s.add_argument("--team-id", required=True); s.add_argument("--bundle-id", default="com.rushilmohan.vigilapp")
     s.set_defaults(f=cmd_apns)
     s = sub.add_parser("tune"); s.add_argument("--cpus", type=float, required=True); s.set_defaults(f=cmd_tune)
+    s = sub.add_parser("plan"); s.add_argument("camera", nargs="?"); s.add_argument("plan", nargs="?", default="pilot")
+    s.add_argument("--until", help="paid or pilot end date, e.g. 2027-01-31"); s.set_defaults(f=cmd_plan)
     a = p.parse_args()
     a.f(a)
 

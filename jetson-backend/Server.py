@@ -2456,6 +2456,103 @@ def ack_alert(alert_id):
         return jsonify({"error": str(e)}), 500
 
 
+# OUTCOME_V1 ----------------------------------------------------------------
+# After a fall alert the person who checked says what it was. Those answers are
+# the only honest measure of false alarms in real use, and "VIGIL missed one"
+# reports are the only measure of misses. Nothing here sends an alert.
+_OUTCOMES = ("real", "false_alarm", "unsure")
+
+
+def _ensure_outcome_columns(conn):
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(alerts)")]
+    for name in ("outcome", "outcome_by", "outcome_at", "outcome_note"):
+        if name not in cols:
+            conn.execute("ALTER TABLE alerts ADD COLUMN %s TEXT" % name)
+
+
+@app.route("/alerts/<int:alert_id>/outcome", methods=["POST"])
+@require_api_key
+def alert_outcome(alert_id):
+    data = request.get_json(silent=True) or {}
+    outcome = data.get("outcome")
+    if outcome not in _OUTCOMES:
+        return jsonify({"error": "outcome must be real, false_alarm or unsure"}), 400
+    conn = get_db()
+    _ensure_outcome_columns(conn)
+    row = conn.execute("SELECT id FROM alerts WHERE id=?", (alert_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "alert not found"}), 404
+    conn.execute("UPDATE alerts SET outcome=?, outcome_by=?, outcome_note=?, "
+                 "outcome_at=datetime('now','localtime') WHERE id=?",
+                 (outcome, (data.get("by") or "Caregiver")[:80], (data.get("note") or "")[:300] or None, alert_id))
+    conn.commit(); conn.close()
+    return jsonify({"status": "ok", "outcome": outcome})
+
+
+@app.route("/alerts/missed", methods=["POST"])
+@require_api_key
+def alert_missed():
+    """A caregiver reports a fall VIGIL did not alert on. Kept as a record only."""
+    data = request.get_json(silent=True) or {}
+    when = data.get("when") or datetime.now().isoformat()
+    try:
+        datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+    except ValueError:
+        return jsonify({"error": "when must be a date and time"}), 400
+    conn = get_db()
+    _ensure_outcome_columns(conn); _ensure_ack_columns(conn)
+    by = (data.get("by") or "Caregiver")[:80]
+    conn.execute("INSERT INTO alerts (alert_type, detected_at, payload, seen, acknowledged_by, outcome, outcome_by, "
+                 "outcome_note, outcome_at) VALUES ('missed_fall', ?, ?, 1, ?, 'real', ?, ?, datetime('now','localtime'))",
+                 (str(when)[:40], json.dumps({"message": "Fall reported by a caregiver; VIGIL did not alert",
+                                              "resident_name": (data.get("resident_name") or "")[:80] or None,
+                                              "where": (data.get("where") or "")[:80] or None}),
+                  by, by, (data.get("note") or "")[:300] or None))
+    conn.commit(); conn.close()
+    return jsonify({"status": "ok"})
+
+
+@app.route("/alerts/accuracy")
+@require_api_key
+def alerts_accuracy():
+    """How fall alerts turned out over the last N days, from what caregivers recorded."""
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except ValueError:
+        days = 30
+    conn = get_db()
+    _ensure_outcome_columns(conn); _ensure_ack_columns(conn)
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = conn.execute("SELECT id, alert_type, outcome, detected_at, acknowledged_at FROM alerts "
+                        "WHERE alert_type IN ('fall','missed_fall') AND detected_at >= ?", (since,)).fetchall()
+    try:
+        bulk = {r[0] for r in conn.execute("SELECT id FROM alerts WHERE ack_bulk=1")}
+    except sqlite3.OperationalError:
+        bulk = set()
+    conn.close()
+    falls = [r for r in rows if r["alert_type"] == "fall"]
+    out = {"days": days, "fall_alerts": len(falls),
+           "confirmed_real": sum(1 for r in falls if r["outcome"] == "real"),
+           "false_alarms": sum(1 for r in falls if r["outcome"] == "false_alarm"),
+           "unsure": sum(1 for r in falls if r["outcome"] == "unsure"),
+           "not_reviewed": sum(1 for r in falls if not r["outcome"]),
+           "missed_reported": sum(1 for r in rows if r["alert_type"] == "missed_fall")}
+    secs = []
+    for r in falls:
+        if r["id"] in bulk:                 # cleared in bulk: housekeeping, not a response
+            continue
+        try:
+            a = datetime.fromisoformat(r["acknowledged_at"].replace(" ", "T")); d = datetime.fromisoformat(r["detected_at"][:19])
+            if 0 <= (a - d).total_seconds() <= 6 * 3600:
+                secs.append((a - d).total_seconds())
+        except (AttributeError, ValueError, TypeError):
+            pass
+    secs.sort()
+    out["median_response_s"] = round(secs[len(secs) // 2]) if secs else None
+    return jsonify(out)
+
+
 @app.route("/alerts/ack-all", methods=["POST"])
 @require_api_key
 def ack_all_alerts():

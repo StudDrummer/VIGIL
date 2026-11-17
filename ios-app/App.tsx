@@ -64,7 +64,7 @@ import {launchImageLibrary,launchCamera} from 'react-native-image-picker';  // P
 // ─────────────────────────────────────────────
 const DEFAULT_IP    = 'your-jetson-ip';
 const DEFAULT_PORT  = '5001';
-const APP_VERSION   = '1.0 (3)';   // keep in step with MARKETING_VERSION (CURRENT_PROJECT_VERSION) in the Xcode project
+const APP_VERSION   = '1.0 (4)';   // keep in step with MARKETING_VERSION (CURRENT_PROJECT_VERSION) in the Xcode project
 const TIMEOUT_MS    = 10_000;
 const AUTO_SYNC_SEC = 60;
 const VIGIL_KEY     = 'YOUR_VIGIL_API_KEY';   // must match VIGIL_API_KEY on the monitoring unit
@@ -86,7 +86,9 @@ const AX = axios.create({
 // existing request works unchanged against the cloud.
 const SK_CLOUD      = '@vigil_cloud_v1';
 const DEFAULT_CLOUD = 'https://api.vigilhealth.me';
-type CloudSite = {id:string;name:string;home?:string;room?:string;online?:boolean|null;ntfy_topic?:string;last_seen?:number|null};
+type CloudSite = {id:string;name:string;home?:string;room?:string;online?:boolean|null;ntfy_topic?:string;last_seen?:number|null;
+  video_locked?:boolean;plan?:string;plan_until?:string|null};   // PRIVACY_LOCK_V1, PLAN_V1
+type RoomRow = CloudSite&{unseen:number|null;unseen_falls:number|null;person_present:boolean|null};   // ROOMS_V1
 type CloudCfg  = {gateway:string;token:string;email:string;sites:CloudSite[];siteId:string};
 let CLOUD_ACTIVE = false;
 function applyCloudHeaders(cfg:CloudCfg|null){
@@ -194,6 +196,7 @@ interface Room {
 interface AlertEntry {
   id:number; alert_type:string; detected_at:string;
   payload:any; seen:number; created_at:string;
+  outcome?:'real'|'false_alarm'|'unsure'|null; outcome_by?:string|null;   // OUTCOME_V1
 }
 interface DebugEntry { ts:string; level:'INFO'|'WARN'|'ERROR'|'OK'; msg:string; }
 
@@ -507,6 +510,16 @@ function SiteEditSheet({cfg,site,onClose,onSaved}:{cfg:CloudCfg;site:CloudSite;o
   const [home,setHome]=useState(site.home||'');
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState<string|null>(null);
+  const [locked,setLocked]=useState(!!site.video_locked);                    // PRIVACY_LOCK_V1
+  const [views,setViews]=useState<{at:string;name:string}[]|null>(null);    // VIEW_LOG_V1
+  useEffect(()=>{axios.get(`${cfg.gateway}/auth/site/${site.id}/views`,{timeout:10000,headers:{'X-VIGIL-Key':cfg.token}})
+    .then(r=>setViews(r.data?.views||[])).catch(()=>setViews([]));},[cfg.gateway,cfg.token,site.id]);
+  const lock=async(v:boolean)=>{
+    setLocked(v);setErr(null);
+    try{const r=await axios.post(`${cfg.gateway}/auth/site/${site.id}/settings`,{video_locked:v},{timeout:15000,headers:{'X-VIGIL-Key':cfg.token}});
+      onSaved(r.data?.sites||cfg.sites);}
+    catch(e:any){setLocked(!v);setErr(e?.response?.data?.reason||'Could not change that. Check the internet connection.');}
+  };
   const others=cfg.sites.filter(x=>x.id!==site.id);
   const homes=Array.from(new Set(others.map(x=>x.home).filter(Boolean))) as string[];
   const h={timeout:15000,headers:{'X-VIGIL-Key':cfg.token}};
@@ -529,7 +542,7 @@ function SiteEditSheet({cfg,site,onClose,onSaved}:{cfg:CloudCfg;site:CloudSite;o
   return(
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
       <KeyboardAvoidingView behavior={Platform.OS==='ios'?'padding':undefined} style={{flex:1,backgroundColor:'rgba(0,0,0,0.55)',justifyContent:'flex-end'}}>
-        <View style={{backgroundColor:C.card,borderTopLeftRadius:22,borderTopRightRadius:22,padding:20,paddingBottom:36}}>
+        <ScrollView style={{maxHeight:'90%',flexGrow:0,backgroundColor:C.card,borderTopLeftRadius:22,borderTopRightRadius:22}} contentContainerStyle={{padding:20,paddingBottom:36}} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <View style={{width:40,height:5,borderRadius:3,backgroundColor:C.fill,alignSelf:'center',marginBottom:14}}/>
           <Text style={{color:C.text,fontSize:20,fontWeight:'700'}}>Camera details</Text>
           <Text style={{color:C.sub,fontSize:14,marginTop:16,fontWeight:'600'}}>Name</Text>
@@ -549,6 +562,21 @@ function SiteEditSheet({cfg,site,onClose,onSaved}:{cfg:CloudCfg;site:CloudSite;o
               <TouchableOpacity key={o.id} disabled={busy} onPress={()=>copy(o)} style={{paddingVertical:10}}>
                 <Text style={{color:C.blue,fontSize:16}}>Copy everyone from {o.name}</Text></TouchableOpacity>))}
           </>)}
+          <Text style={{color:C.sub,fontSize:14,marginTop:18,fontWeight:'600'}}>Privacy</Text>
+          <View style={{flexDirection:'row',alignItems:'center',marginTop:8}}>
+            <View style={{flex:1,paddingRight:12}}>
+              <Text style={{color:C.text,fontSize:16}}>Stick figures only</Text>
+              <Text style={{color:C.muted,fontSize:12,marginTop:3,lineHeight:17}}>No one can see video from this camera, only stick figures. Fall alerts work the same.</Text>
+            </View>
+            <Switch value={locked} onValueChange={lock} trackColor={{true:C.green,false:C.fill}}/>
+          </View>
+          {!locked&&views!==null&&(
+            <Text style={{color:C.muted,fontSize:12,marginTop:10,lineHeight:17}}>
+              {views.length?`Video last opened by ${views.slice(0,3).map(v=>`${v.name} (${timeAgo(v.at)})`).join(', ')}.`:'No one has opened video from this camera yet.'}
+            </Text>)}
+          <Text style={{color:C.muted,fontSize:12,marginTop:14}}>
+            Plan: {({pilot:'Free pilot',trial:'Free trial',active:'Active',past_due:'Payment due',cancelled:'Cancelled'} as any)[site.plan||'pilot']||'Free pilot'}{site.plan_until?` until ${site.plan_until}`:''}
+          </Text>
           {!!err&&<Text style={{color:C.red,fontSize:14,marginTop:10}}>{err}</Text>}
           <View style={{flexDirection:'row',gap:10,marginTop:18}}>
             <TouchableOpacity onPress={onClose} style={{flex:1,padding:15,borderRadius:12,backgroundColor:C.fill,alignItems:'center'}}>
@@ -556,7 +584,7 @@ function SiteEditSheet({cfg,site,onClose,onSaved}:{cfg:CloudCfg;site:CloudSite;o
             <TouchableOpacity disabled={busy} onPress={save} style={[s.btnPrimary,{flex:2,opacity:busy?0.5:1}]}>
               {busy?<ActivityIndicator color="#000"/>:<Text style={s.btnPrimaryTxt}>Save</Text>}</TouchableOpacity>
           </View>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </Modal>);
 }
@@ -3998,12 +4026,15 @@ export default function App() {
   const liveKick=useRef<(()=>void)|null>(null);
   const liveSiteRef=useRef<string>('local');
   const liveOldRef=useRef(false);   // the server sends one view per stream (not updated yet)
+  const videoLockedRef=useRef(false);   // PRIVACY_LOCK_V1: this camera only ever shows stick figures
+  const figNow=()=>privacyViewRef.current||videoLockedRef.current;
   const togglePrivacyView=useCallback(()=>{
     const next=!privacyViewRef.current; privacyViewRef.current=next; setPrivacyView(next);
+    if(videoLockedRef.current)return;
     prevFrame.current=null;   // SMOOTH_VIEW_V1: keep the last picture until the other view arrives
-    const f=liveLast(liveSiteRef.current)[next?'s':'v'];
-    if(f){prevFrame.current=f;livePush(f);}   // LIVE_BOTH_V1: instant, no trip to the server
-    if(liveOldRef.current||!f)liveKick.current?.();   // older server, or nothing yet: reopen for the other view
+    const f=next?liveLast(liveSiteRef.current).s:null;   // figures are current on a video stream; video is only sent once asked for
+    if(f){prevFrame.current=f;livePush(f);}
+    liveKick.current?.();   // VIEW_LOG_V1: reopen, so video stops flowing the moment figures are chosen
     AsyncStorage.setItem('vigil_privacy_view',next?'1':'0').catch(()=>{});
   },[]);
   const appStateRef   = useRef<AppStateStatus>('active');
@@ -4100,7 +4131,7 @@ export default function App() {
 
   const fetchCameraSnapshot=useCallback(async()=>{
     try{
-      const r=await AX.get(`${url()}/camera/snapshot${privacyViewRef.current?'?view=skeleton&w=800':'?w=800'}`,{timeout:4000});
+      const r=await AX.get(`${url()}/camera/snapshot${figNow()?'?view=skeleton&w=800':'?w=800'}`,{timeout:4000});
       if(r.data?.available&&r.data?.frame){
         // Only update if frame actually changed to reduce flicker
         if(r.data.frame!==prevFrame.current){
@@ -4257,6 +4288,27 @@ export default function App() {
       log('ERROR',`Could not acknowledge alert ${id}: ${e?.message??String(e)}`);
     }
   },[log,demoMode]);
+  // OUTCOME_V1: what a fall alert turned out to be, and falls VIGIL missed. Saved only if the server confirms.
+  const setOutcome=useCallback(async(id:number,outcome:'real'|'false_alarm'|'unsure')=>{
+    if(demoMode){setAlerts(p=>p.map(a=>a.id===id?{...a,outcome}:a));return;}
+    try{
+      await AX.post(`${url()}/alerts/${id}/outcome`,{outcome,by:await caregiverName()});
+      setAlerts(p=>p.map(a=>a.id===id?{...a,outcome}:a));
+    }catch(e:any){
+      Alert.alert('Could not save that','Check the connection and try again.');
+      log('ERROR',`Could not record outcome for alert ${id}: ${e?.message??String(e)}`);
+    }
+  },[log,demoMode]);
+  const reportMissedFall=useCallback(()=>{
+    Alert.alert('Report a fall VIGIL missed?','Use this when someone fell and VIGIL did not alert. It is recorded with the current time, so misses are counted honestly. It does not notify anyone.',[
+      {text:'Cancel',style:'cancel'},
+      {text:'Report',onPress:async()=>{
+        const who=demoMode?'Demo caregiver':await caregiverName();
+        if(demoMode){setAlerts(p=>[{id:-Date.now(),alert_type:'missed_fall',detected_at:new Date().toISOString(),payload:{},seen:1,created_at:new Date().toISOString(),acknowledged_by:who} as any,...p]);return;}
+        try{await AX.post(`${url()}/alerts/missed`,{when:new Date().toISOString(),by:who});fetchAlerts();}
+        catch(_e){Alert.alert('Could not save that','Check the connection and try again.');}
+      }}]);
+  },[demoMode,fetchAlerts]);
 
   const loadConfig=useCallback(async()=>{
     try{
@@ -4347,19 +4399,19 @@ export default function App() {
       if(!alive)return;
       if(Date.now()<pollUntil){fetchCameraSnapshot().catch(()=>{}).finally(()=>later(CLOUD_ACTIVE?350:120));return;}
       const x=new XMLHttpRequest(); xhr=x; let off=0; let n=0; kicked=false; lastData=Date.now();
-      const opened:'both'|'v'|'s'=liveOldRef.current?(privacyViewRef.current?'s':'v'):'both';
+      const opened:'both'|'v'|'s'=figNow()?'s':(liveOldRef.current?'v':'both');
       x.open('GET',`${url()}/camera/stream64?view=${opened==='both'?'both':opened==='s'?'skeleton':'video'}&max_s=20`);
       x.setRequestHeader('X-VIGIL-Key',String((AX.defaults.headers as any)['X-VIGIL-Key']||''));
       x.onprogress=()=>{
         if(xhr!==x)return;
         lastData=Date.now();
         const t=x.responseText||''; let last:string|null=null; let i:number;
-        const L=liveLast(site); const want=privacyViewRef.current?'s':'v';
+        const L=liveLast(site); const want=figNow()?'s':'v';
         while((i=t.indexOf('\n',off))>=0){const line=t.slice(off,i);off=i+1;
           if(line.length<=100)continue;
           if(line[1]===':'&&(line[0]==='v'||line[0]==='s')){const k=line[0] as 'v'|'s';L[k]=line.slice(2);if(k===want)last=L[k];}
           else{   // older server: one view per stream (and 'both' means video)
-            liveOldRef.current=true;const k=opened==='both'?'v':opened;L[k]=line;
+            if(opened==='both')liveOldRef.current=true;const k=opened==='both'?'v':opened;L[k]=line;
             if(k===want)last=line;else if(!kicked){kicked=true;setTimeout(()=>{try{x.abort();}catch(_e){}},0);}}}
         if(last){n++;gotFrame(last);}
       };
@@ -4490,7 +4542,7 @@ export default function App() {
   // CLOUD_V1: switch the whole app to another camera, or in and out of the cloud.
   const resetSiteData=(nextSite?:string)=>{
     Object.keys(PHOTO_CACHE).forEach(k=>delete PHOTO_CACHE[k]);
-    const cached=nextSite?liveLast(nextSite)[privacyViewRef.current?'s':'v']:null;   // LIVE_BOTH_V1
+    const cached=nextSite?liveLast(nextSite)[figNow()?'s':'v']:null;   // LIVE_BOTH_V1
     prevFrame.current=cached;if(cached)livePush(cached);setCameraFrame(cached);
     setPersons([]);setAlerts([]);setRooms([]);
     setJetsonOk(null);
@@ -4512,6 +4564,21 @@ export default function App() {
     enterCloud({...cloud,siteId});
   };
   const cloudRef=useRef<CloudCfg|null>(null); cloudRef.current=cloud;   // SITE_SWITCH_FIX_V1
+  // PRIVACY_LOCK_V1: the owner can limit a camera to stick figures for everyone
+  const videoLocked=!!cloud?.sites.find(x=>x.id===cloud.siteId)?.video_locked;
+  videoLockedRef.current=videoLocked;
+  useEffect(()=>{liveKick.current?.();},[videoLocked]);
+  // ROOMS_V1: with two or more cameras, one list shows every room and what needs attention
+  const [board,setBoard]=useState<RoomRow[]>([]);
+  const nSites=cloud?.sites.length??0; const gw=cloud?.gateway;
+  useEffect(()=>{
+    if(!gw||nSites<2||demoMode||activeTab!=='today'){if(nSites<2)setBoard([]);return;}
+    let alive=true;
+    const load=()=>{if(kbOpenRef.current)return;AX.get(`${gw}/overview`,{timeout:9000})
+      .then(r=>{if(alive&&Array.isArray(r.data?.rooms))setBoard(r.data.rooms);}).catch(()=>{});};
+    load(); const id=setInterval(load,20000);
+    return()=>{alive=false;clearInterval(id);};
+  },[gw,nSites,demoMode,activeTab,cloud?.siteId]);
   const refreshCloudSites=useCallback(async()=>{
     if(!cloudRef.current)return;
     try{
@@ -4571,18 +4638,23 @@ export default function App() {
               onPress={()=>setFullscreen(true)}>
               <Text style={{color:'#fff',fontSize:11,fontWeight:'600'}}>Expand</Text>
             </TouchableOpacity>
-            {privacyView&&!someoneInView&&(
+            {(privacyView||videoLocked)&&!someoneInView&&(
               <View pointerEvents="none" style={{position:'absolute',left:0,right:0,top:0,bottom:0,alignItems:'center',justifyContent:'center'}}>
                 <Text style={{color:C.muted,fontSize:13}}>No one in view</Text>
               </View>)}
-            {/* REDESIGN_V1: a two-way switch instead of a sentence */}
+            {/* REDESIGN_V1: a two-way switch instead of a sentence. PRIVACY_LOCK_V1: no switch on a locked camera */}
+            {videoLocked?(
+              <View style={{position:'absolute',top:10,left:10,flexDirection:'row',alignItems:'center',gap:6,backgroundColor:'rgba(0,0,0,0.65)',borderRadius:10,paddingHorizontal:10,paddingVertical:5}}>
+                <Glyph name="lock" color="#fff" size={12}/><Text style={{color:'#fff',fontSize:11,fontWeight:'600'}}>Figures only</Text>
+              </View>
+            ):(
             <View style={{position:'absolute',top:10,left:10,flexDirection:'row',backgroundColor:'rgba(0,0,0,0.65)',borderRadius:10,padding:2}}>
               {([['Video',false],['Figures',true]] as const).map(([lbl,pv])=>(
                 <TouchableOpacity key={lbl} onPress={()=>{if(privacyView!==pv)togglePrivacyView();}}
                   style={{paddingHorizontal:10,paddingVertical:4,borderRadius:8,backgroundColor:privacyView===pv?'rgba(255,255,255,0.22)':'transparent'}}>
                   <Text style={{color:'#fff',fontSize:11,fontWeight:privacyView===pv?'700':'500'}}>{lbl}</Text>
                 </TouchableOpacity>))}
-            </View>
+            </View>)}
           </>
         ):(
           <View style={{flex:1,alignItems:'center',justifyContent:'center',gap:6}}>
@@ -4623,7 +4695,7 @@ export default function App() {
       <View style={s.pageHead}>
         <Text style={{color:C.sub,fontSize:13,fontWeight:'600',letterSpacing:0.4,marginBottom:2}}>{new Date().toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'}).toUpperCase()}</Text>
         <Text style={s.pageTitle}>Today</Text>
-        {cloud&&cloud.sites.length>0&&(()=>{   // CAMERA_SWITCHER_V1: which camera, and one tap to change it
+        {cloud&&cloud.sites.length>0&&board.length<2&&(()=>{   // CAMERA_SWITCHER_V1: which camera, and one tap to change it
           const cur=cloud.sites.find(x=>x.id===cloud.siteId)||cloud.sites[0];
           const dot=cur.online===false?C.red:cur.online?C.green:C.sub;
           return(
@@ -4639,6 +4711,29 @@ export default function App() {
             </TouchableOpacity>);
         })()}
       </View>
+      {!!cloud&&board.length>=2&&(<>
+        <View style={[s.settGrp,{marginBottom:6}]}>
+          {board.map((r,i)=>{
+            const cur=r.id===cloud.siteId; const falls=r.unseen_falls||0; const other=Math.max(0,(r.unseen||0)-falls);
+            const col=falls>0||r.online===false?C.red:r.person_present?C.green:C.muted;
+            const what=falls>0?'Possible fall, waiting for someone to check':r.online===false?'Camera offline':r.person_present?'Someone in view':r.person_present===false?'Quiet':'Checking';
+            return(
+              <TouchableOpacity key={r.id} activeOpacity={0.7} onPress={()=>switchSite(r.id)} accessibilityRole="button" accessibilityLabel={`${r.name}. ${what}`}
+                style={{flexDirection:'row',alignItems:'center',gap:12,paddingHorizontal:16,paddingVertical:13,borderTopWidth:i?1:0,borderTopColor:C.hair,backgroundColor:cur?C.cardHi:'transparent'}}>
+                <View style={{width:10,height:10,borderRadius:5,backgroundColor:col}}/>
+                <View style={{flex:1}}>
+                  <Text numberOfLines={1} style={{color:C.text,fontSize:16,fontWeight:cur?'700':'600'}}>{r.name}</Text>
+                  <Text numberOfLines={1} style={{color:falls>0?C.red:C.sub,fontSize:13,marginTop:2}}>{what}</Text>
+                </View>
+                {other>0&&<View style={{minWidth:22,height:22,borderRadius:11,backgroundColor:C.fill,alignItems:'center',justifyContent:'center',paddingHorizontal:6}}><Text style={{color:C.text,fontSize:12,fontWeight:'700'}}>{other}</Text></View>}
+                {cur?<Glyph name="check" size={16}/>:<Glyph name="chevron" color={C.muted} size={16}/>}
+              </TouchableOpacity>);
+          })}
+        </View>
+        <TouchableOpacity onPress={()=>setSwitcher(true)} style={{alignSelf:'flex-start',marginLeft:20,paddingVertical:8}}>
+          <Text style={{color:C.sub,fontSize:13}}>Manage cameras</Text></TouchableOpacity>
+        <Text style={[s.secHeader,{marginTop:14}]}>{cloud.sites.find(x=>x.id===cloud.siteId)?.name||'This room'}</Text>
+      </>)}
       {!!cloud&&!cloud.sites.length&&<AddCameraCard cfg={cloud} onAdded={(cfg,role)=>{enterCloud(cfg);   // ADD_THEN_SETUP_V1: a new camera goes straight to its box setup
         if((role||'owner')==='owner'&&!cfg.sites.find(x=>x.id===cfg.siteId)?.online)setTimeout(()=>setBoxAgain(true),400);}}/>}
 
@@ -5080,6 +5175,7 @@ export default function App() {
   // ─────────────────────────────────────────────
   const explainAlert=(a:AlertEntry):string=>{
     const p=a.payload||{};
+    if(a.alert_type==='missed_fall')return'A caregiver reported a fall that VIGIL did not alert on. It is kept so that misses are counted honestly.';
     if(a.alert_type==='fall')return'A fall was detected: a rapid change from upright to lying down outside a bed or sofa. Check on the resident and confirm below that someone is responding.';
     if(a.alert_type==='bed_sitting')return`Sat up in bed during the night after resting about ${p.rested_min??'?'} minutes, and may be about to stand. A check-in now can prevent a fall.`;
     if(a.alert_type==='bed_exit')return`Got up during the night after resting about ${p.rested_min??'?'} minutes. Many falls happen getting out of bed at night, so a quick check-in may be worthwhile.`;
@@ -5099,6 +5195,15 @@ export default function App() {
       <View style={s.pageHead}>
         <Text style={s.pageTitle}>Alerts</Text>
         <Text style={s.pageSub}>{alertCount>0?`${alertCount} ${alertCount===1?'needs':'need'} attention`:'All clear'}</Text>
+        {(()=>{   // OUTCOME_V1: how fall alerts turned out, from what caregivers recorded
+          const since=Date.now()-30*864e5; const f=alerts.filter(a=>new Date(a.detected_at).getTime()>=since);
+          const falls=f.filter(a=>a.alert_type==='fall'); const missed=f.filter(a=>a.alert_type==='missed_fall').length;
+          if(!falls.length&&!missed)return null;
+          const real=falls.filter(a=>a.outcome==='real').length; const fa=falls.filter(a=>a.outcome==='false_alarm').length;
+          const parts=[`${falls.length} fall ${falls.length===1?'alert':'alerts'}`];
+          if(real)parts.push(`${real} confirmed`); if(fa)parts.push(`${fa} false ${fa===1?'alarm':'alarms'}`); if(missed)parts.push(`${missed} missed`);
+          return <Text style={{color:C.muted,fontSize:13,marginTop:6}}>Last 30 days: {parts.join(', ')}</Text>;
+        })()}
       </View>
       {alerts.length===0?(
         <View style={s.empty}>
@@ -5113,6 +5218,7 @@ export default function App() {
           : a.alert_type==='bed_sitting'      ? C.purple
           : a.alert_type==='multiple_persons' ? C.purple
           : a.alert_type==='absence_pattern'  ? C.teal
+          : a.alert_type==='missed_fall'      ? C.orange
           : C.blue;
         const badge = a.alert_type==='fall' ? 'FALL DETECTED'
           : a.alert_type==='stillness'        ? 'STILLNESS ALERT'
@@ -5120,6 +5226,7 @@ export default function App() {
           : a.alert_type==='bed_sitting'      ? 'SITTING UP AT NIGHT'
           : a.alert_type==='multiple_persons' ? 'MULTIPLE PEOPLE'
           : a.alert_type==='absence_pattern'  ? 'ABSENCE ALERT'
+          : a.alert_type==='missed_fall'      ? 'FALL VIGIL MISSED'
           : 'HEALTH SIGNAL';
         const isExp=expandedAlert===a.id;
         return(
@@ -5166,9 +5273,20 @@ export default function App() {
                 )}
               </View>
             )}
+            {a.alert_type==='fall'&&!!a.seen&&!a.outcome&&(   /* OUTCOME_V1: what it turned out to be */
+              <View style={{marginTop:12,paddingTop:12,borderTopWidth:1,borderTopColor:C.hair}}>
+                <Text style={{color:C.text,fontSize:14,fontWeight:'600'}}>Was this a fall?</Text>
+                <View style={{flexDirection:'row',gap:8,marginTop:10}}>
+                  {([['real','Yes'],['false_alarm','No, false alarm'],['unsure','Not sure']] as const).map(([k,l])=>(
+                    <TouchableOpacity key={k} onPress={()=>setOutcome(a.id,k)} style={{flex:k==='false_alarm'?1.6:1,borderRadius:100,paddingVertical:10,alignItems:'center',borderWidth:1,borderColor:C.border}}>
+                      <Text style={{color:C.text,fontSize:13,fontWeight:'600'}}>{l}</Text></TouchableOpacity>))}
+                </View>
+              </View>)}
             <View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',marginTop:12}}>
               <Text style={{color:C.muted,fontSize:12}}>
-                {!!a.seen&&!!(a as any).acknowledged_by?`Handled by ${(a as any).acknowledged_by}`:!!a.seen?'Seen':new Date(a.detected_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}
+                {a.alert_type==='missed_fall'?`Reported by ${(a as any).acknowledged_by||'a caregiver'}`
+                  :!!a.outcome?`${a.outcome==='real'?'Confirmed fall':a.outcome==='false_alarm'?'False alarm':'Not sure'}${(a as any).acknowledged_by?`, checked by ${(a as any).acknowledged_by}`:''}`
+                  :!!a.seen&&!!(a as any).acknowledged_by?`Handled by ${(a as any).acknowledged_by}`:!!a.seen?'Seen':new Date(a.detected_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}
               </Text>
               <TouchableOpacity onPress={()=>setExpandedAlert(isExp?null:a.id)} hitSlop={{top:10,bottom:10,left:10,right:10}}>
                 <Text style={{color:C.muted,fontSize:12}}>{isExp?'Hide details':'Details'}</Text>
@@ -5185,6 +5303,9 @@ export default function App() {
           </View>
         );
       })}
+      <TouchableOpacity onPress={reportMissedFall} style={{alignSelf:'center',paddingVertical:14,paddingHorizontal:20}}>
+        <Text style={{color:C.sub,fontSize:14}}>Report a fall VIGIL missed</Text>
+      </TouchableOpacity>
       <View style={{height:32}}/>
     </ScrollView>
   );

@@ -26,6 +26,20 @@ iPhone app ──HTTPS──► caddy :443 ──► gateway (accounts, access, 
   The first account to add a camera becomes its owner; family who add the same
   code later become caregivers. Each person can turn alert emails on or off.
 
+## For facilities and pilots
+
+* **Rooms board.** An account with two or more cameras sees every room in one list, the one
+  that needs attention first (`GET /overview`).
+* **Stick figures only.** A camera's owner can lock it so nobody is ever sent video, only
+  stick figures. The gateway enforces it whatever an app asks for.
+* **Who watched.** Opening video is written down. Everyone with access to that camera can see
+  who opened it and when (`GET /auth/site/<id>/views`).
+* **What each alert turned out to be.** After a fall alert the caregiver records real fall,
+  false alarm or not sure, and can report a fall VIGIL missed. `GET /alerts/accuracy` on a
+  camera gives the counts, which is how false alarms and misses are measured in a pilot.
+* **Plan.** `python3 vigilctl.py plan` lists what each home is on; `plan home01 active --until
+  2027-01-31` sets it. It is a record for the app and billing and never turns monitoring off.
+
 ## What it costs to run
 
 The pose model needs about 2 CPU cores per camera for 6 to 9 frames a second.
