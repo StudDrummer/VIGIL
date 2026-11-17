@@ -5176,6 +5176,7 @@ export default function App() {
   const explainAlert=(a:AlertEntry):string=>{
     const p=a.payload||{};
     if(a.alert_type==='missed_fall')return'A caregiver reported a fall that VIGIL did not alert on. It is kept so that misses are counted honestly.';
+    if(a.alert_type==='fall'&&p.source==='sensor')return`The ${String(p.where||'bathroom').toLowerCase()} sensor reported a possible fall. Check on them and confirm below that someone is responding.`;
     if(a.alert_type==='fall')return'A fall was detected: a rapid change from upright to lying down outside a bed or sofa. Check on the resident and confirm below that someone is responding.';
     if(a.alert_type==='bed_sitting')return`Sat up in bed during the night after resting about ${p.rested_min??'?'} minutes, and may be about to stand. A check-in now can prevent a fall.`;
     if(a.alert_type==='bed_exit')return`Got up during the night after resting about ${p.rested_min??'?'} minutes. Many falls happen getting out of bed at night, so a quick check-in may be worthwhile.`;

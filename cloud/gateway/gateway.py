@@ -641,6 +641,23 @@ def relay_status_post(site_id):
     return jsonify({"status": "ok"})
 
 
+@app.route("/relay/<site_id>/sensor", methods=["POST"])
+def relay_sensor_post(site_id):
+    """SENSOR_V1: a sensor in the home (the bathroom radar) reports through VIGIL Cloud with the
+    home box's key; the gateway passes it to that camera's server, which decides on alerts."""
+    s_ = sites().get(site_id)
+    key = request.headers.get("X-Relay-Key", "")
+    want = (s_ or {}).get("relay_key_sha256")
+    if not s_ or not want or not hmac.compare_digest(hashlib.sha256(key.encode()).hexdigest(), want):
+        return jsonify({"status": "error"}), 403
+    try:
+        r = requests.post(s_["internal_url"].rstrip("/") + "/sensor/event", json=request.get_json(silent=True) or {},
+                          headers={"X-VIGIL-Key": s_["api_key"]}, timeout=10)
+        return Response(r.content, status=r.status_code, content_type="application/json")
+    except requests.RequestException:
+        return jsonify({"status": "error", "reason": "this camera's server is not responding"}), 502
+
+
 @app.route("/auth/site/<site_id>/settings", methods=["POST"])
 @require_user
 def site_settings(site_id):

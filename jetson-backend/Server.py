@@ -2469,6 +2469,65 @@ def ack_alert(alert_id):
         return jsonify({"error": str(e)}), 500
 
 
+# SENSOR_V1 -----------------------------------------------------------------
+# Other sensors in the home, starting with a ceiling radar for the bathroom, where a
+# camera never goes. A sensor reports "fall", "clear" (the fall state ended) or
+# "heartbeat". A fall becomes an ordinary fall alert (same push, reminders and outcome
+# buttons); while that sensor still reports the same fall, nothing more is sent.
+SENSOR_REARM_MAX_S = 30 * 60
+_SENSOR_FALL_OPEN = {}        # sensor_id -> when its open fall was alerted
+
+
+def _ensure_sensor_table(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS sensors (sensor_id TEXT PRIMARY KEY, room TEXT, kind TEXT, "
+                 "last_seen TEXT, last_event TEXT)")
+
+
+@app.route("/sensor/event", methods=["POST"])
+@require_api_key
+def sensor_event():
+    import time as _t
+    data = request.get_json(silent=True) or {}
+    sid = str(data.get("sensor_id") or "")[:40]
+    event = data.get("event")
+    if not sid or event not in ("fall", "clear", "heartbeat"):
+        return jsonify({"error": "sensor_id and event (fall, clear or heartbeat) are needed"}), 400
+    room = (data.get("room") or "Bathroom")[:40]
+    conn = get_db()
+    _ensure_sensor_table(conn)
+    conn.execute("INSERT INTO sensors (sensor_id, room, kind, last_seen, last_event) VALUES (?,?,?,datetime('now','localtime'),?) "
+                 "ON CONFLICT(sensor_id) DO UPDATE SET room=excluded.room, kind=excluded.kind, "
+                 "last_seen=excluded.last_seen, last_event=excluded.last_event",
+                 (sid, room, (data.get("kind") or "radar")[:20], event))
+    conn.commit()
+    now = _t.time()
+    if event == "clear":
+        _SENSOR_FALL_OPEN.pop(sid, None)
+    alerted = False
+    if event == "fall":
+        opened = _SENSOR_FALL_OPEN.get(sid)
+        if (opened is None or now - opened >= SENSOR_REARM_MAX_S) and not _fall_gap_limited():
+            _SENSOR_FALL_OPEN[sid] = now
+            conn.execute("INSERT INTO alerts (alert_type, detected_at, payload) VALUES ('fall', ?, ?)",
+                         (datetime.now().isoformat(),
+                          json.dumps({"message": "Possible fall in the %s (%s sensor)" % (room.lower(), (data.get("kind") or "radar")),
+                                      "source": "sensor", "sensor_id": sid, "where": room})))
+            conn.commit()
+            alerted = True
+    conn.close()
+    return jsonify({"status": "ok", "alerted": alerted})
+
+
+@app.route("/sensors")
+@require_api_key
+def sensors_list():
+    conn = get_db()
+    _ensure_sensor_table(conn)
+    rows = [dict(r) for r in conn.execute("SELECT * FROM sensors ORDER BY room")]
+    conn.close()
+    return jsonify(rows)
+
+
 # OUTCOME_V1 ----------------------------------------------------------------
 # After a fall alert the person who checked says what it was. Those answers are
 # the only honest measure of false alarms in real use, and "VIGIL missed one"
