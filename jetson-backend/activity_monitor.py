@@ -848,6 +848,11 @@ class FallDetector:
         self.seat_last = 0.0
         self.seat_alerted = False
         self.reason = ""
+        # FALL_EPISODE_V1: where this person is, and how long they have clearly been on their feet
+        self.cx = self.cy = None
+        self.span = 0.0
+        self.stand_since = None
+        self.stand_last = 0.0
 
     # FALL_V5 thresholds (fractions of the person's own standing height)
     V5 = os.environ.get("VIGIL_FALL_V5", "1") == "1"   # FALL_V5B: off on cloud cameras until validated
@@ -993,6 +998,9 @@ class FallDetector:
         if ang is not None:
             self.torso_angle = ang
         self.hip_drop_pct = float(min(1.0, aspect / 2.0))
+        self.cx = float(pts[:, 0].max() + pts[:, 0].min()) / 2.0
+        self.cy = float(pts[:, 1].max() + pts[:, 1].min()) / 2.0
+        self.span = max(w, h)
 
         compact = (len(pts) >= self.MIN_PTS_COMPACT and aspect < self.UP_ASPECT
                    and (ang is None or ang < self.UP_TORSO_DEG))
@@ -1005,6 +1013,14 @@ class FallDetector:
         _sw = abs(float(kp[5][0]) - float(kp[6][0])) if min(float(kp[5][2]), float(kp[6][2])) >= 0.3 else 0.0
         if legs_up and _Hr and h < 0.42 * _Hr and _sw >= 0.33 * h:
             legs_up = False          # FALL_V5: tiny "standing" legs are a body lying end-on, not legs
+        # FALL_EPISODE_V1: upright torso over legs that hang down = standing. Sitting, however
+        # upright, does not count, so only really getting up ends a fall episode.
+        if compact and legs_up:
+            if self.stand_since is None:
+                self.stand_since = now
+            self.stand_last = now
+        elif self.stand_since is not None and now - self.stand_last > 1.0:
+            self.stand_since = None
         if down and legs_up:
             down = False            # FALL_V43: bending over, still on their feet
             self.last_up_t = now    # a fall is timed from the last moment on their feet
@@ -1124,6 +1140,12 @@ class FallDetector:
             if dy >= self.SEAT_DROP and dy / dt >= self.SEAT_RATE:
                 return True
         return False
+
+    def standing_for(self, now=None):
+        """FALL_EPISODE_V1: seconds this person has clearly been on their feet (0 if not)."""
+        if self.stand_since is None:
+            return 0.0
+        return (time.time() if now is None else now) - self.stand_since
 
     def floor_alert_due(self, after_s, now=None):
         """FLOOR_V1: True once per stay on the floor, after `after_s` seconds."""
@@ -1287,10 +1309,70 @@ def _replay_push_tid(tid, kp, shape):
         pass
 
 
+# FALL_EPISODE_V1 ------------------------------------------------------------
+# One fall, one alert. On Nov 16 a person sitting on the floor set off an alert every
+# minute for over an hour: each small movement, and each new tracker ID, restarted a
+# detector that then alerted again. Now an alert opens an episode at that spot, and
+# nothing more is sent from that spot until someone has stood up there (on their feet
+# for FALL_REARM_STAND_S), or FALL_REARM_MAX_S has passed. A fall somewhere else in the
+# room still alerts at once. Reminders for an alert nobody acknowledged are the
+# server's job (after 5 minutes, then every 15), not the detector's.
+FALL_EPISODE = os.environ.get("VIGIL_FALL_EPISODE", "1") == "1"      # "0" restores the old behaviour
+FALL_REARM_STAND_S = 4.0
+FALL_REARM_MAX_S = float(os.environ.get("VIGIL_FALL_REARM_S", "1800"))
+_FALL_EPISODES = []          # [{"t", "cx", "cy", "r"}]
+_FALL_SUPPRESSED = [0, 0.0]  # how many were held back, and when that was last logged
+
+
+def _fall_episodes_tick(now, detectors):
+    """Every frame: an episode ends when someone stands up at that spot, or after FALL_REARM_MAX_S."""
+    if not _FALL_EPISODES:
+        return
+    live = []
+    for ep in _FALL_EPISODES:
+        if now - ep["t"] >= FALL_REARM_MAX_S:
+            continue
+        got_up = any(d is not None and d.cx is not None and d.standing_for(now) >= FALL_REARM_STAND_S
+                     and (d.stand_since or 0) > ep["t"]
+                     and abs(d.cx - ep["cx"]) <= ep["r"] for d in detectors)
+        if got_up:
+            print("[FALL] someone is back on their feet where the last alert was: ready to alert again", flush=True)
+        else:
+            live.append(ep)
+    _FALL_EPISODES[:] = live
+
+
+def _fall_episode_blocks(fd, now, shape=None):
+    """True if this detector's alert belongs to a fall that has already been reported."""
+    if not FALL_EPISODE or fd is None or fd.cx is None:
+        return False
+    try:
+        fw = float(shape[1]) if shape is not None else 0.0
+    except Exception:
+        fw = 0.0
+    for ep in _FALL_EPISODES:
+        if abs(fd.cx - ep["cx"]) <= max(ep["r"], 0.12 * fw) and abs(fd.cy - ep["cy"]) <= 1.5 * max(ep["r"], 0.12 * fw):
+            _FALL_SUPPRESSED[0] += 1
+            if now - _FALL_SUPPRESSED[1] > 60:
+                _FALL_SUPPRESSED[1] = now
+                print("[FALL] same spot as the alert %.0f s ago and nobody has stood up there: not alerting again "
+                      "(%d held back so far)" % (now - ep["t"], _FALL_SUPPRESSED[0]), flush=True)
+            return True
+    return False
+
+
+def _fall_episode_open(fd, now):
+    if fd is None or fd.cx is None:
+        return
+    _FALL_EPISODES.append({"t": now, "cx": fd.cx, "cy": fd.cy, "r": max(60.0, 0.75 * fd.span)})
+    del _FALL_EPISODES[:-6]
+
+
 def _fall_per_person(persons, tids, shape, client):
     """Run a fall detector for every tracked person. Returns True if an alert was sent."""
     now = time.time()
     sent = False
+    _fall_episodes_tick(now, [_FALL_SOLO[0]] + list(_FALL_BY_TID.values()))
     # FALL_V45: with one real person in view, one detector follows them even
     # when the tracker changes their id mid-fall.
     try:
@@ -1301,9 +1383,11 @@ def _fall_per_person(persons, tids, shape, client):
         if _FALL_SOLO[0] is None or now - _FALL_SOLO[1] > 5.0:
             _FALL_SOLO[0] = FallDetector()
         _FALL_SOLO[1] = now
-        if _FALL_SOLO[0].update(persons[0], shape) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC:
+        if _FALL_SOLO[0].update(persons[0], shape) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC \
+                and not _fall_episode_blocks(_FALL_SOLO[0], now, shape):
             _FALL_LAST_ALERT[0] = now
             _fd = _FALL_SOLO[0]
+            _fall_episode_open(_fd, now)
             print(f"[FALL] track=solo hip={_fd.hip_drop_pct:.2f} torso={_fd.torso_angle:.0f} aspect={_fd.aspect:.2f}",
                   flush=True)
             client.alert_fall(_fd.hip_drop_pct, _fd.torso_angle)
@@ -1314,9 +1398,11 @@ def _fall_per_person(persons, tids, shape, client):
             except Exception:
                 pass
             sent = True
-        elif _FALL_SOLO[0].floor_alert_due(FLOOR_ALERT_S) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC:
+        elif _FALL_SOLO[0].floor_alert_due(FLOOR_ALERT_S) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC \
+                and not _fall_episode_blocks(_FALL_SOLO[0], now, shape):
             _FALL_LAST_ALERT[0] = now
             _fd = _FALL_SOLO[0]
+            _fall_episode_open(_fd, now)
             print("[FALL] track=solo on the floor for %.0f s" % (now - (_fd.floor_since or now)), flush=True)
             client.alert_fall(_fd.hip_drop_pct, _fd.torso_angle,
                               message="Person on the floor for over %d seconds" % FLOOR_ALERT_S)
@@ -1332,8 +1418,10 @@ def _fall_per_person(persons, tids, shape, client):
         fd = _FALL_BY_TID.get(tid)
         if fd is None:
             fd = _FALL_BY_TID[tid] = FallDetector()
-        if fd.update(kp, shape) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC:
+        if fd.update(kp, shape) and now - _FALL_LAST_ALERT[0] > FALL_COOLDOWN_SEC \
+                and not _fall_episode_blocks(fd, now, shape):
             _FALL_LAST_ALERT[0] = now
+            _fall_episode_open(fd, now)
             print(f"[FALL] track={tid} hip={fd.hip_drop_pct:.2f} torso={fd.torso_angle:.0f} aspect={fd.aspect:.2f}")
             client.alert_fall(fd.hip_drop_pct, fd.torso_angle)
             try:

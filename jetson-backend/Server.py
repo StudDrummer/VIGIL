@@ -686,11 +686,24 @@ FALL_GAP_SEC = 45
 _FALL_GAP_LAST = [0.0]
 
 
+FALL_BURST_MAX = int(os.environ.get("VIGIL_FALL_BURST_MAX", "3"))        # ONE_ALERT_V1
+FALL_BURST_WINDOW_S = 30 * 60
+_FALL_BURST = []
+
+
 def _fall_gap_limited():
+    """At most one fall alert per FALL_GAP_SEC, and at most FALL_BURST_MAX in any half hour.
+    After three alerts in half an hour everyone has been told; a fourth, fifth and hundredth
+    only teach people to ignore VIGIL. Reminders for an unanswered alert are sent separately."""
     import time as _t
     now = _t.time()
     if now - _FALL_GAP_LAST[0] < FALL_GAP_SEC:
         return True
+    _FALL_BURST[:] = [x for x in _FALL_BURST if now - x < FALL_BURST_WINDOW_S]
+    if FALL_BURST_MAX > 0 and len(_FALL_BURST) >= FALL_BURST_MAX:
+        print("[FALL] %d fall alerts in the last 30 minutes already: this one is not sent" % len(_FALL_BURST), flush=True)
+        return True
+    _FALL_BURST.append(now)
     _FALL_GAP_LAST[0] = now
     return False
 
@@ -2916,6 +2929,8 @@ def send_push(title, message, priority="default", tags=""):
         except Exception as e:
             print("[PUSH] app push failed: %s" % e, flush=True)
     topic = os.environ.get("VIGIL_NTFY_TOPIC")
+    if topic and sent:
+        topic = None        # ONE_ALERT_V1: the app already got it; ntfy is only the fallback, never a second copy
     if topic:
         server = os.environ.get("VIGIL_NTFY_SERVER", "https://ntfy.sh").rstrip("/")
         try:

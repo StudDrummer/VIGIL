@@ -954,12 +954,14 @@ def _site_user_ids(site_id):
 
 
 def _alert_site(s, title, message, priority="high"):
-    _push(s.get("ntfy_topic"), title, message, priority)
+    phones = 0
     try:
-        send_apns(_site_user_ids(s["id"]), title, message, site_id=s["id"], kind="status",
-                  urgent=priority == "urgent")
+        phones = send_apns(_site_user_ids(s["id"]), title, message, site_id=s["id"], kind="status",
+                           urgent=priority == "urgent") or 0
     except Exception as e:
         print("[APNS] %s" % e, flush=True)
+    if not phones:          # ONE_ALERT_V1: ntfy only when no phone got the app's own notification
+        _push(s.get("ntfy_topic"), title, message, priority)
 
 
 @app.route("/auth/push-token", methods=["POST", "DELETE"])
