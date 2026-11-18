@@ -1165,43 +1165,57 @@ FLOOR_ALERT_S = float(os.environ.get("VIGIL_FLOOR_ALERT_S", "60"))   # 0 turns i
 
 
 class CameraMoveWatch:
-    """CAM_MOVED_V1 -- notices when the camera has been moved or turned, so the
+    """CAM_MOVED_V1/V3 -- notices when the camera has been moved or turned, so the
     bed and couch areas (drawn on the old view) are redrawn.
 
-    Every 30 s the scene is compared with a reference picture taken when the
-    areas were last saved. Fixed things in the room (furniture, door frames,
-    corners) are matched between the two. If they have all shifted, or none
-    can be found any more, for 4 checks in a row (2 minutes), the camera has
-    moved: camera_moved.json is written and the app asks for a redraw.
-    Day/night (colour vs infrared) and darkness are never compared, because
-    they change how the room looks without the camera moving.
+    Every 30 s the scene is compared with the reference view saved when the areas
+    were drawn, AND with views of the same room remembered in other light
+    (scene_refs/: morning sun, afternoon shade, evening lamps). Fixed things in the
+    room are matched. The camera counts as moved only when the room is clearly
+    there but shifted or turned against every remembered view, 4 checks in a row.
+    CAM_MOVED_V3: sunlight moving across a room changes which features can be
+    found, which used to read as "the room is gone" after 5 minutes and asked
+    every few hours. Now:
+      - contrast is evened out before matching (sun and shade look alike),
+      - a confident "same view" in new light is remembered automatically, and so
+        is the view whenever someone answers "it did not move",
+      - "fixed features not found" alone needs 2 hours in a row, not 5 minutes.
+    Day/night (colour vs infrared), darkness and people in view are never judged.
     """
     CHECK_S = 30.0
-    NEEDED = 4          # clear shift or turn: 2 minutes in a row
-    NEEDED_LOST = 10    # "fixed features not found": 5 minutes in a row (CAM_MOVED_V2)
+    NEEDED = 4            # clear shift or turn: 2 minutes in a row
+    NEEDED_LOST = 240     # room not recognisable at all: 2 hours in a row (CAM_MOVED_V3)
+    BANK_MAX = 12         # remembered views in other light
+    SAME = dict(shift=0.012, rot=1.0, scale=0.03, inliers=40)
 
     def __init__(self):
         self.base = os.path.dirname(os.path.abspath(__file__))
         self.ref_path = os.path.join(self.base, "scene_reference.jpg")
         self.flag_path = os.path.join(self.base, "camera_moved.json")
         self.zones_path = os.path.join(self.base, "fall_zones.json")
+        self.bank_dir = None
         self.started = time.time()
         self.last = 0.0
         self.strikes = 0
-        self.ref = None
-        self.ref_m = None
+        self.lost_strikes = 0
+        self.refs = {}       # path -> (mtime, gray, colour, bright, kp, des)
+        self.main_m = None
         self.orb = cv2.ORB_create(nfeatures=1000)
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-    @staticmethod
-    def _prep(frame):
+    def _bank(self):
+        return self.bank_dir or os.path.join(self.base, "scene_refs")
+
+    def _prep(self, frame):
         h, w = frame.shape[:2]
         sc = 480.0 / max(w, 1)
         small = cv2.resize(frame, (480, max(1, int(h * sc))))
         b, g, r = [c.astype(np.int16) for c in cv2.split(small)]
         colour = float((np.abs(r - g) + np.abs(b - g)).mean())
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        return gray, colour, float(gray.mean())
+        bright = float(gray.mean())
+        return self.clahe.apply(gray), colour, bright
 
     def _zones_exist(self):
         try:
@@ -1218,6 +1232,80 @@ class CameraMoveWatch:
         except Exception as e:
             print("[CAM_MOVED] could not save reference: %s" % e, flush=True)
 
+    def _load_refs(self):
+        """Main reference plus the bank, re-read only when files change."""
+        paths = [self.ref_path]
+        bank = self._bank()
+        try:
+            m = os.path.getmtime(self.ref_path)
+        except OSError:
+            return []
+        if self.main_m is not None and m != self.main_m:
+            self.refs = {}                               # a new main view: everything else is old
+        self.main_m = m
+        if os.path.isdir(bank):
+            paths += sorted(os.path.join(bank, f) for f in os.listdir(bank) if f.endswith(".jpg"))
+        out = []
+        for p in paths:
+            try:
+                pm = os.path.getmtime(p)
+            except OSError:
+                continue
+            r = self.refs.get(p)
+            if not r or r[0] != pm:
+                img = cv2.imread(p)
+                if img is None:
+                    continue
+                gray, colour, bright = self._prep(img)
+                kp, des = self.orb.detectAndCompute(gray, None)
+                r = self.refs[p] = (pm, gray, colour, bright, kp, des)
+            out.append((p,) + r)
+        for p in list(self.refs):
+            if p not in paths:
+                self.refs.pop(p, None)
+        return out
+
+    def _remember(self, frame, bright):
+        """Keep this view as the same room in this light (oldest learned views go first)."""
+        try:
+            bank = self._bank()
+            os.makedirs(bank, exist_ok=True)
+            p = os.path.join(bank, "light_%03d_%d.jpg" % (int(bright), int(time.time())))
+            cv2.imwrite(p + ".tmp.jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            os.replace(p + ".tmp.jpg", p)
+            learned = sorted(f for f in os.listdir(bank) if f.startswith("light_"))
+            while len(learned) > self.BANK_MAX:
+                old = min(learned, key=lambda f: int(f.rsplit("_", 1)[1].split(".")[0]))
+                os.remove(os.path.join(bank, old))
+                learned.remove(old)
+            print("[CAM_MOVED] same view in new light (brightness %d): remembered" % bright, flush=True)
+        except Exception as e:
+            print("[CAM_MOVED] could not remember view: %s" % e, flush=True)
+
+    def _compare(self, kp, des, rkp, rdes, width):
+        """'same' (confident), 'moved' (room found, but shifted or turned), or 'lost'."""
+        if des is None or rdes is None or len(kp) < 40 or len(rkp) < 40:
+            return "skip", ""
+        pairs = self.bf.knnMatch(rdes, des, k=2)
+        good = [a for a, b in (p for p in pairs if len(p) == 2) if a.distance < 0.75 * b.distance]
+        if len(good) < 15:
+            return "lost", "the room's fixed features are not in view (%d matches)" % len(good)
+        src = np.float32([rkp[g.queryIdx].pt for g in good])
+        dst = np.float32([kp[g.trainIdx].pt for g in good])
+        M, inl = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=4.0)
+        if M is None or inl is None or int(inl.sum()) < 12:
+            return "lost", "no consistent match with the saved view"
+        n = int(inl.sum())
+        shift = float(np.hypot(M[0, 2], M[1, 2])) / width
+        rot = abs(float(np.degrees(np.arctan2(M[1, 0], M[0, 0]))))
+        scale = float(np.hypot(M[0, 0], M[1, 0]))
+        if shift > 0.04 or rot > 3.0 or abs(scale - 1.0) > 0.08:
+            return "moved", "view shifted %.0f%%, turned %.0f degrees" % (shift * 100, rot)
+        S = self.SAME
+        if n >= S["inliers"] and shift < S["shift"] and rot < S["rot"] and abs(scale - 1.0) < S["scale"]:
+            return "same", ""
+        return "near", ""                                # roughly the same view; not confident enough to learn
+
     def update(self, frame, person_present):
         now = time.time()
         if now - self.last < self.CHECK_S or frame is None:
@@ -1227,55 +1315,51 @@ class CameraMoveWatch:
             if os.path.exists(self.flag_path):
                 return                                   # already flagged; the app clears it
             if not os.path.exists(self.ref_path):
-                # No reference yet: take one once the pipeline has settled,
-                # but only if areas have been drawn (they define "the view").
                 if self._zones_exist() and now - self.started > 60 and not person_present:
                     self.save_reference(frame)
                 return
-            m = os.path.getmtime(self.ref_path)
-            if m != self.ref_m:
-                img = cv2.imread(self.ref_path)
-                if img is None:
-                    return
-                self.ref = self._prep(img)
-                self.ref_m = m
-                self.ref_kp, self.ref_des = self.orb.detectAndCompute(self.ref[0], None)
-                self.strikes = 0
-            if person_present:
+            refs = self._load_refs()
+            if not refs or person_present:
                 return                                   # CAM_MOVED_V2: people hide and add features
             gray, colour, bright = self._prep(frame)
-            rgray, rcolour, rbright = self.ref
-            if bright < 35 or rbright < 35:
+            if bright < 35:
                 return                                   # too dark to judge
-            if abs(bright - rbright) > 0.25 * rbright:
-                return                                   # CAM_MOVED_V2: lamps on/off, daylight: not comparable
-            if (colour < 4.0) != (rcolour < 4.0):
-                return                                   # infrared vs colour: not comparable
             kp, des = self.orb.detectAndCompute(gray, None)
-            if des is None or self.ref_des is None or len(kp) < 40 or len(self.ref_kp) < 40:
+            results, comparable = [], False
+            for _p, _m, rgray, rcolour, rbright, rkp, rdes in refs:
+                if rbright < 35 or (colour < 4.0) != (rcolour < 4.0):
+                    continue                             # infrared vs colour: not comparable
+                near_light = abs(bright - rbright) <= 0.25 * rbright
+                comparable = comparable or near_light
+                verdict, why = self._compare(kp, des, rkp, rdes, gray.shape[1])
+                results.append((verdict, why, near_light))
+                if verdict in ("same", "near"):
+                    break
+            verdicts = [r[0] for r in results]
+            if "same" in verdicts or "near" in verdicts:
+                self.strikes = self.lost_strikes = 0
+                seen_light = any(abs(bright - r[4]) <= 0.12 * max(r[4], 1) and (colour < 4.0) == (r[3] < 4.0)
+                                 for r in refs)
+                if "same" in verdicts and not seen_light:
+                    self._remember(frame, bright)        # the same room in light not seen before
                 return
-            pairs = self.bf.knnMatch(self.ref_des, des, k=2)
-            good = [a for a, b in (p for p in pairs if len(p) == 2) if a.distance < 0.75 * b.distance]
-            moved, why, lost = False, "", False
-            if len(good) < 15:
-                moved, why, lost = True, "the room's fixed features are no longer in view (%d matches)" % len(good), True
-            else:
-                src = np.float32([self.ref_kp[g.queryIdx].pt for g in good])
-                dst = np.float32([kp[g.trainIdx].pt for g in good])
-                M, inl = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=4.0)
-                if M is None or inl is None or int(inl.sum()) < 12:
-                    moved, why = True, "no consistent match with the saved view"
-                else:
-                    shift = float(np.hypot(M[0, 2], M[1, 2])) / gray.shape[1]
-                    rot = abs(float(np.degrees(np.arctan2(M[1, 0], M[0, 0]))))
-                    scale = float(np.hypot(M[0, 0], M[1, 0]))
-                    if shift > 0.04 or rot > 3.0 or abs(scale - 1.0) > 0.08:
-                        moved, why = True, "view shifted %.0f%%, turned %.0f degrees" % (shift * 100, rot)
-            self.strikes = self.strikes + 1 if moved else 0
-            need = self.NEEDED_LOST if lost else self.NEEDED
+            moved = [r for r in results if r[0] == "moved" and r[2]]
+            lost = [r for r in results if r[0] == "lost"]   # any light: 2 hours unrecognised in every light is a move
             if moved:
-                print("[CAM_MOVED] check %d/%d: %s" % (self.strikes, need, why), flush=True)
-            if self.strikes >= need:
+                self.strikes += 1
+                why = moved[0][1]
+                print("[CAM_MOVED] check %d/%d: %s" % (self.strikes, self.NEEDED, why), flush=True)
+            else:
+                self.strikes = 0
+            if lost and not moved and len(lost) == len(results):
+                self.lost_strikes += 1
+                if self.lost_strikes % 20 == 1:
+                    print("[CAM_MOVED] room not recognised (%d/%d checks): %s"
+                          % (self.lost_strikes, self.NEEDED_LOST, lost[0][1]), flush=True)
+            elif not lost:
+                self.lost_strikes = 0
+            if self.strikes >= self.NEEDED or self.lost_strikes >= self.NEEDED_LOST:
+                why = moved[0][1] if moved else lost[0][1]
                 with open(self.flag_path, "w") as f:
                     json.dump({"moved": True, "at": datetime.now().isoformat(timespec="seconds"), "reason": why}, f)
                 print("[CAM_MOVED] camera has moved: asking for the bed and couch areas to be redrawn", flush=True)

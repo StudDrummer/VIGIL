@@ -119,6 +119,48 @@ def test_person_in_front_not_flagged():
     assert not checks(watch_with_ref(BASE), blocked)
 
 
+def sun(img, t):
+    """CAM_MOVED_V3: daylight moving across the room: a bright patch sliding sideways, the far
+    side in shade, overall level drifting. The same room, never moved."""
+    h, w = img.shape[:2]
+    x = np.linspace(0, 1, w, dtype=np.float32)[None, :]
+    centre = (t % 1.0)
+    gain = 0.55 + 0.9 * np.exp(-((x - centre) ** 2) / 0.04)
+    gain = np.repeat(gain, h, axis=0)[..., None]
+    level = 0.8 + 0.3 * np.sin(t * 6.28)
+    return np.clip(img.astype(np.float32) * gain * level, 0, 255).astype(np.uint8)
+
+
+def test_a_day_of_sunlight_never_flagged():
+    w = watch_with_ref(BASE)
+    for i in range(300):                       # 2.5 hours of checks with the light moving
+        T[0] += 31
+        w.update(sun(BASE, i / 120.0), False)
+    assert not os.path.exists(w.flag_path)
+
+
+def test_room_gone_needs_two_hours():
+    wall = np.full_like(BASE, 0)
+    rng = np.random.default_rng(3)
+    for _ in range(400):                        # a different scene with its own texture
+        x, y = rng.integers(0, 1240), rng.integers(0, 700)
+        cv2.circle(wall, (int(x), int(y)), int(rng.integers(3, 12)), tuple(int(c) for c in rng.integers(60, 200, 3)), -1)
+    wall = cv2.addWeighted(wall, 1.0, np.full_like(BASE, int(BASE.mean()) - 60), 1.0, 0)
+    w = watch_with_ref(BASE)
+    assert not checks(w, wall, n=200)            # 100 minutes: still not asked
+    assert checks(w, wall, n=60)                 # past 2 hours: asked
+
+
+def test_learned_views_kept_and_capped():
+    w = watch_with_ref(BASE)
+    for i in range(400):
+        T[0] += 31
+        w.update(sun(BASE, i / 50.0), False)
+    bank = os.path.join(w.base, "scene_refs")
+    learned = [f for f in os.listdir(bank) if f.startswith("light_")] if os.path.isdir(bank) else []
+    assert 1 <= len(learned) <= w.BANK_MAX, learned
+
+
 if __name__ == "__main__":
     for name, f in list(globals().items()):
         if name.startswith("test_"):

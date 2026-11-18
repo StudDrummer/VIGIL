@@ -64,7 +64,7 @@ import {launchImageLibrary,launchCamera} from 'react-native-image-picker';  // P
 // ─────────────────────────────────────────────
 const DEFAULT_IP    = 'your-jetson-ip';
 const DEFAULT_PORT  = '5001';
-const APP_VERSION   = '1.0 (4)';   // keep in step with MARKETING_VERSION (CURRENT_PROJECT_VERSION) in the Xcode project
+const APP_VERSION   = '1.0 (5)';   // keep in step with MARKETING_VERSION (CURRENT_PROJECT_VERSION) in the Xcode project
 const TIMEOUT_MS    = 10_000;
 const AUTO_SYNC_SEC = 60;
 const VIGIL_KEY     = 'YOUR_VIGIL_API_KEY';   // must match VIGIL_API_KEY on the monitoring unit
@@ -205,6 +205,7 @@ interface Person {
   height_px:number|null; confidence:number; frames_seen:number;
   first_seen_at:string|null; last_seen_at:string|null;
   height_cm?:number|null;                                  // HEIGHT_PER_PERSON_V1
+  away?:number|null;                                       // AWAY_V1
 }
 interface PersonAlert {
   id:number; alert_type:string; room_id:string;
@@ -4248,6 +4249,11 @@ export default function App() {
       {text:'Choose photo',onPress:()=>choosePhoto(p)},
       {text:'Use initials instead of photo',onPress:()=>setInitials(p)},
       {text:p.is_resident?'Mark as visitor':'Mark as resident',onPress:()=>savePersonEdit(p,p.name??'Person',!p.is_resident)},
+      // AWAY_V1: someone travelling is never given to anyone the camera sees
+      {text:p.away?`${p.name??'They'} is back home`:`${p.name??'They'} is away (travelling)`,onPress:async()=>{
+        try{await AX.post(`${url()}/persons/${p.id}/away`,{away:!p.away},{timeout:8000});fetchPersons();
+          if(!p.away)Alert.alert(`${p.name} is away`,`VIGIL will not label anyone as ${p.name} until you mark them back home.`);}
+        catch(_e){Alert.alert('Could not save','Check the connection to the camera.');}}},
       ...(others.length>0?[{text:'Same person as another entry',onPress:()=>Alert.alert(
         `Merge ${p.name}`,'Everything recorded for this entry moves to the person you choose, and this entry is removed.',
         [...others.slice(0,6).map(o=>({text:`Merge into ${o.name}`,style:'destructive' as const,onPress:()=>mergePerson(p.id,o.id)})),
@@ -5494,7 +5500,7 @@ export default function App() {
                 <View style={{flex:1,minWidth:0}}>
                   <Text style={{color:C.text,fontSize:14,fontWeight:'600'}} numberOfLines={1} ellipsizeMode="tail">{p.name??'Unidentified Person'}</Text>
                   <Text style={{color:C.sub,fontSize:11,marginTop:2}} numberOfLines={1} ellipsizeMode="tail">
-                    {p.is_resident?'Resident':'Visitor'}{p.height_cm?` · ${fmtHeight(p.height_cm,pUnits)}`:''}{p.name?' · Tap for trends':''}
+                    {p.away?'Away':p.is_resident?'Resident':'Visitor'}{p.height_cm?` · ${fmtHeight(p.height_cm,pUnits)}`:''}{p.name?' · Tap for trends':''}
                   </Text>
                 </View>
               </View>

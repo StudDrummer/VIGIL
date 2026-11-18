@@ -2106,6 +2106,11 @@ def reload_known_persons() -> None:
             'SELECT id, height_px, confidence, frames_seen, colour_hist, last_seen_at FROM persons '
             "WHERE height_px IS NOT NULL AND (name IS NOT NULL OR datetime(last_seen_at) > datetime('now','localtime','-1 day'))"
         ).fetchall()
+        try:                                     # AWAY_V1: someone travelling is not loaded
+            _aw = {r[0] for r in conn.execute("SELECT id FROM persons WHERE away=1")}
+            rows = [r for r in rows if r[0] not in _aw]
+        except sqlite3.OperationalError:
+            pass
         # Move the id counter past every id already stored, so a restart
         # can never regenerate an existing id and merge two people.
         try:
@@ -2167,6 +2172,51 @@ def _next_id():
 
 
 _named_cache = [0.0, set()]
+_away_cache = [0.0, set()]
+_away_back = set()      # marked back: reload them so they are recognisable at once
+
+
+def _away_ids():
+    """AWAY_V1: people marked away (travelling) in the app. Cached 20 s. Nobody in view can be
+    given their name while they are away."""
+    now = time.time()
+    if now - _away_cache[0] < 20:
+        return _away_cache[1]
+    try:
+        import sqlite3 as _sq
+        _c = _sq.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vigil.db"), timeout=2)
+        try:
+            _rows = _c.execute("SELECT id FROM persons WHERE away=1").fetchall()
+        except _sq.OperationalError:
+            _rows = []                  # column not there yet: nobody is away
+        _c.close()
+        new = {r[0] for r in _rows}
+        for p in new - _away_cache[1]:
+            print("[AWAY] %s is away: never named while away" % p, flush=True)
+        _away_back.update(_away_cache[1] - new)
+        _away_cache[1] = new
+        _away_cache[0] = now
+    except Exception:
+        _away_cache[0] = now - 15
+    return _away_cache[1]
+
+
+def _drop_away():
+    """Forget an away person's live state, and take their name off any track holding it."""
+    away = _away_ids()
+    if _away_back:
+        _away_back.clear()
+        _named_cache[0] = 0
+        reload_known_persons()          # back home: restored from the database
+    if not away:
+        return away
+    for p in away:
+        _signatures.pop(p, None)
+        _LAST_SEEN.pop(p, None)
+    for tid, pid in list(_track_to_pid.items()):
+        if pid in away:
+            _track_to_pid.pop(tid, None)
+    return away
 
 
 def _named_ids():
@@ -2179,7 +2229,7 @@ def _named_ids():
         _c = _sq.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vigil.db"), timeout=2)
         _rows = _c.execute("SELECT id FROM persons WHERE name IS NOT NULL AND name != ''").fetchall()
         _c.close()
-        _named_cache[1] = {r[0] for r in _rows}
+        _named_cache[1] = {r[0] for r in _rows} - _away_ids()   # AWAY_V1
         _named_cache[0] = now
     except Exception:
         _named_cache[0] = now - 15      # retry soon, keep the last known set
@@ -2238,6 +2288,7 @@ def vigil_track_persons(all_persons, room_id=None, frame=None, track_ids=None):
             return None
 
         _cleanup()
+        _drop_away()            # AWAY_V1
         frame_assignments = []  # (person_id, height_px) for this frame, in all_persons order
 
         global _track_to_pid

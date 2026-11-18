@@ -1204,12 +1204,43 @@ def room_camera_status(room_id):
 @require_api_key
 def get_persons():
     conn = get_db()
+    _ensure_away_column(conn)
     room_id = request.args.get("room_id", "room_1")
     rows = conn.execute(
         "SELECT * FROM persons WHERE room_id=? ORDER BY is_resident DESC, last_seen_at DESC",
         (room_id,)).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+def _ensure_away_column(conn):
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(persons)")}
+    if "away" not in cols:
+        conn.execute("ALTER TABLE persons ADD COLUMN away INTEGER DEFAULT 0")
+    if "away_since" not in cols:
+        conn.execute("ALTER TABLE persons ADD COLUMN away_since TEXT")
+    conn.commit()
+
+
+@app.route("/persons/<person_id>/away", methods=["POST"])
+@require_api_key
+def person_away(person_id):
+    """AWAY_V1: someone is travelling. While away, VIGIL never gives their name to anyone in view
+    (so a visitor or another family member is not labelled as them), and the app shows them as away.
+    Turning it off makes them recognisable again at once."""
+    body = request.get_json(silent=True) or {}
+    away = bool(body.get("away"))
+    conn = get_db()
+    _ensure_away_column(conn)
+    if not conn.execute("SELECT 1 FROM persons WHERE id=?", (person_id,)).fetchone():
+        conn.close()
+        return jsonify({"status": "error", "reason": "no such person"}), 404
+    conn.execute("UPDATE persons SET away=?, away_since=? WHERE id=?",
+                 (1 if away else 0, datetime.now().isoformat(timespec="seconds") if away else None, person_id))
+    conn.commit()
+    conn.close()
+    print("[AWAY] %s is %s" % (person_id, "away" if away else "back"), flush=True)
+    return jsonify({"status": "ok", "away": away})
+
 
 @app.route("/persons/detect", methods=["POST"])
 @require_api_key
@@ -3339,15 +3370,39 @@ _MOVED_FLAG = os.path.join(_BASE_DIR, "camera_moved.json")
 _SCENE_REF = os.path.join(_BASE_DIR, "scene_reference.jpg")
 
 
+_SCENE_BANK = os.path.join(_BASE_DIR, "scene_refs")
+
+
 def _camera_view_accepted():
+    """Areas were redrawn: the current view becomes THE reference, and the views remembered
+    for other lighting are dropped, because they belong to the old view."""
     try:
         if os.path.exists("/dev/shm/vigil_raw.jpg"):
             shutil.copyfile("/dev/shm/vigil_raw.jpg", _SCENE_REF + ".tmp")
             os.replace(_SCENE_REF + ".tmp", _SCENE_REF)
+        if os.path.isdir(_SCENE_BANK):
+            for f in os.listdir(_SCENE_BANK):
+                os.remove(os.path.join(_SCENE_BANK, f))
         if os.path.exists(_MOVED_FLAG):
             os.remove(_MOVED_FLAG)
     except Exception as e:
         print("[CAM_MOVED] could not reset: %s" % e, flush=True)
+
+
+def _camera_not_moved():
+    """CAM_MOVED_V3: "it did not move". The view is the same room in different light, so it is
+    ADDED to the remembered views instead of replacing the reference. Before, the afternoon view
+    replaced the morning one, and the next morning looked "moved" again."""
+    try:
+        os.makedirs(_SCENE_BANK, exist_ok=True)
+        if os.path.exists("/dev/shm/vigil_raw.jpg"):
+            dst = os.path.join(_SCENE_BANK, "told_%d.jpg" % int(time.time()))
+            shutil.copyfile("/dev/shm/vigil_raw.jpg", dst + ".tmp")
+            os.replace(dst + ".tmp", dst)
+        if os.path.exists(_MOVED_FLAG):
+            os.remove(_MOVED_FLAG)
+    except Exception as e:
+        print("[CAM_MOVED] could not dismiss: %s" % e, flush=True)
 
 
 @app.route("/camera/setup-status", methods=["GET"])
@@ -3398,7 +3453,7 @@ def identity_proportions():
 @app.route("/camera/moved/dismiss", methods=["POST"])
 @require_api_key
 def camera_moved_dismiss():
-    _camera_view_accepted()
+    _camera_not_moved()
     return jsonify({"status": "ok"})
 
 
