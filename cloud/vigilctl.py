@@ -490,6 +490,22 @@ def cmd_plan(a):
                                          "   video locked" if p.get("video_locked") == "1" else ""))
 
 
+def cmd_sensor(a):
+    """SENSOR_V1: the secrets file for a bathroom radar that reports through this camera."""
+    st = load()
+    c = next((c for c in st["cameras"] if c["id"] == a.camera), None)
+    if not c:
+        sys.exit("No camera %s" % a.camera)
+    out = os.path.join(CONF, "sensor_%s_secrets.yaml" % c["id"])
+    _write(out, "# VIGIL bathroom sensor for camera %s (%s). Keep private; save as secrets.yaml next to\n"
+                "# hardware/bathroom-sensor/vigil-bathroom.yaml, then add the Wi-Fi lines.\n"
+                'vigil_sensor_url: "https://%s/relay/%s/sensor"\nvigil_relay_key: "%s"\n'
+                'wifi_ssid: ""\nwifi_password: ""\nsetup_password: "%s"\nota_password: "%s"\n'
+                % (c["id"], c["name"], st["domain"], c["id"], c["stream_pass"],
+                   secrets.token_urlsafe(9), secrets.token_urlsafe(12)), secret=True)
+    print("Sensor settings: %s" % out)
+
+
 def cmd_boxes(_a):
     """AUTOUPDATE_V1: every relay box, what it is doing and which code it runs."""
     try:
@@ -588,6 +604,7 @@ def main():
     sub.add_parser("users").set_defaults(f=cmd_users)
     sub.add_parser("apply").set_defaults(f=cmd_apply)
     sub.add_parser("boxes").set_defaults(f=cmd_boxes)
+    s = sub.add_parser("sensor"); s.add_argument("camera"); s.set_defaults(f=cmd_sensor)
     s = sub.add_parser("add-remote"); s.add_argument("--id", required=True); s.add_argument("--name", required=True)
     s.add_argument("--url", required=True, help="e.g. http://100.107.17.113:5001")
     s.add_argument("--key", required=True, help="that server's VIGIL_API_KEY")

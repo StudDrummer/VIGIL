@@ -7,6 +7,8 @@ future sensor board. Writes vigil_box_base.stl, vigil_box_lid.stl and vigil_box_
     python3 hardware/vigil_box.py
 
 Print: PETG or PLA, 0.2 mm layers, no supports. Base open side up, lid top side down.
+Assembly: drop the Pi onto the four pegs, put the lid on; three tubes under the lid clamp the
+board, so it cannot slide or rattle. No screws. (Set PEGS = False for M2.5 screw posts.)
 Board positions follow the Raspberry Pi Zero mechanical drawing (65 x 30 mm board, holes
 58 x 23 mm apart, connectors 12.4 / 41.4 / 54.0 mm from the SD-card end). PRINT ONE AND
 TEST-FIT before making more; adjust the numbers at the top if a port is off.
@@ -31,12 +33,16 @@ CHAMFER = 1.8
 
 PCB_L, PCB_W, PCB_T = 65.0, 30.0, 1.6
 HOLES = [(3.5, 3.5), (61.5, 3.5), (3.5, 26.5), (61.5, 26.5)]
-POST_H, POST_D, PILOT_D = 4.0, 5.6, 2.1          # M2.5 thread-forming screw
+POST_H, POST_D, PILOT_D = 4.0, 5.6, 2.1          # M2.5 thread-forming screw (only when PEGS is False)
+PEGS = True                                      # pegs through the board's holes; the lid clamps it. No screws needed
+PEG_D, PEG_H = 2.4, 1.4                          # the holes are 2.75 mm; the board is 1.6 mm thick
+CLAMP_OD, CLAMP_ID, CLAMP_GAP = 5.0, 2.9, 0.15   # tubes under the lid that press the board onto its posts
+CLAMP_HOLES = [0, 2, 3]                          # three corners; the fourth sits beside the status light
 USB_X, PWR_X = 41.4, 54.0                        # connector centres from the SD-card end
 PLUG_W, PLUG_H = 12.5, 7.6                       # room for a micro-USB plug's moulding
 SD_Y, SD_W, SD_H = 16.9, 15.0, 4.2               # microSD slot on the short edge
 PCB_X0 = WALL + 9.0                              # board's SD-card end, from the outside left face
-PCB_Y0 = WALL + 0.7                              # board's connector edge, from the outside front face
+PCB_Y0 = WALL + 1.0                              # board's connector edge, from the outside front face
 
 
 def rrect(length, width, radius, height, z=0.0, top_inset=0.0):
@@ -78,7 +84,10 @@ def base():
     board_z = FLOOR + POST_H
     for hx, hy in HOLES:                                           # posts the board screws onto
         out += cyl(PCB_X0 + hx, PCB_Y0 + hy, FLOOR - 0.01, POST_D, POST_H + 0.01)
-        out -= cyl(PCB_X0 + hx, PCB_Y0 + hy, FLOOR + 0.6, PILOT_D, POST_H)
+        if PEGS:
+            out += cyl(PCB_X0 + hx, PCB_Y0 + hy, FLOOR + POST_H - 0.01, PEG_D, PEG_H + 0.01)
+        else:
+            out -= cyl(PCB_X0 + hx, PCB_Y0 + hy, FLOOR + 0.6, PILOT_D, POST_H)
     port_z = board_z + PCB_T + 1.5                                  # centre of the micro-USB sockets
     for cx in (USB_X, PWR_X):                                       # power in, and USB for a network adapter
         out -= box(PCB_X0 + cx - PLUG_W / 2, -1, port_z - PLUG_H / 2, PLUG_W, WALL + 2, PLUG_H)
@@ -102,6 +111,16 @@ def lid():
     # the lip must not block the plugs or the card
     for cx in (USB_X, PWR_X):
         out -= box(PCB_X0 + cx - PLUG_W / 2 - 0.5, 0, -LIP_H - 1, PLUG_W + 1, WALL + FIT + LIP_T + 1, LIP_H + 1)
+    # clamps: with the lid on, these hold the board down on its posts so it cannot rattle, lift or slide
+    board_top = FLOOR + POST_H + PCB_T - BASE_H                     # in lid coordinates (lid underside is z=0)
+    if not PEGS:
+        board_top += 1.8                                            # land on the screw heads instead
+    for i in CLAMP_HOLES:
+        hx, hy = HOLES[i]
+        x, y = PCB_X0 + hx, PCB_Y0 + hy
+        z0 = board_top + CLAMP_GAP
+        out += cyl(x, y, z0, CLAMP_OD, -z0 + 0.01)
+        out -= cyl(x, y, z0 - 0.01, CLAMP_ID, PEG_H + 0.6)
     # the mark: a V, sunk 0.6 mm into the top
     cx, cy, d = L / 2, W / 2, 0.6
     arm = 13.0
