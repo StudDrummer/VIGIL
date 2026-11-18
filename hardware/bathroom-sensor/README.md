@@ -29,9 +29,9 @@ a heartbeat every 5 minutes.
 
 - **Water:** Seeed's guide says to avoid flowing water in view. Aim it so the shower stream
   is not the main thing it sees, and test with the shower running.
-- **Steam:** the board is bare. Start with Seeed's own case (the "mmWave 3D Case" STL in
-  the Resources section of Seeed's MR60FDA2 wiki page). A VIGIL case with a splash lip
-  comes after measuring a real kit.
+- **Steam:** the board is bare, so it goes in the VIGIL puck (`hardware/vigil_sensor.py`):
+  sealed face, nothing opening downward, breathing gap at the ceiling. Seeed's own case
+  (the "mmWave 3D Case" STL on its wiki) is a quick fallback.
 - **Power:** it needs constant 5 V USB-C. Most bathrooms have an outlet by the mirror, not
   the ceiling: use a flat USB-C cable along the wall, or mount it high on the wall above the
   outlet instead of on the ceiling.
