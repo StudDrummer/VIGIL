@@ -69,6 +69,19 @@ class Light:
                     f.write("none")
             except OSError:
                 self.path = None
+        # On a Pi 3 the red power light sits next to the green one under the box's light pipe:
+        # turn it off so the dot on the lid shows only VIGIL's status. (A Zero has no power light.)
+        for name in ("PWR", "led1"):
+            p = "/sys/class/leds/%s" % name
+            if os.path.isdir(p):
+                try:
+                    with open(p + "/trigger", "w") as f:
+                        f.write("none")
+                    with open(p + "/brightness", "w") as f:
+                        f.write("0")
+                except OSError:
+                    pass
+                break
         threading.Thread(target=self._run, daemon=True).start()
 
     def _set(self, on):
