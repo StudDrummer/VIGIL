@@ -35,3 +35,14 @@ a heartbeat every 5 minutes.
 - **Power:** it needs constant 5 V USB-C. Most bathrooms have an outlet by the mirror, not
   the ceiling: use a flat USB-C cable along the wall, or mount it high on the wall above the
   outlet instead of on the ceiling.
+
+## What to buy (one bathroom)
+
+| Item | Why | About |
+| --- | --- | --- |
+| Seeed Studio MR60FDA2 60 GHz Fall Detection Sensor Kit with XIAO ESP32C6 (Seeed 114993388) | The sensor | $25 |
+| USB-A to USB-C cable, 90 degree (right-angle) USB-C end, 3 m / 10 ft | Fits inside the puck and reaches an outlet | $10 |
+| 5 V USB wall charger, 1 A or more | Power | $8 (or one you have) |
+| M2 x 6 mm self-tapping (thread-forming) screws for plastic, 2 | Hold the kit in the puck | $8 for a small kit |
+| No. 6 x 1 in flat-head screws and drywall anchors, 2 each | Ceiling mount (or large 3M Command strips) | $5 |
+| Adhesive cable clips, white | Run the cable tidily to the outlet | $5 |

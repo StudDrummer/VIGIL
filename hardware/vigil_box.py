@@ -7,6 +7,9 @@ future sensor board. Writes vigil_box_base.stl, vigil_box_lid.stl and vigil_box_
     python3 hardware/vigil_box.py
 
 Print: PETG or PLA, 0.2 mm layers, no supports. Base open side up, lid top side down.
+Purpose built in: a light pipe that turns the board's status light into one dot on the lid
+(steady = working, double blink = open the app to set up, slow blink = cannot find the camera,
+fast blink = no internet); a pocket underneath for the setup-code sticker; keyholes for a wall.
 Assembly: drop the Pi onto the four pegs, put the lid on; three tubes under the lid clamp the
 board, so it cannot slide or rattle. No screws. (Set PEGS = False for M2.5 screw posts.)
 Board positions follow the Raspberry Pi Zero mechanical drawing (65 x 30 mm board, holes
@@ -38,6 +41,10 @@ PEGS = True                                      # pegs through the board's hole
 PEG_D, PEG_H = 2.4, 1.4                          # the holes are 2.75 mm; the board is 1.6 mm thick
 CLAMP_OD, CLAMP_ID, CLAMP_GAP = 5.0, 2.9, 0.15   # tubes under the lid that press the board onto its posts
 CLAMP_HOLES = [0, 2, 3]                          # three corners; the fourth sits beside the status light
+LED_XY = (60.5, 6.5)                             # the board's green ACT light, from the SD-card end / connector edge
+LIGHT = "pinhole"                                # "pinhole": 1.2 mm dot through the lid (any colour, e.g. black)
+                                                 # "skin": 0.4 mm thin spot (needs a light-coloured lid)
+QR_POCKET = 28.0                                 # square recess under the base for the setup-code sticker
 USB_X, PWR_X = 41.4, 54.0                        # connector centres from the SD-card end
 PLUG_W, PLUG_H = 12.5, 7.6                       # room for a micro-USB plug's moulding
 SD_Y, SD_W, SD_H = 16.9, 15.0, 4.2               # microSD slot on the short edge
@@ -96,6 +103,8 @@ def base():
         out -= box(16.0 + i * 8.6, W - WALL - 1, 6.0, 3.0, WALL + 2, 9.0)
     for fx, fy in ((14, 12), (L - 14, 12), (14, W - 12), (L - 14, W - 12)):                     # rubber feet
         out -= cyl(fx, fy, -0.01, 9.0, 0.8)
+    q = QR_POCKET                                                   # setup-code sticker, so the code is never lost
+    out -= box(L / 2 - q / 2, W / 2 - q / 2 - 2.0, -0.01, q, q, 0.5)
     for kx in (L / 2 - 20, L / 2 + 20):                             # keyholes for two wall screws
         out -= cyl(kx, W / 2 + 4, -0.01, 8.0, FLOOR + 0.02)
         out -= slot(kx - 2.0, W / 2 + 4 - 9.0, -0.01, 4.0, 4.0, FLOOR + 0.02) + box(kx - 2.0, W / 2 - 5.0, -0.01, 4.0, 9.0, FLOOR + 0.02)
@@ -108,6 +117,10 @@ def lid():
     lip_i = rrect(L - 2 * (WALL + FIT + LIP_T), W - 2 * (WALL + FIT + LIP_T), R - WALL - FIT - LIP_T, LIP_H + 1).translate(
         (WALL + FIT + LIP_T, WALL + FIT + LIP_T, -LIP_H - 0.5))
     out = cap + (lip_o - lip_i)
+    # hollow the lid: a 1.8 mm top skin is enough, and it halves the plastic (and the print-service price)
+    TOP = LID_H - 1.8
+    out -= rrect(L - 2 * (WALL + FIT + LIP_T), W - 2 * (WALL + FIT + LIP_T), R - WALL - FIT - LIP_T, TOP + 0.01).translate(
+        (WALL + FIT + LIP_T, WALL + FIT + LIP_T, -0.01))
     # the lip must not block the plugs or the card
     for cx in (USB_X, PWR_X):
         out -= box(PCB_X0 + cx - PLUG_W / 2 - 0.5, 0, -LIP_H - 1, PLUG_W + 1, WALL + FIT + LIP_T + 1, LIP_H + 1)
@@ -119,7 +132,7 @@ def lid():
         hx, hy = HOLES[i]
         x, y = PCB_X0 + hx, PCB_Y0 + hy
         z0 = board_top + CLAMP_GAP
-        out += cyl(x, y, z0, CLAMP_OD, -z0 + 0.01)
+        out += cyl(x, y, z0, CLAMP_OD, TOP - z0 + 0.01)
         out -= cyl(x, y, z0 - 0.01, CLAMP_ID, PEG_H + 0.6)
     # the mark: a V, sunk 0.6 mm into the top
     cx, cy, d = L / 2, W / 2, 0.6
@@ -128,8 +141,16 @@ def lid():
         a = cyl(cx + sx * arm * 0.62, cy + arm * 0.62, LID_H - d, 4.4, d + 0.1)
         b = cyl(cx, cy - arm * 0.62, LID_H - d, 4.4, d + 0.1)
         out -= Manifold.batch_hull([a, b])
-    # status light: a thin window over the board's LED, left 0.4 mm thick so light shows through a light filament
-    out -= cyl(PCB_X0 + 60.5, PCB_Y0 + 6.5, -0.01, 3.2, LID_H - 0.4)
+    # status light: a light pipe from just above the board's LED up to the lid, so the light shows
+    # as one crisp dot instead of a glow through the whole case
+    lx, ly = PCB_X0 + LED_XY[0], PCB_Y0 + LED_XY[1]
+    board_top = FLOOR + POST_H + PCB_T - BASE_H
+    pipe_z0 = board_top + 1.2
+    out += cyl(lx, ly, pipe_z0, 4.4, TOP - pipe_z0 + 0.01) - cyl(lx, ly, pipe_z0 - 0.01, 2.6, TOP - pipe_z0 + 0.02)
+    if LIGHT == "pinhole":
+        out -= cyl(lx, ly, -0.5, 1.2, LID_H + 1)
+    else:
+        out -= cyl(lx, ly, pipe_z0 - 0.5, 2.6, LID_H - 0.4 - pipe_z0 + 0.5)
     return out
 
 
