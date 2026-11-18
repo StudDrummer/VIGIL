@@ -708,19 +708,42 @@ def _fall_gap_limited():
     return False
 
 
+LAB_FLAG = "/dev/shm/vigil_lab"
+
+
+def _lab_mode():
+    """LAB_MODE_V1: while tests/fall_lab.py runs it refreshes this flag at every trial. Falls are then
+    recorded (marked as lab tests) but nobody's phone rings, the half-hour cap does not hide later
+    trials, and they never count in the accuracy numbers. A flag left behind expires by itself after
+    20 minutes, so real alerts can never stay silenced."""
+    try:
+        import time as _t
+        return _t.time() - os.path.getmtime(LAB_FLAG) < 20 * 60
+    except OSError:
+        return False
+
+
 @app.route("/alert/fall", methods=["POST"])
 @require_api_key
 def alert_fall():
     data = request.get_json()
     if not data: return jsonify({"error": "no data"}), 400
-    if _fall_gap_limited():
+    lab = _lab_mode()
+    if not lab and _fall_gap_limited():
         return jsonify({"status": "rate_limited"}), 429
+    msg = data.get("message", "Fall detected")
+    payload = {"hip_drop_pct": data.get("hip_drop_pct"), "torso_angle": data.get("torso_angle"),
+               "message": ("LAB TEST: " + msg) if lab else msg}
+    if lab:
+        payload["lab"] = True
     conn = get_db()
-    conn.execute("INSERT INTO alerts (alert_type,detected_at,payload) VALUES ('fall',?,?)", (
-        data.get("detected_at", datetime.now().isoformat()),
-        json.dumps({"hip_drop_pct": data.get("hip_drop_pct"), "torso_angle": data.get("torso_angle"),
-                    "message": data.get("message", "Fall detected")})))
+    conn.execute("INSERT INTO alerts (alert_type,detected_at,payload,seen) VALUES ('fall',?,?,?)", (
+        data.get("detected_at", datetime.now().isoformat()), json.dumps(payload), 1 if lab else 0))
     conn.commit()
+    if lab:
+        conn.close()
+        print("[FALL] lab test fall recorded (no notifications)", flush=True)
+        return jsonify({"status": "ok", "lab": True})
     cfg = get_config(conn)
     room = conn.execute(
         "SELECT * FROM rooms WHERE id=?", (data.get("room_id", "room_1"),)
@@ -2597,7 +2620,8 @@ def alerts_accuracy():
     _ensure_outcome_columns(conn); _ensure_ack_columns(conn)
     since = (datetime.now() - timedelta(days=days)).isoformat()
     rows = conn.execute("SELECT id, alert_type, outcome, detected_at, acknowledged_at FROM alerts "
-                        "WHERE alert_type IN ('fall','missed_fall') AND detected_at >= ?", (since,)).fetchall()
+                        "WHERE alert_type IN ('fall','missed_fall') AND detected_at >= ? "
+                        "AND COALESCE(payload,'') NOT LIKE '%\"lab\": true%'", (since,)).fetchall()
     try:
         bulk = {r[0] for r in conn.execute("SELECT id FROM alerts WHERE ack_bulk=1")}
     except sqlite3.OperationalError:

@@ -44,6 +44,10 @@ VIGIL Camera Pipeline v3 - Camera-First MVP
 Works with RTSP camera or USB webcam (--source 0 for testing)
 """
 import argparse, json, os, sys, time
+try:                                    # LOG_FLUSH_V1: under systemd, print lines reach the journal at once
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 from collections import deque
 from datetime import datetime
 import base64
@@ -1422,7 +1426,7 @@ def _fall_per_person(persons, tids, shape, client):
                 and not _fall_episode_blocks(fd, now, shape):
             _FALL_LAST_ALERT[0] = now
             _fall_episode_open(fd, now)
-            print(f"[FALL] track={tid} hip={fd.hip_drop_pct:.2f} torso={fd.torso_angle:.0f} aspect={fd.aspect:.2f}")
+            print(f"[FALL] track={tid} hip={fd.hip_drop_pct:.2f} torso={fd.torso_angle:.0f} aspect={fd.aspect:.2f}", flush=True)
             client.alert_fall(fd.hip_drop_pct, fd.torso_angle)
             try:
                 frames = [f for f in list(_REPLAY_BY_TID.get(tid, [])) if f[0] >= now - 30]

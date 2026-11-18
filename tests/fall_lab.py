@@ -17,14 +17,21 @@ everything recorded so far is kept and packed.
 """
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import tarfile
 import time
+import urllib.request
 
 BASE = os.environ.get("VIGIL_JETSON_DIR", os.path.expanduser("~/passive-health-moniter"))
 LOGS = [os.path.join(BASE, p) for p in ("camera.log", "logs/camera.log")]
 PROBES = os.path.join(BASE, "fall_probes")
 FLAG = "/dev/shm/vigil_probe"
+LAB_FLAG = "/dev/shm/vigil_lab"     # LAB_MODE_V1: the server records lab falls quietly while this is fresh
+DB = os.path.join(BASE, "vigil.db")
+UNIT = os.environ.get("VIGIL_CAMERA_UNIT", "vigil-camera")
+STARTED = time.time()
 GAP_S = 32           # the detector waits 30 s between alerts
 
 # (label, is_fall, instructions, seconds to do it and stay)
@@ -34,6 +41,8 @@ TRIALS = [
     ("bend_pick_up", False, "Bend down, pick something up off the floor, stand up.", 15),
     ("crouch_10s", False, "Crouch or squat, hold 10 seconds, stand up.", 20),
     ("lie_bed", False, "Lie down on the bed or couch the normal way. Stay 10 seconds.", 25),
+    ("couch_slouch_fidget", False, "Sit on the couch or a low chair, slouch, shift around, lean forward and back, "
+     "reach for things, the way people really sit for a while (the Nov 16 false alarms). Keep it up 45 s.", 50),
     ("sit_floor_on_purpose", False, "Sit down on the floor on purpose, cross-legged, like you would to talk or eat. Stay 20 s.", 35),
     ("kneel_look_under", False, "Kneel and look under the bed or couch for 10 seconds, then stand.", 20),
     ("fall_forward", True, "From KNEELING by the mattress, fall forward onto it. Stay still 20 s.", 30),
@@ -53,13 +62,59 @@ def log_size():
     return None, 0
 
 
-def falls_since(path, offset):
-    if not path:
+def db_max():
+    """Highest alert id so far. LAB_DB_V1: the lab scores from the alerts VIGIL actually stored."""
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % DB, uri=True, timeout=5)
+        n = c.execute("SELECT COALESCE(MAX(id),0) FROM alerts").fetchone()[0]
+        c.close()
+        return n
+    except sqlite3.Error:
+        return None
+
+
+def db_falls_since(last_id):
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % DB, uri=True, timeout=5)
+        rows = c.execute("SELECT id, detected_at, payload FROM alerts WHERE alert_type='fall' AND id > ? ORDER BY id",
+                         (last_id,)).fetchall()
+        c.close()
+        return ["alert #%d at %s: %s" % (r[0], r[1], r[2]) for r in rows]
+    except sqlite3.Error:
         return []
-    with open(path, errors="replace") as f:
-        f.seek(offset)
-        # only real alert decisions: "[FALL] track=..." (LAB_FIX_V1: not "[FALL] 2 furniture zone(s) loaded")
-        return [l.strip() for l in f if l.startswith("[FALL] track=")]
+
+
+def journal(since):
+    """The camera's log when VIGIL runs as a systemd service (no camera.log file)."""
+    try:
+        out = subprocess.run(["journalctl", "-u", UNIT, "-o", "cat", "--no-pager", "--since", "@%d" % int(since)],
+                             capture_output=True, text=True, timeout=20)
+        return out.stdout.splitlines() if out.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def lab_flag(on=True):
+    try:
+        if on:
+            with open(LAB_FLAG, "w") as f:
+                f.write(str(int(time.time())))
+        elif os.path.exists(LAB_FLAG):
+            os.remove(LAB_FLAG)
+    except OSError:
+        pass
+
+
+def falls_since(path, offset, t0=None, last_id=None):
+    """Fall decisions since the mark: from the alerts table (primary), else the camera log."""
+    if last_id is not None:
+        return db_falls_since(last_id)
+    if path:
+        with open(path, errors="replace") as f:
+            f.seek(offset)
+            # only real alert decisions: "[FALL] track=..." (LAB_FIX_V1: not "[FALL] 2 furniture zone(s) loaded")
+            return [l.strip() for l in f if l.startswith("[FALL] track=")]
+    return [l.strip() for l in journal(t0 or time.time()) if l.startswith("[FALL] track=")]
 
 
 def countdown(s, msg):
@@ -78,6 +133,11 @@ def pack(results):
             if os.path.exists(p):
                 tz.add(p, arcname="camera.log")
                 break
+        else:
+            jl = os.path.join(PROBES, "camera_journal.log")
+            with open(jl, "w") as f:
+                f.write("\n".join(journal(STARTED - 60)))
+            tz.add(jl, arcname="camera.log")
     print("\nPacked: %s  (send this file)" % out)
 
 
@@ -89,9 +149,20 @@ def preflight():
         ok = ok and good
         print("  [%s] %s" % (" OK " if good else "FIX ", msg))
     path, size = log_size()
-    line(bool(path), "camera log found (%s)" % (path or "none in %s" % BASE))
     if path:
-        line(time.time() - os.path.getmtime(path) < 120, "camera log is being written (VIGIL camera is running)")
+        line(time.time() - os.path.getmtime(path) < 120, "camera log is being written (%s)" % path)
+    else:
+        j = journal(time.time() - 24 * 3600)
+        line(bool(j), "camera log readable from the %s service (journalctl)" % UNIT)
+    line(db_max() is not None, "VIGIL's alert database is readable (%s)" % DB)
+    try:
+        urllib.request.urlopen("http://localhost:5001/health", timeout=3).read()
+        line(True, "VIGIL server is answering")
+    except Exception:
+        line(False, "VIGIL server is answering (http://localhost:5001/health)")
+    lab_flag(True)
+    line(os.path.exists(LAB_FLAG), "lab mode can be switched on (phones stay quiet during trials)")
+    lab_flag(False)
     try:
         d = json.load(open("/dev/shm/vigil_in_view.json"))
         line(time.time() - float(d.get("t", 0)) < 5, "camera is analysing frames right now")
@@ -123,11 +194,11 @@ def main():
     if "--check" in sys.argv:
         sys.exit(0 if preflight() else 1)
     os.makedirs(PROBES, exist_ok=True)
-    path, _ = log_size()
-    if not path:
-        print("Cannot find camera.log in %s. Set VIGIL_JETSON_DIR." % BASE)
+    if db_max() is None:
+        print("Cannot read VIGIL's database at %s. Set VIGIL_JETSON_DIR." % DB)
         sys.exit(1)
     print(__doc__)
+    print("Lab mode is ON while this runs: falls are recorded as lab tests, nobody's phone rings.\n")
     # LAB_RESUME_V1: results are saved after every trial; a dropped connection loses nothing
     saved = os.path.join(PROBES, "lab_results.json")
     results, start = [], 1
@@ -137,6 +208,8 @@ def main():
             results, start = prev, len(prev) + 1
     except Exception:
         pass
+    import atexit
+    atexit.register(lab_flag, False)          # never leave phones silenced after the lab
     input("Press Enter when the room is clear, the mattress is down and you are ready...")
     stamp = time.strftime("%m%d%H%M")
     try:
@@ -145,14 +218,16 @@ def main():
                 continue
             print("\n[%d/%d] %s%s" % (i, len(TRIALS), "FALL: " if is_fall else "", how))
             input("    Press Enter, then start within 3 seconds...")
+            lab_flag(True)
             path, off = log_size()
+            t0, last_id = time.time(), db_max()
             countdown(3, "get ready")
             countdown(secs, "go")
             name = "%s_%02d_%s" % (stamp, i, label)
             with open(FLAG, "w") as f:
                 f.write(name)
             time.sleep(2.5)                        # the camera saves the recording within 1 s
-            hits = falls_since(path, off)
+            hits = falls_since(path, off, t0, last_id)
             ok = bool(hits) == is_fall
             results.append({"label": label, "is_fall": is_fall, "alerted": bool(hits), "log": hits, "probe": name})
             print("    %s  VIGIL %s" % ("RIGHT" if ok else "WRONG", "raised a fall alert" if hits else "stayed quiet"))
@@ -161,6 +236,8 @@ def main():
                 countdown(GAP_S, "stand up and rest")
     except KeyboardInterrupt:
         print("\nStopped early.")
+    finally:
+        lab_flag(False)
     f_ = [r for r in results if r["is_fall"]]; a_ = [r for r in results if not r["is_fall"]]
     print("\nFalls caught %d/%d   ordinary activity left alone %d/%d" % (
         sum(r["alerted"] for r in f_), len(f_), sum(not r["alerted"] for r in a_), len(a_)))
