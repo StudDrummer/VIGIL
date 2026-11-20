@@ -161,6 +161,21 @@ def test_learned_views_kept_and_capped():
     assert 1 <= len(learned) <= w.BANK_MAX, learned
 
 
+def test_stale_question_withdrawn():
+    """CAM_MOVED_V4: a flag left by older code (or by light) goes away once the room matches."""
+    w = watch_with_ref(BASE)
+    json.dump({"moved": True, "reason": "the room's fixed features are no longer in view"}, open(w.flag_path, "w"))
+    assert not checks(w, sun(BASE, 0.3), n=3)
+
+
+def test_real_move_question_stays():
+    M = np.float32([[1, 0, 160], [0, 1, 40]])
+    moved = cv2.warpAffine(BASE, M, (BASE.shape[1], BASE.shape[0]), borderMode=cv2.BORDER_REFLECT)
+    w = watch_with_ref(BASE)
+    assert checks(w, moved, n=5)
+    assert checks(w, moved, n=20)                # still asked until the areas are redrawn
+
+
 if __name__ == "__main__":
     for name, f in list(globals().items()):
         if name.startswith("test_"):

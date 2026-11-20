@@ -3448,6 +3448,10 @@ def camera_setup_status():
     try:
         with open(_MOVED_FLAG) as f:
             moved = json.load(f)
+        # CAM_MOVED_V4: the camera re-checks a raised question every 30 s and withdraws it when the
+        # room matches again. Only a question still standing after 10 minutes reaches the app.
+        if time.time() - os.path.getmtime(_MOVED_FLAG) < 600:
+            moved = None
     except Exception:
         pass
     # ZONES_WHEN_LIVE_V1: zones are drawn on the camera's picture, so only ask

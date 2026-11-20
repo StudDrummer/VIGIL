@@ -1312,8 +1312,10 @@ class CameraMoveWatch:
             return
         self.last = now
         try:
-            if os.path.exists(self.flag_path):
-                return                                   # already flagged; the app clears it
+            # CAM_MOVED_V4: a raised question is re-checked, not frozen. If the view matches the room
+            # again (the "move" was only light, or the flag was left by older code), it is withdrawn
+            # by itself, so the app stops asking about a camera that never moved.
+            flagged = os.path.exists(self.flag_path)
             if not os.path.exists(self.ref_path):
                 if self._zones_exist() and now - self.started > 60 and not person_present:
                     self.save_reference(frame)
@@ -1338,6 +1340,12 @@ class CameraMoveWatch:
             verdicts = [r[0] for r in results]
             if "same" in verdicts or "near" in verdicts:
                 self.strikes = self.lost_strikes = 0
+                if flagged:
+                    try:
+                        os.remove(self.flag_path)
+                        print("[CAM_MOVED] the view matches the room again: question withdrawn", flush=True)
+                    except OSError:
+                        pass
                 seen_light = any(abs(bright - r[4]) <= 0.12 * max(r[4], 1) and (colour < 4.0) == (r[3] < 4.0)
                                  for r in refs)
                 if "same" in verdicts and not seen_light:
@@ -1358,6 +1366,8 @@ class CameraMoveWatch:
                           % (self.lost_strikes, self.NEEDED_LOST, lost[0][1]), flush=True)
             elif not lost:
                 self.lost_strikes = 0
+            if flagged:
+                return                                   # already asked; keep checking, do not re-ask
             if self.strikes >= self.NEEDED or self.lost_strikes >= self.NEEDED_LOST:
                 why = moved[0][1] if moved else lost[0][1]
                 with open(self.flag_path, "w") as f:
