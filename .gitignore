@@ -62,3 +62,10 @@ jetson-backend/body_model.json
 ios-app/ios/build-sim/
 hardware/bathroom-sensor/secrets.yaml
 hardware/bathroom-sensor/.esphome/
+
+# Per-camera runtime state (pictures of the room, recordings): never committed
+jetson-backend/scene_reference.jpg
+jetson-backend/scene_refs/
+jetson-backend/camera_moved.json
+jetson-backend/fall_probes/
+jetson-backend/push_url.txt
