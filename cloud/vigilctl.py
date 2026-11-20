@@ -606,7 +606,7 @@ def main():
     sub.add_parser("boxes").set_defaults(f=cmd_boxes)
     s = sub.add_parser("sensor"); s.add_argument("camera"); s.set_defaults(f=cmd_sensor)
     s = sub.add_parser("add-remote"); s.add_argument("--id", required=True); s.add_argument("--name", required=True)
-    s.add_argument("--url", required=True, help="e.g. http://100.107.17.113:5001")
+    s.add_argument("--url", required=True, help="e.g. http://100.64.0.10:5001")
     s.add_argument("--key", required=True, help="that server's VIGIL_API_KEY")
     s.add_argument("--home"); s.add_argument("--tz"); s.set_defaults(f=cmd_add_remote)
     s = sub.add_parser("apns"); s.add_argument("--key-file", required=True); s.add_argument("--key-id", required=True)

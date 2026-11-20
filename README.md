@@ -176,7 +176,9 @@ can open the camera view over an encrypted connection. Only computed
 metrics are kept, plus identity templates (numbers, no images): appearance,
 body proportions, height, walking pattern and, where it is on, face. They
 stay with that camera and are deleted with the person. The camera is fixed
-and does not follow anyone.
+and does not follow anyone. An owner can lock a camera to stick figures only,
+every opening of live video is logged, and a person marked away (travelling)
+is never given to anyone the camera sees.
 
 ---
 
@@ -187,7 +189,8 @@ ios-app/          React Native app (TypeScript): App.tsx and the full Xcode proj
 jetson-backend/   camera pipeline, REST API, nightly analysis jobs
 cloud/            VIGIL Cloud: gateway, per-camera containers, vigilctl.py, auto-update
 relay/            the Raspberry Pi relay box that sits next to a camera
-tools/            fall replay and simulation (fall_eval.py, fall_sim.py), ship.sh
+tools/            fall replay and simulation (fall_eval.py, fall_sim.py), ship.sh, weekly_numbers.py
+hardware/         printable VIGIL box (Pi 3 and Zero 2 W) and bathroom sensor puck, sensor firmware config
 tests/            unit tests, live validation harnesses, labs (see tests/README.md)
 docs/             architecture notes
 ```
@@ -206,8 +209,8 @@ tested `main` to `stable` and can undo it.
 ## Status
 
 Running continuously in the developer's home since late September 2026,
-tested on family members only. The iOS app is in TestFlight. Free pilots are offered to assisted living
-communities near Bellevue, WA. The iOS app includes a self-contained,
+tested on family members only. The iOS app is in TestFlight. Free pilots are planned with adult family homes
+and families near Bellevue, WA. The iOS app includes a self-contained,
 clearly labelled demo mode.
 
 ---

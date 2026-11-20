@@ -21,10 +21,10 @@ try:
     v.cmd_add_camera(args)
 except SystemExit:
     pass
-v.cmd_add_remote(types.SimpleNamespace(id="home00", name="Home (test)", url="http://100.107.17.113:5001/",
+v.cmd_add_remote(types.SimpleNamespace(id="home00", name="Home (test)", url="http://100.64.0.10:5001/",
                                        key="jetsonkey", home="Bellevue", tz="America/Los_Angeles"))
 sites = {s["id"]: s for s in json.load(open(os.path.join(v.CONF, "sites.json")))["sites"]}
-assert sites["home00"]["internal_url"] == "http://100.107.17.113:5001" and sites["home00"]["api_key"] == "jetsonkey", sites["home00"]
+assert sites["home00"]["internal_url"] == "http://100.64.0.10:5001" and sites["home00"]["api_key"] == "jetsonkey", sites["home00"]
 assert sites["home00"].get("remote") is True
 compose = open(os.path.join(d, "docker-compose.yml")).read()
 mtx = open(os.path.join(v.CONF, "mediamtx.yml")).read()

@@ -37,8 +37,17 @@ or on the VIGIL Cloud server with a small relay box next to the camera.
 5. Measures are written to SQLite through the Flask API; daily summaries and
    per-person baselines are rebuilt from them.
 6. On a fall or a long stillness the API notifies the gateway, which sends an
-   Apple push notification and an email to everyone with access to that camera.
-7. The app reads the API (directly on the home network, or through the
+   Apple push notification (time-sensitive, so it reaches phones in a Focus)
+   and an email to everyone with access to that camera. One fall gives one
+   alert; at most three fall alerts per camera in half an hour; an alert no
+   phone received is retried for 10 minutes; an unanswered fall is repeated as
+   urgent after 5 minutes. ntfy is only a fallback when no phone got the push.
+   During the fall lab, lab mode records falls quietly and leaves them out of
+   the accuracy numbers.
+7. The camera checks every 30 s that it has not been moved (comparing fixed
+   features with views of the room in different light) and asks for the bed
+   and couch to be redrawn only after a clear shift has lasted 10 minutes.
+8. The app reads the API (directly on the home network, or through the
    gateway with an account) and shows live view, metrics, trends and insights.
 
 ## Deployment and updates
@@ -56,6 +65,9 @@ or on the VIGIL Cloud server with a small relay box next to the camera.
 - Only computed measures are stored, plus identity templates (numbers, not
   images), which stay with that camera and are deleted with the person.
 - The live view shows stick figures by default; video is opt-in and encrypted.
+  An owner can lock a camera to stick figures only (enforced by the gateway
+  and the camera), and every opening of live video is logged.
+- A person marked away is never given to anyone the camera sees.
 - Each camera has its own database and its own container; the gateway checks
   the signed-in person's access on every request.
 - Biometric templates, databases and credentials are excluded from this
