@@ -64,7 +64,7 @@ import {launchImageLibrary,launchCamera} from 'react-native-image-picker';  // P
 // ─────────────────────────────────────────────
 const DEFAULT_IP    = 'your-jetson-ip';
 const DEFAULT_PORT  = '5001';
-const APP_VERSION   = '1.0 (5)';   // keep in step with MARKETING_VERSION (CURRENT_PROJECT_VERSION) in the Xcode project
+const APP_VERSION   = '1.0 (6)';   // keep in step with MARKETING_VERSION (CURRENT_PROJECT_VERSION) in the Xcode project
 const TIMEOUT_MS    = 10_000;
 const AUTO_SYNC_SEC = 60;
 const VIGIL_KEY     = 'YOUR_VIGIL_API_KEY';   // must match VIGIL_API_KEY on the monitoring unit
@@ -4570,6 +4570,18 @@ export default function App() {
     enterCloud({...cloud,siteId});
   };
   const cloudRef=useRef<CloudCfg|null>(null); cloudRef.current=cloud;   // SITE_SWITCH_FIX_V1
+  // OPEN_FROM_ALERT_V1: tapping a VIGIL notification opens that camera's Alerts, not wherever the app was
+  const openFromAlert=useCallback(async()=>{
+    try{
+      const o=await PushMod?.takeOpened?.();
+      if(!o)return;
+      const c=cloudRef.current;
+      if(c&&o.site&&o.site!==c.siteId&&c.sites.some(x=>x.id===o.site))enterCloud({...c,siteId:o.site});
+      if(!['white_check_mark','bell'].includes(String(o.kind||'')))setActiveTab('alerts');   // not "restored" or a test
+    }catch(_e){}
+  },[]);
+  useEffect(()=>{openFromAlert();const sub=AppState.addEventListener('change',n=>{if(n==='active')setTimeout(openFromAlert,150);});
+    return()=>sub.remove();},[openFromAlert]);
   // PRIVACY_LOCK_V1: the owner can limit a camera to stick figures for everyone
   const videoLocked=!!cloud?.sites.find(x=>x.id===cloud.siteId)?.video_locked;
   videoLockedRef.current=videoLocked;

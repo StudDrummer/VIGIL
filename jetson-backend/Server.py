@@ -32,9 +32,21 @@ CUMULATIVE_METRICS = {"StepCount","ActiveEnergyBurned","FlightsClimbed","Distanc
 _latest_frame_b64 = None
 _frame_lock = threading.Lock()
 
+_WAL = [False]
+
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # DB_RELIABLE_V1: many threads write here (camera posts, push, escalation, clean-up). Wait up to
+    # 15 s for a busy database instead of failing after 5, and use write-ahead logging so readers
+    # (the app, the identity code) never block a fall alert being written.
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
+    if not _WAL[0]:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            _WAL[0] = True
+        except sqlite3.Error:
+            pass
     return conn
 
 def init_db():
@@ -922,14 +934,18 @@ def camera_snapshot():
 def camera_stream():
     """MJPEG live stream sourced from the latest annotated frame written to
     tmpfs by activity_monitor.py. Replaces snapshot polling with a real feed."""
+    # PRIVACY_LOCK_V2: this older stream also honours view=skeleton (the gateway forces it on a
+    # locked camera), so it can never be a way around "stick figures only".
+    src = '/dev/shm/vigil_skeleton.jpg' if request.args.get("view") == "skeleton" else '/dev/shm/vigil_latest.jpg'
+
     def generate():
         last_mtime = 0
         while True:
             try:
-                st = os.stat('/dev/shm/vigil_latest.jpg')
+                st = os.stat(src)
                 if st.st_mtime != last_mtime:
                     last_mtime = st.st_mtime
-                    with open('/dev/shm/vigil_latest.jpg', 'rb') as f:
+                    with open(src, 'rb') as f:
                         frame = f.read()
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n'
@@ -3064,7 +3080,21 @@ _PUSH_LAST = {"phones": None}
 def _push_loop():
     import time as _t
     last = None
+    retry = []          # PUSH_RETRY_V1: [(first try, args)] alerts no phone got yet (Wi-Fi or internet blip)
     while True:
+        if retry:
+            keep = []
+            for first, nxt, args in retry:
+                now_ = _t.time()
+                if now_ - first > 600:
+                    print("[PUSH] gave up after 10 minutes: %s" % args[0], flush=True)
+                elif now_ < nxt:
+                    keep.append((first, nxt, args))
+                elif not send_push(*args):
+                    keep.append((first, now_ + 20, args))
+                else:
+                    print("[PUSH] delivered on retry: %s" % args[0], flush=True)
+            retry = keep
         try:
             conn = get_db()
             mx = conn.execute("SELECT COALESCE(MAX(id),0) FROM alerts").fetchone()[0]
@@ -3089,8 +3119,8 @@ def _push_loop():
                     label = os.environ.get("VIGIL_PUSH_LABEL", "").strip()
                     if t and label:
                         t = ("%s (%s)" % (t[0], label),) + tuple(t[1:])
-                    if t:
-                        send_push(*t)
+                    if t and not send_push(*t) and t[2] in ("urgent", "high"):
+                        retry.append((_t.time(), _t.time() + 20, t))   # important alerts are retried, not dropped
                 last = mx
             conn.close()
         except Exception as e:
@@ -3650,6 +3680,8 @@ def delete_person(person_id):
         return jsonify({"status": "error", "reason": "no such person"}), 404
     for sql in ("DELETE FROM person_detections WHERE person_id=?",
                 "DELETE FROM person_baselines WHERE person_id=?",
+                "DELETE FROM person_activity WHERE person_id=?",      # DELETE_ALL_V1: every per-person
+                "DELETE FROM face_events WHERE person_id=?",          # table, as the privacy policy says
                 "DELETE FROM persons WHERE id=?"):
         try:
             conn.execute(sql, (person_id,))
@@ -3703,6 +3735,8 @@ def _auto_forget_once():
                 continue
             for sql in ("DELETE FROM person_detections WHERE person_id=?",
                         "DELETE FROM person_baselines WHERE person_id=?",
+                        "DELETE FROM person_activity WHERE person_id=?",
+                        "DELETE FROM face_events WHERE person_id=?",
                         "DELETE FROM persons WHERE id=?"):
                 try:
                     conn.execute(sql, (pid,))

@@ -11,6 +11,7 @@
 // it, register() rejects and the app keeps working, just without app alerts.
 static NSString *gPushToken = nil;
 static NSMutableArray *gPushWaiters = nil;
+static NSDictionary *gOpenedFrom = nil;   // OPEN_FROM_ALERT_V1: the notification the person tapped
 
 static NSObject *VIGILPushLock(void) {
   static NSObject *lock; static dispatch_once_t once;
@@ -62,6 +63,14 @@ RCT_EXPORT_METHOD(status:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRej
   }];
 }
 
+// OPEN_FROM_ALERT_V1: which camera and kind of alert the app was opened from (once), or nil.
+RCT_EXPORT_METHOD(takeOpened:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject)
+{
+  NSDictionary *d = nil;
+  @synchronized (VIGILPushLock()) { d = gOpenedFrom; gOpenedFrom = nil; }
+  resolve(d ?: [NSNull null]);
+}
+
 RCT_EXPORT_METHOD(openSettings)
 {
   dispatch_async(dispatch_get_main_queue(), ^{
@@ -108,6 +117,18 @@ RCT_EXPORT_METHOD(openSettings)
 {
   completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList |
                     UNNotificationPresentationOptionSound);
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void (^)(void))completionHandler
+{
+  NSDictionary *u = response.notification.request.content.userInfo;
+  NSMutableDictionary *d = [NSMutableDictionary new];
+  if ([u[@"site"] isKindOfClass:[NSString class]]) d[@"site"] = u[@"site"];
+  if ([u[@"kind"] isKindOfClass:[NSString class]]) d[@"kind"] = u[@"kind"];
+  @synchronized (VIGILPushLock()) { gOpenedFrom = d; }
+  completionHandler();
 }
 
 - (NSURL *)sourceURLForBridge:(RCTBridge *)bridge
