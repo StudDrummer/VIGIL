@@ -11,3 +11,6 @@ The labs save their results after every trial and resume if the connection
 drops. Each packs a results file in the home folder
 (`vigil_fall_lab.tar.gz`, `vigil_identity_lab.tar.gz`). The fall lab's
 recordings can be replayed against the current code with `tools/fall_eval.py`.
+With `--video`, the fall lab also keeps a clip of each trial on the Jetson (never
+packed), so `tools/pose_compare.py` can test another pose model, such as
+YOLO11n-pose, on exactly those trials before VIGIL switches (`VIGIL_POSE_MODEL`).

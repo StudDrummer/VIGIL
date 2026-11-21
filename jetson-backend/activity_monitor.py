@@ -76,7 +76,9 @@ except ImportError:
     print("[WARN] person_tracker.py not found — single-person mode")
 
 DEFAULT_SERVER     = "http://localhost:5001"
-MODEL_PATH         = "yolov8n-pose.pt"
+# MODEL_CHECK_V1: the pose model can be switched (e.g. yolo11n-pose.pt) only after
+# tools/pose_compare.py shows it does at least as well on the fall lab's own clips.
+MODEL_PATH         = os.environ.get("VIGIL_POSE_MODEL", "yolov8n-pose.pt")
 CONF_THRESHOLD     = 0.25
 ID_MIN_CONF        = 0.62   # GHOST_FILTER_V1: below this, a box must move to count as a person
 TARGET_FPS         = 12

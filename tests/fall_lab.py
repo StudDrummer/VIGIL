@@ -14,6 +14,13 @@ tuned on YOUR falls, not made-up ones.
 
 Use a thick mattress or crash pad for every fall. Stop at any time with Ctrl-C:
 everything recorded so far is kept and packed.
+
+    python3 ~/VIGIL/tests/fall_lab.py --video
+
+also saves a short video clip of each trial in fall_probes/videos/ (MODEL_CHECK_V1), so a
+different pose model can be compared on exactly these trials with tools/pose_compare.py. The
+clips stay on the Jetson: they are never packed into the file you send. Delete them with
+rm -r ~/passive-health-moniter/fall_probes/videos when you are done.
 """
 import json
 import os
@@ -22,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import threading
 import urllib.request
 
 BASE = os.environ.get("VIGIL_JETSON_DIR", os.path.expanduser("~/passive-health-moniter"))
@@ -94,6 +102,75 @@ def journal(since):
         return []
 
 
+def camera_url():
+    """The camera address VIGIL itself uses: VIGIL_RTSP_URL, or the running camera process's --source."""
+    u = os.environ.get("VIGIL_RTSP_URL")
+    if u:
+        return u
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            args = open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0")
+        except OSError:
+            continue
+        if any(a.endswith(b"activity_monitor.py") for a in args) and b"--source" in args:
+            i = args.index(b"--source")
+            if i + 1 < len(args):
+                return args[i + 1].decode()
+    return None
+
+
+class Clip:
+    """MODEL_CHECK_V1: records one trial from the camera, with each frame's time, for tools/pose_compare.py."""
+
+    def __init__(self, url):
+        import cv2
+        self.cv2 = cv2
+        self.cap = cv2.VideoCapture(url)
+        self.ok = self.cap.isOpened()
+        self.rec = None
+        self.lock = threading.Lock()
+        if self.ok:
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while True:
+            ok, frame = self.cap.read()
+            if not ok:
+                time.sleep(0.05)
+                continue
+            with self.lock:
+                if self.rec is not None:
+                    w, times = self.rec
+                    h0, w0 = frame.shape[:2]
+                    if w0 > 960:
+                        frame = self.cv2.resize(frame, (960, int(h0 * 960 / w0)))
+                    if w is None:
+                        path = self.path
+                        w = self.cv2.VideoWriter(path, self.cv2.VideoWriter_fourcc(*"mp4v"), 15.0,
+                                                 (frame.shape[1], frame.shape[0]))
+                        self.rec = (w, times)
+                    w.write(frame)
+                    times.append(time.time())
+
+    def start(self, path):
+        with self.lock:
+            self.path = path
+            self.rec = (None, [])
+
+    def stop(self):
+        with self.lock:
+            if self.rec is None:
+                return
+            w, times = self.rec
+            self.rec = None
+        if w is not None:
+            w.release()
+            with open(self.path + ".json", "w") as f:
+                json.dump({"times": times}, f)
+
+
 def lab_flag(on=True):
     try:
         if on:
@@ -128,7 +205,8 @@ def pack(results):
         json.dump(results, f, indent=1)
     out = os.path.expanduser("~/vigil_fall_lab.tar.gz")
     with tarfile.open(out, "w:gz") as tz:
-        tz.add(PROBES, arcname="fall_probes")
+        tz.add(PROBES, arcname="fall_probes",
+               filter=lambda ti: None if "/videos" in ti.name else ti)   # clips never leave the Jetson
         for p in LOGS:
             if os.path.exists(p):
                 tz.add(p, arcname="camera.log")
@@ -199,6 +277,16 @@ def main():
         sys.exit(1)
     print(__doc__)
     print("Lab mode is ON while this runs: falls are recorded as lab tests, nobody's phone rings.\n")
+    clip = None
+    if "--video" in sys.argv:
+        url = camera_url()
+        clip = Clip(url) if url else None
+        if clip is None or not clip.ok:
+            print("Could not open the camera for video clips; continuing without them.\n")
+            clip = None
+        else:
+            os.makedirs(os.path.join(PROBES, "videos"), exist_ok=True)
+            print("Saving a video clip of each trial in fall_probes/videos/ (kept on the Jetson).\n")
     # LAB_RESUME_V1: results are saved after every trial; a dropped connection loses nothing
     saved = os.path.join(PROBES, "lab_results.json")
     results, start = [], 1
@@ -221,9 +309,13 @@ def main():
             lab_flag(True)
             path, off = log_size()
             t0, last_id = time.time(), db_max()
+            name = "%s_%02d_%s" % (stamp, i, label)
+            if clip:
+                clip.start(os.path.join(PROBES, "videos", name + ".mp4"))
             countdown(3, "get ready")
             countdown(secs, "go")
-            name = "%s_%02d_%s" % (stamp, i, label)
+            if clip:
+                clip.stop()
             with open(FLAG, "w") as f:
                 f.write(name)
             time.sleep(2.5)                        # the camera saves the recording within 1 s
