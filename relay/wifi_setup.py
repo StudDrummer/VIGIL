@@ -123,6 +123,29 @@ def hotspot_on():
         print("[wifi-setup] hotspot on channel 6 failed (%s); letting the box choose" % out.strip()[:120], flush=True)
         sh("nmcli", "device", "wifi", "hotspot", "ifname", "wlan0", "con-name", "vigil-setup",
            "ssid", ssid_name(), "password", hotspot_password())
+    make_visible()
+
+
+def make_visible():
+    """HOTSPOT_VISIBLE_V1: at home the setup Wi-Fi often did not appear in the iPhone's Wi-Fi list
+    (it could only be joined by typing its name under Other). The usual causes on a Raspberry Pi:
+    the Wi-Fi chip's power saving makes it miss the phone's scans, and NetworkManager may offer
+    WPA3 or require protected management frames, which this chip cannot do as a hotspot, so some
+    phones hide the network. Plain WPA2 (AES), no power saving, not hidden. If the stricter
+    settings do not take, the hotspot as first made stays up."""
+    rc, _ = sh("nmcli", "connection", "modify", "vigil-setup",
+               "802-11-wireless.hidden", "no", "802-11-wireless.powersave", "2",
+               "802-11-wireless-security.key-mgmt", "wpa-psk", "802-11-wireless-security.proto", "rsn",
+               "802-11-wireless-security.pairwise", "ccmp", "802-11-wireless-security.group", "ccmp",
+               "802-11-wireless-security.pmf", "1")
+    if rc == 0:
+        rc, out = sh("nmcli", "connection", "up", "vigil-setup", timeout=45)
+        if rc != 0:
+            print("[wifi-setup] tuned setup Wi-Fi would not start (%s); using the plain one" % out.strip()[:120], flush=True)
+            sh("nmcli", "connection", "delete", "vigil-setup")
+            sh("nmcli", "device", "wifi", "hotspot", "ifname", "wlan0", "con-name", "vigil-setup",
+               "ssid", ssid_name(), "password", hotspot_password(), "band", "bg", "channel", "6")
+    sh("iw", "dev", "wlan0", "set", "power_save", "off")
 
 
 def hotspot_off():

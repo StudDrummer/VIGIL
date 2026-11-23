@@ -321,7 +321,8 @@ h1{font-size:30px;margin:0;letter-spacing:-.5px}
 ol{padding-left:22px;margin:14px 0}li{margin:7px 0}
 table{border-collapse:collapse;width:100%%;margin-top:6px}td{border-top:1px solid #ddd;padding:5px 4px;vertical-align:top}
 .small{color:#555;font-size:12px}
-.sticker{border:1.5px dashed #111;border-radius:8px;padding:8px 12px;font-size:15px;margin-top:10px;display:inline-block}
+.sticker{border:1.5px dashed #111;border-radius:8px;padding:8px 12px;font-size:15px;margin-top:10px;display:inline-flex;gap:12px;align-items:center}
+#wqr{width:72px;height:72px;flex:none}#wqr img,#wqr canvas{width:72px!important;height:72px!important}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head><body>
@@ -342,11 +343,14 @@ table{border-collapse:collapse;width:100%%;margin-top:6px}td{border-top:1px soli
 <tr><td><b>Slow blink</b></td><td>Cannot find the camera: check it is plugged in and on the same Wi-Fi.</td></tr>
 <tr><td><b>Fast blink</b></td><td>No internet: check the home Wi-Fi.</td></tr>
 </table>
-<div class="sticker">VIGIL box &middot; <b>%(name)s</b> &middot; VIGIL-%(id)s &middot; code %(code)s</div>
-<p class="small">Cut out the line above and stick it on the box, so it is clear which camera it belongs to.</p>
+<div class="sticker"><div id="wqr"></div><div>VIGIL box &middot; <b>%(name)s</b><br>Wi-Fi VIGIL-%(id)s &middot; code %(code)s</div></div>
+<p class="small">Cut out the line above and stick it on the box, so it is clear which camera it belongs to.
+If the app cannot reach the box, point the iPhone camera at the small square and tap Join: it joins the box's
+setup Wi-Fi (shown while the light blinks twice, then pauses) without typing anything.</p>
 <p class="small">Power cuts are fine: everything starts again by itself. Help: %(help)s<br>
 VIGIL is a safety and wellness tool, not a medical device. No sound is used and no video is recorded.</p>
-<script>new QRCode(document.getElementById("qr"),{text:"vigil://setup?code=%(code_raw)s",width:300,height:300,correctLevel:QRCode.CorrectLevel.M});</script>
+<script>new QRCode(document.getElementById("qr"),{text:"vigil://setup?code=%(code_raw)s",width:300,height:300,correctLevel:QRCode.CorrectLevel.M});
+new QRCode(document.getElementById("wqr"),{text:"WIFI:T:WPA;S:VIGIL-%(id)s;P:%(code_raw)s;;",width:200,height:200,correctLevel:QRCode.CorrectLevel.M});</script>
 </body></html>"""
 
 
