@@ -233,6 +233,7 @@ def try_join(ssid, pw):
     time.sleep(10)
     if rc == 0 and online():
         MSG[0] = ""
+        NET["forced_until"] = 0.0
         STATE.update(joining=None, last_error="", joined=ssid)
         NET["retries_fixed"].discard(ssid)
         keep_retrying()
@@ -259,7 +260,11 @@ def try_join(ssid, pw):
 #    Even then it steps aside every 5 minutes to look for the saved Wi-Fi, unless
 #    a phone is connected to it right now.
 REBOOT_FILE = os.environ.get("VIGIL_LAST_REBOOT", "/var/lib/vigil-relay/last_reboot")
-NET = {"offline_since": None, "level": 0, "hotspot_since": None, "retries_fixed": set()}
+NET = {"offline_since": None, "level": 0, "hotspot_since": None, "retries_fixed": set(),
+       "gone_checked": False, "local_since": None, "forced_until": 0.0, "ever_online": False}
+OPEN_SETUP_FLAG = os.environ.get("VIGIL_OPEN_SETUP_FLAG", "/run/vigil-relay/open-setup")
+FORCED_S = 15 * 60          # OPEN_SETUP_V1: asked from the app: the setup Wi-Fi stays up this long
+STEP_ASIDE_S = 600          # with a saved Wi-Fi, the hotspot looks for it every 10 minutes (was 5)
 
 
 def default_gateway():
@@ -342,6 +347,16 @@ def tick(now=None):
         return "joining"
     ready = has_camera_account()
     saved = known_wifi()
+    # OPEN_SETUP_V1: the owner tapped "Change Wi-Fi" or "Set up a new camera" in the VIGIL app
+    if os.path.exists(OPEN_SETUP_FLAG):
+        try:
+            os.remove(OPEN_SETUP_FLAG)
+        except OSError:
+            pass
+        NET["forced_until"] = now + FORCED_S
+        if not os.path.exists(FLAG):
+            open_setup("asked from the VIGIL app")
+            return "setup: asked from the app"
     if os.path.exists(FLAG) and not hotspot_active():           # HOTSPOT_CHECK_V1: it failed or was dropped: open it again
         print("[wifi-setup] setup Wi-Fi is not actually on; opening it again", flush=True)
         os.remove(FLAG)
@@ -350,9 +365,11 @@ def tick(now=None):
             return "hotspot reopened"
         NET.update(hotspot_since=None)
     if os.path.exists(FLAG):                                    # hotspot is up
-        if ready and (saved or wired()) and now - (NET["hotspot_since"] or now) >= 300 and not hotspot_clients():
+        if now < NET["forced_until"]:
+            return "hotspot"                                    # asked from the app: stay up for the person
+        if ready and (saved or wired()) and now - (NET["hotspot_since"] or now) >= STEP_ASIDE_S and not hotspot_clients():
             hotspot_off()                                       # step aside and look for the saved Wi-Fi
-            NET.update(hotspot_since=None, offline_since=now, level=0)
+            NET.update(hotspot_since=None, offline_since=now, level=0, gone_checked=False)
             return "left hotspot to look for saved Wi-Fi"
         return "hotspot"
     if not saved and ready and wired():
@@ -369,12 +386,29 @@ def tick(now=None):
         if NET["offline_since"] and st == "internet":
             print("[net] back online after %.0f s" % (now - NET["offline_since"]), flush=True)
         if st == "internet":
-            NET.update(offline_since=None, level=0)
-        return st                                               # "local": the internet is down, not the box
+            NET.update(offline_since=None, level=0, gone_checked=False, local_since=None, ever_online=True)
+            return st
+        # "local": on a Wi-Fi whose internet is down. Usually the router's problem, so wait. But if this
+        # box has never been online since it started (just set up on the wrong network, or a guest
+        # Wi-Fi with a sign-in page), offer setup after 15 minutes.
+        NET["local_since"] = NET["local_since"] or now
+        if not NET["ever_online"] and now - NET["local_since"] >= 900:
+            NET["local_since"] = None
+            open_setup("on Wi-Fi but no internet for 15 minutes")
+            return "setup: no internet"
+        return st
     if NET["offline_since"] is None:
         NET["offline_since"] = now
     dur = now - NET["offline_since"]
     lv = NET["level"]
+    # FAST_SETUP_V1: a box set up somewhere else (another house, another country) should not make the
+    # family wait 10 minutes. After 1 minute offline, if none of its saved Wi-Fi is in range at all,
+    # open the setup Wi-Fi straight away. (If a saved Wi-Fi IS in range, the repairs below run.)
+    if dur >= 60 and not NET["gone_checked"]:
+        NET["gone_checked"] = True
+        if not saved_visible():
+            open_setup("none of the saved Wi-Fi is in range")
+            return "setup: saved wifi not in range"
     if dur >= 600 and lv < 4:
         NET["level"] = 4
         if not saved_visible():
@@ -408,7 +442,7 @@ def tick(now=None):
 
 
 def main():
-    time.sleep(int(os.environ.get("VIGIL_WIFI_WAIT_S", "90")))
+    time.sleep(int(os.environ.get("VIGIL_WIFI_WAIT_S", "60")))
     srv = HTTPServer(("0.0.0.0", 80), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     while True:

@@ -51,7 +51,8 @@ def did(prefix):
 
 def reset():
     calls.clear()
-    ws.NET.update(offline_since=None, level=0, hotspot_since=None)
+    ws.NET.update(offline_since=None, level=0, hotspot_since=None, gone_checked=False, local_since=None,
+                  forced_until=0.0, ever_online=False)
     ws.NET["retries_fixed"].clear()
     W.update(assoc=True, internet=True, gateway=True, saved=["LalsT"], visible=["LalsT"], clients=0, eth=False, hotspot_dead=False)
     if os.path.exists(ws.FLAG):
@@ -67,6 +68,7 @@ def test_online_and_retry_forever():
 
 def test_internet_outage_is_not_the_box():
     reset()
+    assert ws.tick(990) == "internet"              # it was working
     W.update(internet=False)                       # router fine, ISP down
     for t in range(0, 3600, 15):
         assert ws.tick(1000 + t) == "local"
@@ -99,12 +101,14 @@ def test_moved_house_opens_setup_then_keeps_looking():
     open(os.environ["VIGIL_LAST_REBOOT"], "w").write("0")
     W.update(assoc=False, visible=["Neighbour"])
     got = [ws.tick(t) for t in range(10000, 10000 + 660, 15)]
-    assert "setup: saved wifi gone" in got and os.path.exists(ws.FLAG)
+    # FAST_SETUP_V1: one minute, not ten, when none of the saved Wi-Fi is in range
+    assert got.index("setup: saved wifi not in range") <= 5 and os.path.exists(ws.FLAG), got
     ws.NET["hotspot_since"] = 20000
     W.update(clients=1)                            # someone is setting it up: stay
-    assert ws.tick(20400) == "hotspot"
+    assert ws.tick(20700) == "hotspot"
     W.update(clients=0)
-    assert ws.tick(20400) == "left hotspot to look for saved Wi-Fi" and not os.path.exists(ws.FLAG)
+    assert ws.tick(20400) == "hotspot"             # stays up 10 minutes for the family
+    assert ws.tick(20700) == "left hotspot to look for saved Wi-Fi" and not os.path.exists(ws.FLAG)
 
 
 def test_setup_needed():
@@ -127,8 +131,8 @@ def test_cable_box_leaves_setup_hotspot():
     reset()
     W.update(saved=[], assoc=False, eth=True)
     open(ws.FLAG, "w").close(); ws.NET["hotspot_since"] = 1000
-    assert ws.tick(1400) == "left hotspot to look for saved Wi-Fi" and not os.path.exists(ws.FLAG)
-    assert ws.tick(1415) == "internet"
+    assert ws.tick(1700) == "left hotspot to look for saved Wi-Fi" and not os.path.exists(ws.FLAG)
+    assert ws.tick(1715) == "internet"
 
 
 def test_failed_hotspot_is_opened_again():
@@ -140,6 +144,34 @@ def test_failed_hotspot_is_opened_again():
     assert ws.tick(1015) == "hotspot reopened" and os.path.exists(ws.FLAG)
     W.update(hotspot_dead=False)
     assert ws.tick(1030) == "hotspot"
+
+
+def test_asked_from_the_app():
+    """OPEN_SETUP_V1: a working box opens its setup Wi-Fi when the owner asks, and keeps it up 15 minutes."""
+    reset()
+    ws.OPEN_SETUP_FLAG = os.path.join(d, "open-setup")
+    assert ws.tick(1000) == "internet"
+    open(ws.OPEN_SETUP_FLAG, "w").close()
+    assert ws.tick(1015) == "setup: asked from the app" and os.path.exists(ws.FLAG)
+    assert not os.path.exists(ws.OPEN_SETUP_FLAG)
+    ws.NET["hotspot_since"] = 1015                 # (the test clock does not reach open_setup)
+    assert ws.tick(1015 + 700) == "hotspot"                 # past the usual 10 minutes: still up
+    assert ws.tick(1015 + 901) == "left hotspot to look for saved Wi-Fi"
+
+
+def test_wrong_network_offers_setup():
+    """Joined a Wi-Fi that never reaches the internet (guest network): setup opens after 15 minutes."""
+    reset()
+    W.update(internet=False)
+    got = [ws.tick(t) for t in range(1000, 1000 + 960, 15)]
+    assert "setup: no internet" in got and got.index("setup: no internet") >= 59, got
+
+
+def test_saved_wifi_in_range_gets_repairs_not_setup():
+    reset()
+    W.update(assoc=False)                           # saved Wi-Fi visible, just not connected
+    got = [ws.tick(t) for t in range(1000, 1000 + 300, 15)]
+    assert not any(g.startswith("setup") for g in got)
 
 
 if __name__ == "__main__":

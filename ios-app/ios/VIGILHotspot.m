@@ -25,7 +25,11 @@ RCT_EXPORT_METHOD(join:(NSString *)ssid
                   rejecter:(RCTPromiseRejectBlock)reject)
 {
   NEHotspotConfiguration *cfg = [[NEHotspotConfiguration alloc] initWithSSID:ssid passphrase:password isWEP:NO];
-  cfg.joinOnce = YES;   // the phone goes back to the home Wi-Fi when setup ends
+  // BOX_SETUP_V2: joinOnce=NO. With YES, iOS drops the box the moment VIGIL is not in front
+  // (the iOS join prompt itself can do that) and sometimes reports a join that never happened.
+  // The app removes this network with leave() when setup ends or is closed, so the phone still
+  // goes back to the home Wi-Fi.
+  cfg.joinOnce = NO;
   [[NEHotspotConfigurationManager sharedManager] applyConfiguration:cfg completionHandler:^(NSError *error) {
     if (error && !([error.domain isEqualToString:NEHotspotConfigurationErrorDomain] &&
                    error.code == NEHotspotConfigurationErrorAlreadyAssociated)) {

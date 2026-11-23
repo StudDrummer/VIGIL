@@ -321,12 +321,13 @@ h1{font-size:30px;margin:0;letter-spacing:-.5px}
 ol{padding-left:22px;margin:14px 0}li{margin:7px 0}
 table{border-collapse:collapse;width:100%%;margin-top:6px}td{border-top:1px solid #ddd;padding:5px 4px;vertical-align:top}
 .small{color:#555;font-size:12px}
+.sticker{border:1.5px dashed #111;border-radius:8px;padding:8px 12px;font-size:15px;margin-top:10px;display:inline-block}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head><body>
 <div class="top">
   <div id="qr"></div>
-  <div><h1>VIGIL</h1><p class="sub">%(name)s</p>
+  <div><h1>VIGIL</h1><p class="sub">%(name)s &middot; box <b>VIGIL-%(id)s</b></p>
   <div class="code">%(code)s</div>
   <div class="small">Point your iPhone camera at the square to start.<br>Family who want alerts use the same code.</div></div>
 </div>
@@ -341,6 +342,8 @@ table{border-collapse:collapse;width:100%%;margin-top:6px}td{border-top:1px soli
 <tr><td><b>Slow blink</b></td><td>Cannot find the camera: check it is plugged in and on the same Wi-Fi.</td></tr>
 <tr><td><b>Fast blink</b></td><td>No internet: check the home Wi-Fi.</td></tr>
 </table>
+<div class="sticker">VIGIL box &middot; <b>%(name)s</b> &middot; VIGIL-%(id)s &middot; code %(code)s</div>
+<p class="small">Cut out the line above and stick it on the box, so it is clear which camera it belongs to.</p>
 <p class="small">Power cuts are fine: everything starts again by itself. Help: %(help)s<br>
 VIGIL is a safety and wellness tool, not a medical device. No sound is used and no video is recorded.</p>
 <script>new QRCode(document.getElementById("qr"),{text:"vigil://setup?code=%(code_raw)s",width:300,height:300,correctLevel:QRCode.CorrectLevel.M});</script>
@@ -358,7 +361,7 @@ def cmd_card(a):
     esc = lambda v: _h.escape(v or "")
     out = os.path.join(CONF, "card_%s.html" % c["id"])
     _write(out, CARD_HTML % {
-        "name": esc(c["name"]), "code": esc(c["setup_code"]),
+        "name": esc(c["name"]), "code": esc(c["setup_code"]), "id": esc(c["id"]),
         "code_raw": esc("".join(ch for ch in c["setup_code"] if ch.isalnum())),
         "app_link": esc(a.app_link) or "the link VIGIL sent you",
         "help": esc(a.help) or "contact the person who gave you VIGIL"}, secret=True)

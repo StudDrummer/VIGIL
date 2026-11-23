@@ -573,7 +573,9 @@ def site_members(site_id):
     rows = db().execute("SELECT u.id, u.name, u.email, gr.role FROM grants gr JOIN users u ON u.id=gr.user_id "
                         "WHERE gr.site_id=? AND u.disabled=0 ORDER BY gr.role='owner' DESC, u.name", (site_id,)).fetchall()
     s_ = sites().get(site_id, {})
-    return jsonify({"status": "ok", "my_role": _role(site_id), "setup_code": s_.get("setup_code", "") if _role(site_id) == "owner" else "",
+    # BOX_SETUP_V2: the owner and the VIGIL admin both get the code (it is the box's setup Wi-Fi password)
+    show_code = _role(site_id) == "owner" or g.is_admin
+    return jsonify({"status": "ok", "my_role": _role(site_id), "setup_code": s_.get("setup_code", "") if show_code else "",
                     "members": [{"id": r["id"], "name": r["name"] or "", "email": r["email"], "role": r["role"],
                                  "me": r["id"] == g.user_id} for r in rows]})
 
@@ -631,6 +633,8 @@ def relay_status_post(site_id):
     body = request.get_json(silent=True) or {}
     _RELAY[site_id] = {k: body.get(k) for k in ("state", "camera", "mode", "wifi", "signal_dbm", "version", "code")}
     _RELAY[site_id]["at"] = time.time()
+    ask = _RELAY_CMD.pop(site_id, None)            # OPEN_SETUP_V1: delivered once, with the box's next report
+    open_setup = bool(ask and time.time() - ask < 900)
     try:                                   # AUTOUPDATE_V1: vigilctl.py boxes reads this
         tmp = os.path.join(DATA_DIR, ".relay_status.tmp")
         with open(tmp, "w") as f:
@@ -638,7 +642,25 @@ def relay_status_post(site_id):
         os.replace(tmp, os.path.join(DATA_DIR, "relay_status.json"))
     except Exception:
         pass
-    return jsonify({"status": "ok"})
+    if open_setup:
+        audit("box_setup_opened", site_id=site_id)
+    return jsonify({"status": "ok", "open_setup": open_setup})
+
+
+_RELAY_CMD = {}
+
+
+@app.route("/auth/site/<site_id>/relay/open-setup", methods=["POST"])
+@require_user
+def relay_open_setup(site_id):
+    """OPEN_SETUP_V1: "Change Wi-Fi" or "New camera" in the app for a box that is online: the box
+    opens its setup Wi-Fi (VIGIL-<camera id>) within about 10 seconds, for 15 minutes."""
+    if not (_role(site_id) == "owner" or g.is_admin):
+        return jsonify({"status": "error", "reason": "only the owner can change the box"}), 403
+    r = _RELAY.get(site_id) or {}
+    online = bool(r.get("at")) and time.time() - r["at"] < 45
+    _RELAY_CMD[site_id] = time.time()
+    return jsonify({"status": "ok", "box_online": online})
 
 
 @app.route("/relay/<site_id>/sensor", methods=["POST"])
@@ -732,6 +754,7 @@ def relay_status_get(site_id):
     age = time.time() - r["at"] if r.get("at") else None
     st = _STATUS.get(site_id, {})
     return jsonify({"status": "ok", "box_online": age is not None and age < 45, "box_age_s": age,
+                    "box_wifi_name": "VIGIL-%s" % site_id, "setup_requested": site_id in _RELAY_CMD,
                     "state": r.get("state"), "camera": r.get("camera"), "wifi": r.get("wifi"),
                     "signal_dbm": r.get("signal_dbm"), "code": r.get("code"),
                     "site_online": bool(st.get("online"))})

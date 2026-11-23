@@ -108,6 +108,7 @@ class Light:
 
 
 _REPORT = {"last": 0.0, "state": None}
+OPEN_SETUP_FLAG = "/run/vigil-relay/open-setup"
 
 
 def wifi_info():
@@ -152,7 +153,14 @@ def report(kw):
                                "wifi": ssid, "signal_dbm": sig, "version": 2, "code": code_version()}).encode()
             req = urllib.request.Request("https://%s/relay/%s/status" % (host, cam), data=body,
                                          headers={"Content-Type": "application/json", "X-Relay-Key": key})
-            urllib.request.urlopen(req, timeout=8).read()
+            reply = urllib.request.urlopen(req, timeout=8).read()
+            # OPEN_SETUP_V1: the owner asked, in the app, to change this box's Wi-Fi or camera:
+            # wifi_setup.py opens the box's setup Wi-Fi for 15 minutes.
+            if json.loads(reply.decode() or "{}").get("open_setup"):
+                os.makedirs(os.path.dirname(OPEN_SETUP_FLAG), exist_ok=True)
+                with open(OPEN_SETUP_FLAG, "w") as f:
+                    f.write(str(int(time.time())))
+                log("the VIGIL app asked to change this box's Wi-Fi or camera: opening setup")
         except Exception:
             pass
     threading.Thread(target=_go, daemon=True).start()

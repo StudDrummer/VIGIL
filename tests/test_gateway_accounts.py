@@ -184,6 +184,19 @@ def test_relay_reports_setup_progress():
     assert r["box_online"] and r["state"] == "no_camera" and r["wifi"] == "Sharma Home" and r["signal_dbm"] == -61, r
     other = C.post("/auth/signup", json={"email": "x@example.com", "password": "good password", "name": "X"}).json["token"]
     assert C.get("/auth/site/home01/relay", headers={"X-VIGIL-Key": other}).status_code == 403
+    # OPEN_SETUP_V1: only the owner can open the box's setup Wi-Fi; the box hears it once, with its next report
+    assert C.post("/auth/site/home01/relay/open-setup", headers={"X-VIGIL-Key": other}).status_code == 403
+    role = C.get("/auth/site/home01/members", headers=H).json["my_role"]
+    r = C.post("/auth/site/home01/relay/open-setup", headers=H)
+    if role != "owner":
+        assert r.status_code == 403
+        return
+    assert r.json["box_online"] is True
+    assert C.get("/auth/site/home01/relay", headers=H).json["setup_requested"] is True
+    k = {"X-Relay-Key": "streampass"}
+    assert C.post("/relay/home01/status", json={"state": "sending"}, headers=k).json["open_setup"] is True
+    assert C.post("/relay/home01/status", json={"state": "sending"}, headers=k).json["open_setup"] is False
+    assert C.get("/auth/site/home01/members", headers=H).json["setup_code"]     # the owner sees the box password
 
 
 if __name__ == "__main__":
