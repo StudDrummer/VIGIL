@@ -1796,6 +1796,7 @@ class ThreadedCapture:
         self._ok = False
         self._seq = 0
         self._last_seq = -1
+        self.last_new = __import__("time").time()   # STALL_WATCHDOG_V1: when the camera last sent a new frame
         self._running = True
         self._t = threading.Thread(target=self._loop, daemon=True)
         self._t.start()
@@ -1825,6 +1826,7 @@ class ThreadedCapture:
                 self._frame = fr
                 self._ok = True
                 self._seq += 1
+                self.last_new = _tm.time()
 
     def isOpened(self):
         try:
@@ -1877,6 +1879,39 @@ class ThreadedCapture:
             pass
 
 
+# STALL_WATCHDOG_V1: after a power cut the camera pipeline once ran for 40 minutes, then sat for
+# 10 hours without a crash: no new frames, no heartbeats, the service still "running", so systemd
+# never restarted it and the app showed the camera offline. A hang inside the camera reader or
+# the main loop cannot be undone from inside, so if either stops moving the process exits and
+# systemd starts it fresh (Restart=always, set by jetson_doctor.sh --install).
+_BEAT = {"t": 0.0}
+STALL_LOOP_S = float(os.environ.get("VIGIL_STALL_LOOP_S", "120"))      # main loop stuck
+STALL_FRAMES_S = float(os.environ.get("VIGIL_STALL_FRAMES_S", "90"))   # camera sends nothing new
+
+
+def _stall_reason(now, beat, last_new, is_stream):
+    if beat and now - beat > STALL_LOOP_S:
+        return "the pipeline has not moved for %.0f s" % (now - beat)
+    if is_stream and last_new and now - last_new > STALL_FRAMES_S:
+        return "no new picture from the camera for %.0f s" % (now - last_new)
+    return None
+
+
+def _start_stall_watchdog(src):
+    import threading
+    is_stream = isinstance(src, str) and src.lower().startswith(("rtsp", "http"))
+
+    def _watch():
+        while True:
+            time.sleep(15)
+            cap = _LIVE.get("cap")
+            why = _stall_reason(time.time(), _BEAT["t"], getattr(cap, "last_new", 0), is_stream)
+            if why:
+                print("[STALL] %s: restarting the camera pipeline" % why, flush=True)
+                os._exit(3)
+    threading.Thread(target=_watch, daemon=True, name="stall-watchdog").start()
+
+
 _PF = {"n": 0, "loop": 0.0, "inf": 0.0, "plot": 0.0, "prev": None, "t_inf": 0.0, "t_plot": 0.0}
 
 
@@ -1916,8 +1951,10 @@ def main():
     frame_idx=0; last_hb=0; last_sync=0; last_snapshot=0; last_fps_t=time.time(); fps_frames=0; cur_fps=TARGET_FPS
 
     print("[INIT] VIGIL camera pipeline running. Ctrl+C to stop.")
+    _start_stall_watchdog(src)
     try:
         while True:
+            _BEAT["t"] = time.time()
             person_present = False  # reset every frame
             # PERF_DBG: per-stage timing. Remove once frame rate is fixed.
             _pf_now = time.time()
